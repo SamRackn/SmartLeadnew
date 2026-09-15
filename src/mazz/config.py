@@ -51,6 +51,29 @@ class Settings(BaseSettings):
     smartlead_api_key: str = ""
     smartlead_default_campaign_id: str = ""
     anthropic_api_key: str = ""
+
+    # --- Drafting -------------------------------------------------------
+    # Which composer is in force. "template" is the deterministic Phase 1
+    # composer -- no API key, no network, reproducible. "claude" switches on
+    # the real model call. Deliberately an explicit setting rather than
+    # "use Claude if a key is present": a key in the environment is not
+    # consent to start spending, and the difference between the two composers
+    # is the difference between a demo and a bill.
+    draft_composer: str = "template"
+    # Drafting model. Opus-tier by default because this call writes the thing
+    # the client is buying. Move it only behind a measured eval -- and mind
+    # that a cheaper model may have a HIGHER minimum cacheable prefix, so a
+    # downgrade can cost more than it saves. See
+    # `compose_claude.MIN_CACHEABLE_PREFIX_TOKENS`.
+    draft_model: str = ""
+    # Thinking effort for drafting. Blank means the API default (`high`), i.e.
+    # no quality trade out of the box. This is the first lever to sweep once
+    # there is an eval set. Pinned per route: varying it per request would
+    # invalidate the prompt cache on every call.
+    draft_effort: str = ""
+    # Requests per Batch API submission. The API ceiling is 100,000; this is
+    # sized to the client's volume, not to the limit.
+    draft_batch_size: int = 500
     linkedin_provider: str = "stub"
     # Bright Data account key (also usable for ScrapIn later if that env var
     # name is kept). Presence of this key must NEVER by itself change which

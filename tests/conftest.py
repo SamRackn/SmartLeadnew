@@ -32,6 +32,10 @@ _SAFE_ENV: dict[str, str] = {
     "COMPANY_SCRAPER_PROVIDER": "stub",
     "SMARTLEAD_API_KEY": "",
     "ANTHROPIC_API_KEY": "",
+    # Not a credential, but the same hazard: `DRAFT_COMPOSER=claude` in a
+    # developer's `.env` would route every drafting test through a paid,
+    # non-deterministic model call.
+    "DRAFT_COMPOSER": "template",
 }
 
 

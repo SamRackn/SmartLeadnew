@@ -399,12 +399,26 @@ def _call_to_action(lead_signal: ScoredFact) -> str:
 def default_composer() -> Composer:
     """The composer in force.
 
-    PHASE 2: return `compose_claude` here (or dispatch on whether
-    `settings.anthropic_api_key` is set). Nothing else in the pipeline changes
-    — that is the whole point of the seam.
+    Dispatches on `DRAFT_COMPOSER`, and on nothing else. In particular it does
+    NOT switch to Claude merely because `ANTHROPIC_API_KEY` is set: a key in
+    the environment is not consent to start spending, and a developer with a
+    key in their `.env` should not get a different pipeline from CI.
+
+    `compose_claude` is imported lazily so that `anthropic` stays an optional
+    dependency and the Phase 1 path keeps importing with nothing installed.
+
+    Note this is the SYNCHRONOUS Claude path — one call per lead, list price.
+    It is the right path for the review app's redraft button, where a person is
+    waiting. The pipeline should draft through `draft_batch.run_once`, which
+    sends the same request in bulk at half price. See that module.
     """
 
-    return compose_template
+    if str(setting("DRAFT_COMPOSER", "template")).lower() != "claude":
+        return compose_template
+
+    from mazz.pipeline.compose_claude import compose_claude
+
+    return compose_claude
 
 
 # --------------------------------------------------------------------------

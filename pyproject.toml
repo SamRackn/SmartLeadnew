@@ -17,6 +17,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "httpx"]
+# The Claude drafting path. Optional on purpose: the Phase 1 template composer
+# must keep importing and testing with nothing installed, which is also what
+# keeps the lazy imports in `compose_claude` honest.
+ai = ["anthropic"]
 
 [build-system]
 requires = ["setuptools>=68"]

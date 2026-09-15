@@ -7,6 +7,7 @@ Five tables, per the brief's data model:
   drafts            generated copy + the fact ids it rests on
   suppression_list  never-contact list, read on every ingest
   jobs              table-as-queue (no Redis/Celery at ~25 leads/day)
+  draft_batches     one row per Claude Batch API submission + what it cost
 
 Cascade semantics (delete-by-person, GDPR/CCPA):
   drafts.lead_id and jobs.lead_id are ON DELETE CASCADE, so deleting a lead
@@ -29,6 +30,7 @@ from sqlalchemy import (
     Index,
     Integer,
     MetaData,
+    Numeric,
     String,
     Text,
     func,
@@ -303,6 +305,83 @@ class SuppressionEntry(Base):
 
 
 # --------------------------------------------------------------------------
+# draft_batches
+# --------------------------------------------------------------------------
+
+
+class DraftBatch(Base):
+    """One submission to the Claude Batch API, and what it actually cost.
+
+    Drafting runs in bulk because the Batch API is half price and nothing about
+    a draft is latency-sensitive -- a lead waits for a human to approve it
+    either way. That trade costs us the request/response symmetry the rest of
+    the pipeline enjoys: a batch is submitted now and drains over minutes to
+    (worst case) 24 hours, so the in-flight work needs a row.
+
+    This table is also the ONLY place the pipeline records what AI actually
+    costs. The cost-per-usable-lead figures in the gap analysis are projections
+    from a spreadsheet; `usage` and `cost_usd` here are measured. Keep the rows
+    -- the point is the time series, not the current batch.
+
+    ``job_ids`` is the reconciliation list. Each request's ``custom_id`` encodes
+    its jobs row id, so results map back without a join table; this list is how
+    we notice a job whose result never arrived at all (expired, or dropped).
+    """
+
+    __tablename__ = "draft_batches"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    #: Anthropic's batch id (``msgbatch_...``). Unique: one row per submission,
+    #: and the poller looks batches up by it.
+    batch_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+
+    #: Which model drafted. Recorded per batch, not read from config at report
+    #: time, so a later model switch does not silently rewrite history -- and so
+    #: cost can be compared across a model change.
+    model: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    #: Mirrors the API's ``processing_status``: in_progress / canceling / ended.
+    #: Free text for the same reason ``jobs.kind`` is: the API may add a state.
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="in_progress", index=True
+    )
+
+    job_ids: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]"
+    )
+    request_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    succeeded_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    errored_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+
+    #: Token counts, shaped like `compose_claude.Usage`. The field that matters
+    #: is `cache_read_input_tokens`: if it is ~0 across batches, prompt caching
+    #: is silently broken and we are paying full price for the system prompt on
+    #: every single lead.
+    usage: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    #: Estimated list-price cost of this batch, in USD. Reporting only; nothing
+    #: branches on it.
+    cost_usd: Mapped[float | None] = mapped_column(Numeric(12, 6))
+
+    submitted_at: Mapped[datetime] = _utcnow_column(
+        nullable=False, server_default=func.now()
+    )
+    ended_at: Mapped[datetime | None] = _utcnow_column()
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<DraftBatch {self.batch_id} {self.status} n={self.request_count}>"
+
+
+# --------------------------------------------------------------------------
 # jobs
 # --------------------------------------------------------------------------
 
@@ -367,6 +446,7 @@ class Job(Base):
 __all__ = [
     "Base",
     "Draft",
+    "DraftBatch",
     "Job",
     "JobStatus",
     "Lead",
