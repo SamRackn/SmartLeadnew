@@ -1,0 +1,42 @@
+{
+  "_scenario": "brightdata_company_ok",
+  "_why": "Field names and shapes here match Bright Data's LinkedIn COMPANY dataset (gd_l1vikfnt1wgvvqz95w) sync-scrape response, verified against the live account for the W3 spike. Notably: there is no `jobs`/`postings` field anywhere on this dataset -- confirmed on every real company record pulled for the spike, not assumed. The company is fictitious.",
+  "id": "gridiron-labs",
+  "name": "Gridiron Labs",
+  "about": "Gridiron Labs helps mid-market shippers plan freight without spreadsheets.",
+  "description": "Gridiron Labs | 12,000 followers on LinkedIn. Freight planning for mid-market shippers.",
+  "unformatted_about": "Gridiron Labs helps mid-market shippers plan freight without spreadsheets.",
+  "specialties": "Freight, Logistics SaaS, Route Planning",
+  "founded": 2019,
+  "company_size": "51-200 employees",
+  "employees": 140,
+  "headquarters": "Chicago, Illinois",
+  "website": "https://gridiron-labs.example/",
+  "website_simplified": "gridiron-labs.example",
+  "industries": "Software Development",
+  "followers": 12000,
+  "updates": [
+    {
+      "text": "We just opened a Revenue Operations Manager role -- come help us build the outbound motion.",
+      "title": "Gridiron Labs",
+      "time": "2w",
+      "date": "2026-09-01T12:00:00.000Z",
+      "post_url": "https://www.linkedin.com/posts/gridiron-labs_hiring-3333333333",
+      "post_id": "3333333333",
+      "likes_count": 12,
+      "comments_count": 1
+    },
+    {
+      "text": "Looking back at a product update from earlier this year.",
+      "title": "Gridiron Labs",
+      "time": "8mo",
+      "date": null,
+      "post_url": "https://www.linkedin.com/posts/gridiron-labs_old-4444444444",
+      "post_id": "4444444444",
+      "likes_count": 3,
+      "comments_count": 0
+    }
+  ],
+  "url": "https://www.linkedin.com/company/gridiron-labs/",
+  "timestamp": "2026-09-15T17:04:00.000Z"
+}

@@ -1,0 +1,43 @@
+{
+  "_scenario": "brightdata_person_ok",
+  "_why": "Field names and shapes here match Bright Data's LinkedIn PEOPLE dataset (gd_l1viktl72bvl7bjuj0) sync-scrape response, verified against the live account for the W3 spike. The identity is fictitious -- scrubbed before this went into a tracked file, per the house rule against committing raw PII dumps.",
+  "id": "riley-nakamura",
+  "name": "Riley Nakamura",
+  "first_name": "Riley",
+  "last_name": "Nakamura",
+  "about": "Co-founder and Head of Revenue at Gridiron Labs. Building the outbound motion from zero.",
+  "current_company_name": "Gridiron Labs",
+  "current_company": {
+    "link": "https://www.linkedin.com/company/gridiron-labs?trk=public_profile_topcard-current-company",
+    "name": "Gridiron Labs",
+    "company_id": "gridiron-labs",
+    "location": null
+  },
+  "current_company_company_id": "gridiron-labs",
+  "position": null,
+  "experience": null,
+  "education": null,
+  "followers": 4210,
+  "connections": 500,
+  "linkedin_id": "riley-nakamura",
+  "linkedin_num_id": "778899001122",
+  "activity": [
+    {
+      "interaction": "Riley Nakamura shared this",
+      "link": "https://www.linkedin.com/posts/riley-nakamura_hiring-revops-activity-1111111111",
+      "title": "We are hiring a Revenue Operations Manager to own our GTM data stack end to end.",
+      "img": "https://media.licdn.com/example/1111111111.jpg",
+      "id": "1111111111"
+    },
+    {
+      "interaction": "Riley Nakamura shared this",
+      "link": "https://www.linkedin.com/posts/riley-nakamura_thoughts-on-outbound-activity-2222222222",
+      "title": "Some thoughts on why outbound is finally working for us again.",
+      "img": "https://media.licdn.com/example/2222222222.jpg",
+      "id": "2222222222"
+    }
+  ],
+  "url": "https://www.linkedin.com/in/riley-nakamura/",
+  "input_url": "https://www.linkedin.com/in/riley-nakamura/",
+  "timestamp": "2026-09-15T17:10:00.000Z"
+}

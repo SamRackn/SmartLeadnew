@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     smartlead_default_campaign_id: str = ""
     anthropic_api_key: str = ""
     linkedin_provider: str = "stub"
+    # Bright Data account key (also usable for ScrapIn later if that env var
+    # name is kept). Presence of this key must NEVER by itself change which
+    # adapter `get_linkedin_adapter()` returns -- only `linkedin_provider`
+    # (or an explicit `provider=` argument) does that. See
+    # `mazz.integrations.linkedin.get_linkedin_adapter`.
+    linkedin_api_key: str = ""
 
 
 @lru_cache(maxsize=1)

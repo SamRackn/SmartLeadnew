@@ -1,0 +1,14 @@
+{
+  "_scenario": "brightdata_person_malformed",
+  "_why": "A vendor response that answered but cannot be parsed -- activity should be a list of objects, not a list of strings. Must raise ProviderBadResponse, not silently drop the field.",
+  "name": "Riley Nakamura",
+  "current_company_name": "Gridiron Labs",
+  "about": "Co-founder and Head of Revenue at Gridiron Labs.",
+  "position": null,
+  "experience": null,
+  "activity": [
+    "this should be an object, not a bare string"
+  ],
+  "url": "https://www.linkedin.com/in/riley-nakamura/",
+  "timestamp": "2026-09-15T17:10:00.000Z"
+}

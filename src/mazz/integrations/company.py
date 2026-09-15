@@ -37,6 +37,12 @@ try:
 except ImportError:  # pragma: no cover - httpx is a project dependency in practice
     httpx = None  # type: ignore[assignment]
 
+from mazz.integrations._brightdata import (
+    LINKEDIN_COMPANY_DATASET_ID,
+    BillingMeter,
+    parse_relative_time,
+    scrape_one,
+)
 from mazz.integrations._html import (
     extract_dated_items,
     extract_job_items,
@@ -51,6 +57,7 @@ from mazz.integrations.base import (
     FactKind,
     FetchResult,
     InstrumentedProvider,
+    ProviderAuthError,
     ProviderBadResponse,
     ProviderBlocked,
     ProviderError,
@@ -74,6 +81,8 @@ __all__ = [
     "CompanyAdapter",
     "StubCompanyAdapter",
     "LiveCompanyAdapter",
+    "BrightDataCompanyAdapter",
+    "NoLinkedInCompanyURL",
     "normalize_domain",
     "pages_payload_to_facts",
     "get_company_adapter",
@@ -578,18 +587,210 @@ class LiveCompanyAdapter(CompanyAdapter):
         return pages_payload_to_facts(provider=self.provider, domain=domain, payload=payload)
 
 
+class NoLinkedInCompanyURL(ProviderBadResponse):
+    """No LinkedIn company page URL is known for this domain.
+
+    `CompanyAdapter.fetch_company` takes a bare DOMAIN -- that is the
+    pipeline's cache key -- but Bright Data's company dataset needs an actual
+    `linkedin.com/company/...` URL, and the brief rules out finding that by
+    SEARCHING LinkedIn: this adapter is exactly as URL-only as the LinkedIn
+    people adapter, just with a domain instead of a lead-supplied profile link
+    on the input side. The resolver passed at construction is expected to
+    already know the mapping (discovered once from a link the company itself
+    publishes on its own homepage, or supplied directly) -- this exception
+    means the resolver came up empty, not that Bright Data failed.
+    """
+
+
+LINKEDIN_COMPANY_PROVIDER = "company-brightdata"
+
+
+class BrightDataCompanyAdapter(CompanyAdapter):
+    """Bright Data arm of the W3 vendor spike (`docs/GAP-ANALYSIS.md` section 5).
+
+    Calls Bright Data's LinkedIn COMPANY dataset (`gd_l1vikfnt1wgvvqz95w`) via
+    the same synchronous scrape endpoint the LinkedIn people adapter uses.
+
+    This dataset is a company PROFILE, not a jobs board: its live schema (see
+    `_payload_to_facts`) has `about`/`description`/`specialties`/`founded`/
+    `company_size` and a list of the company's own LinkedIn posts (`updates`)
+    -- there is no `jobs`/`postings` field anywhere in it. That is measured
+    fact, not a limitation this adapter invents: it means this arm can never
+    itself produce a `JOB_POSTING` fact, and the 6 own-engine failures the W3
+    spike is trying to rescue are specifically JOB_POSTING/company-signal
+    failures. The best this dataset can contribute is a fresh self-published
+    LinkedIn post scored as `BLOG_POST` (see the `fact_kind` override below) --
+    a MEDIUM signal, never the STRONG one that is actually missing.
+
+    Nothing Bright-Data-shaped crosses `fetch_company`: `_payload_to_facts`
+    builds the same `{"pages": [...]}` shape `pages_payload_to_facts` already
+    normalizes for the stub and `LiveCompanyAdapter`, so a company fact from
+    any of the three sources scores identically downstream.
+    """
+
+    provider = LINKEDIN_COMPANY_PROVIDER
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        http_client: Any = None,
+        linkedin_urls: Mapping[str, str] | None = None,
+        url_resolver: Any = None,
+        retry_policy: RetryPolicy | None = None,
+        sleep=None,
+        request_timeout: float = 100.0,
+    ) -> None:
+        super().__init__(retry_policy=retry_policy, sleep=sleep)
+        self._api_key = api_key if api_key is not None else str(setting("LINKEDIN_API_KEY", ""))
+        if not self._api_key:
+            raise ProviderAuthError(
+                "LINKEDIN_API_KEY is required for BrightDataCompanyAdapter",
+                provider=self.provider,
+            )
+        if http_client is None:
+            if httpx is None:  # pragma: no cover - exercised only without the dep installed
+                raise ImportError(
+                    "BrightDataCompanyAdapter needs httpx (or an injected http_client); "
+                    "it is not installed in this environment"
+                )
+            http_client = httpx.Client(timeout=request_timeout)
+            self._owns_client = True
+        else:
+            self._owns_client = False
+        self._client = http_client
+        self._timeout = request_timeout
+        # domain -> linkedin.com/company/... URL. Never populated by search --
+        # supplied directly, or via a resolver callback the caller controls.
+        self._linkedin_urls: dict[str, str] = dict(linkedin_urls or {})
+        self._url_resolver = url_resolver
+        self.billing = BillingMeter()
+
+    def close(self) -> None:
+        """Release the owned HTTP client. No-op for an injected one."""
+        if self._owns_client:
+            self._client.close()
+
+    def _resolve_linkedin_url(self, domain: str) -> str:
+        url = self._linkedin_urls.get(domain)
+        if not url and self._url_resolver is not None:
+            url = self._url_resolver(domain)
+        if not url:
+            raise NoLinkedInCompanyURL(
+                f"no LinkedIn company URL configured for domain {domain!r}; this "
+                "adapter does not search LinkedIn to find one",
+                provider=self.provider,
+                target=domain,
+            )
+        return url
+
+    def _fetch_payload(self, domain: str) -> Mapping[str, Any] | None:
+        linkedin_url = self._resolve_linkedin_url(domain)
+        record = scrape_one(
+            LINKEDIN_COMPANY_DATASET_ID,
+            linkedin_url,
+            api_key=self._api_key,
+            http_client=self._client,
+            provider=self.provider,
+            timeout=self._timeout,
+        )
+        self.billing.record(billed=record is not None)
+        if record is None:
+            return None
+        return {
+            **record,
+            "__source__": f"brightdata:{LINKEDIN_COMPANY_DATASET_ID}:{linkedin_url}",
+            "__linkedin_url__": linkedin_url,
+        }
+
+    def _payload_to_facts(self, domain: str, payload: Mapping[str, Any]) -> list[Fact]:
+        retrieved_at_raw = payload.get("timestamp")
+        linkedin_url = payload.get("__linkedin_url__") or f"https://www.linkedin.com/company/{domain}/"
+
+        pages: list[dict[str, Any]] = []
+
+        profile_text = payload.get("about") or payload.get("description")
+        if profile_text and str(profile_text).strip():
+            pages.append(
+                {
+                    "kind": "homepage",
+                    "url": linkedin_url,
+                    "items": [
+                        {
+                            "key": "linkedin_company_profile",
+                            "url": linkedin_url,
+                            "text": str(profile_text).strip(),
+                            "published_at": None,
+                        }
+                    ],
+                }
+            )
+
+        updates = payload.get("updates")
+        if updates is not None and not isinstance(updates, list):
+            raise ProviderBadResponse(
+                "updates must be a list", provider=self.provider, target=domain
+            )
+        update_items: list[dict[str, Any]] = []
+        for post in updates or []:
+            if not isinstance(post, Mapping):
+                raise ProviderBadResponse(
+                    "each update must be an object", provider=self.provider, target=domain
+                )
+            text = post.get("text") or post.get("title")
+            if not text:
+                continue
+            # Bright Data's company `updates` carry BOTH an absolute
+            # `date` (verified real ISO timestamp, not a guess) and a
+            # relative `time` label ("5mo", "3h"). Prefer the absolute one;
+            # `parse_relative_time` is a fallback for the rare item that is
+            # missing `date`, not the primary path.
+            published_at = post.get("date") or parse_relative_time(
+                post.get("time"), now=parse_timestamp(retrieved_at_raw)
+            )
+            post_url = post.get("post_url") or post.get("link") or linkedin_url
+            key = post.get("post_url") or post.get("link") or str(text)[:60]
+            update_items.append(
+                {
+                    "key": key,
+                    "url": post_url,
+                    "text": str(text).strip(),
+                    "published_at": published_at,
+                    # A LinkedIn company post is self-published dated content,
+                    # the brief's BLOG/CHANGELOG/PRESS tier -- not a job req.
+                    # This dataset carries no jobs field at all, so it can
+                    # never itself emit JOB_POSTING; see the class docstring.
+                    "fact_kind": FactKind.BLOG_POST.value,
+                }
+            )
+        if update_items:
+            pages.append({"kind": "blog", "url": linkedin_url, "items": update_items})
+
+        page_payload = {"retrieved_at": retrieved_at_raw, "pages": pages}
+        return pages_payload_to_facts(provider=self.provider, domain=domain, payload=page_payload)
+
+
 def get_company_adapter(
     *,
     provider: str | None = None,
     fixtures_dir: Path | str | None = None,
     retry_policy: RetryPolicy | None = None,
+    linkedin_urls: Mapping[str, str] | None = None,
 ) -> CompanyAdapter:
-    """Pick an adapter from `COMPANY_SCRAPER_PROVIDER`. Phase 1 default: stub."""
+    """Pick an adapter from `COMPANY_SCRAPER_PROVIDER`. Phase 1 default: stub.
+
+    Like `get_linkedin_adapter`, the paid path is opt-in by provider NAME
+    only -- `LINKEDIN_API_KEY` being set never silently changes this default.
+    `linkedin_urls` (domain -> `linkedin.com/company/...`) is only consulted
+    for the `brightdata` provider; every other provider ignores it.
+    """
     name = str(provider or setting("COMPANY_SCRAPER_PROVIDER", "stub")).strip().lower()
     if name in ("stub", "", "fixture", "fixtures"):
         return StubCompanyAdapter(fixtures_dir=fixtures_dir, retry_policy=retry_policy)
     if name in ("live", "http", "own", "own_engine"):
         return LiveCompanyAdapter(retry_policy=retry_policy)
+    if name in ("brightdata", "bright_data", "bright-data"):
+        return BrightDataCompanyAdapter(retry_policy=retry_policy, linkedin_urls=linkedin_urls)
     raise NotImplementedError(
         f"company scraper provider {name!r} is not implemented. Subclass "
         "CompanyAdapter and implement _fetch_payload/_payload_to_facts."

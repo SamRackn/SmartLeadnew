@@ -1,0 +1,11 @@
+{
+  "_scenario": "brightdata_company_malformed",
+  "_why": "A vendor response that answered but cannot be parsed -- updates should be a list of objects, not a list of strings. Must raise ProviderBadResponse, not silently drop the field.",
+  "name": "Gridiron Labs",
+  "about": "Gridiron Labs helps mid-market shippers plan freight without spreadsheets.",
+  "updates": [
+    "this should be an object, not a bare string"
+  ],
+  "url": "https://www.linkedin.com/company/gridiron-labs/",
+  "timestamp": "2026-09-15T17:04:00.000Z"
+}

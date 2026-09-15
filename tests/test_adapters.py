@@ -474,12 +474,21 @@ def test_factories_default_to_stubs_with_no_credentials(monkeypatch):
     assert isinstance(get_company_adapter(fixtures_dir=FIXTURES), StubCompanyAdapter)
 
 
-def test_undecided_vendors_fail_loudly_rather_than_guessing():
-    for vendor in ("brightdata", "scrapin"):
-        with pytest.raises(NotImplementedError, match="open question|not implemented"):
-            get_linkedin_adapter(provider=vendor)
+def test_undecided_vendors_fail_loudly_rather_than_guessing(monkeypatch):
+    # ScrapIn is still an open question in the brief (docs/GAP-ANALYSIS.md
+    # section 5) -- it must keep failing loudly rather than silently falling
+    # back to a guess.
+    with pytest.raises(NotImplementedError, match="open question|not implemented"):
+        get_linkedin_adapter(provider="scrapin")
     with pytest.raises(ValueError):
         get_linkedin_adapter(provider="mystery-vendor")
+
+    # Bright Data IS implemented now, but it is a paid vendor: asking for it
+    # with no credentials configured must fail loudly too, not silently
+    # degrade to a stub or a guess.
+    monkeypatch.setenv("LINKEDIN_API_KEY", "")
+    with pytest.raises(ProviderAuthError):
+        get_linkedin_adapter(provider="brightdata")
 
 
 # =====================================================================
