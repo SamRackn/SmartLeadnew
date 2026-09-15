@@ -1,0 +1,16 @@
+{
+  "_scenario": "strong_signal",
+  "_why": "Lead 2 of 2 at northwind-logistics.com. Same employer as dana-whitfield.",
+  "profile_url": "https://www.linkedin.com/in/marcus-oyelaran",
+  "retrieved_at": "2026-09-14T09:02:00+00:00",
+  "full_name": "Marcus Oyelaran",
+  "headline": "Director of Sales Enablement at Northwind Logistics",
+  "location": "Chicago, Illinois, United States",
+  "current_position": {
+    "title": "Director of Sales Enablement",
+    "company": "Northwind Logistics",
+    "started_on": "2025-01"
+  },
+  "about": "Building the playbook for Northwind's first dedicated SDR team.",
+  "recent_activity": []
+}

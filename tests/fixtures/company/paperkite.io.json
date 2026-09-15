@@ -1,0 +1,33 @@
+{
+  "_scenario": "weak_signal_only",
+  "_why": "Funding news and nothing else. The brief calls funding news nearly worthless because every competitor's tool already leads with it. Nothing here should clear the scoring threshold: this lead must end up no_angle, and must NOT be force-drafted.",
+  "domain": "paperkite.io",
+  "retrieved_at": "2026-09-14T09:04:00+00:00",
+  "pages": [
+    {
+      "kind": "homepage",
+      "url": "https://paperkite.io/",
+      "title": "PaperKite - document workflows, simplified",
+      "items": [
+        {
+          "key": "hero-positioning",
+          "text": "PaperKite makes document workflows simple for modern teams.",
+          "published_at": null
+        }
+      ]
+    },
+    {
+      "kind": "press",
+      "url": "https://paperkite.io/press",
+      "items": [
+        {
+          "key": "press-2026-08-11-series-a",
+          "url": "https://paperkite.io/press/series-a",
+          "fact_kind": "funding",
+          "text": "PaperKite raises $12M Series A led by Fernbrook Ventures to accelerate product development and grow the team.",
+          "published_at": "2026-08-11"
+        }
+      ]
+    }
+  ]
+}

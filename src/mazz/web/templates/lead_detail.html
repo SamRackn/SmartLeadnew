@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}{{ lead.full_name }} — MazzSmartLead Review{% endblock %}
+{% block content %}
+<p><a href="/leads">← back to leads</a></p>
+
+<h1>{{ lead.full_name }} <span class="status-tag status-{{ lead.status.value }}">{{ lead.status.value }}</span></h1>
+
+<section class="lead-identity">
+  <dl>
+    <dt>Company</dt><dd>{{ lead.company_name or "—" }} ({{ lead.company_domain or "no domain" }})</dd>
+    <dt>Title</dt><dd>{{ lead.job_title or "—" }}</dd>
+    <dt>Email</dt><dd>{{ lead.email }}</dd>
+    <dt>Location</dt><dd>{{ lead.location or "—" }}</dd>
+    <dt>LinkedIn</dt><dd>{% if lead.linkedin_url %}<a href="{{ lead.linkedin_url }}" target="_blank" rel="noopener">{{ lead.linkedin_url }}</a>{% else %}—{% endif %}</dd>
+    <dt>Notes</dt><dd>{{ lead.notes or "—" }}</dd>
+  </dl>
+</section>
+
+{% include "partials/draft_panel.html" %}
+
+<section class="scoring-view">
+  <h2>All scored signals for this company</h2>
+  <p class="rationale">{{ score_result.rationale }}</p>
+  {% if not scored %}
+    <p class="empty">No cached research for this company yet.</p>
+  {% else %}
+  <table class="scoring-table">
+    <thead>
+      <tr><th>Tier</th><th>Score</th><th>Kind</th><th>Snippet</th><th>Source</th><th>Reason</th></tr>
+    </thead>
+    <tbody>
+      {% for s in scored %}
+      <tr class="tier-{{ s.tier.value }}">
+        <td>{{ s.tier.value }}</td>
+        <td>{{ s.score }}</td>
+        <td>{{ s.fact.kind }}</td>
+        <td>{{ s.fact.content[:160] }}</td>
+        <td>{% if s.fact.source_url %}<a href="{{ s.fact.source_url }}" target="_blank" rel="noopener">source</a>{% else %}—{% endif %}</td>
+        <td>{{ s.reason }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endblock %}

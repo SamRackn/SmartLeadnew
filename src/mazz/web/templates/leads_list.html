@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Leads — MazzSmartLead Review{% endblock %}
+{% block content %}
+<h1>Leads</h1>
+
+<nav class="status-filter">
+  <a href="/leads" class="{% if active_status is none %}active{% endif %}">all</a>
+  {% for s in all_statuses %}
+    <a href="/leads?status={{ s.value }}" class="{% if active_status == s %}active{% endif %} status-tag status-{{ s.value }}">{{ s.value }}</a>
+  {% endfor %}
+</nav>
+
+{% if not leads %}
+  <p class="empty">No leads match this filter.</p>
+{% else %}
+<table class="lead-table">
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Company</th>
+      <th>Status</th>
+      <th>Verification</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for lead in leads %}
+    {% set draft = drafts_by_lead.get(lead.id) %}
+    <tr class="row-status-{{ lead.status.value }}">
+      <td>{{ lead.full_name }}</td>
+      <td>{{ lead.company_name or "—" }}</td>
+      <td><span class="status-tag status-{{ lead.status.value }}">{{ lead.status.value }}</span></td>
+      <td>
+        {% if draft %}
+          <span class="verification-tag verification-{{ draft.verification_status.value }}">{{ draft.verification_status.value }}</span>
+        {% else %}
+          <span class="muted">no draft</span>
+        {% endif %}
+      </td>
+      <td><a href="/leads/{{ lead.id }}">review →</a></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

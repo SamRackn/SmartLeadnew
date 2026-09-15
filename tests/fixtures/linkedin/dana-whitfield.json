@@ -1,0 +1,23 @@
+{
+  "_scenario": "strong_signal",
+  "_why": "Lead 1 of 2 at northwind-logistics.com. Paired with marcus-oyelaran to prove the domain-keyed cache: two leads, one company fixture, one company-adapter call.",
+  "profile_url": "https://www.linkedin.com/in/dana-whitfield",
+  "retrieved_at": "2026-09-14T09:01:00+00:00",
+  "full_name": "Dana Whitfield",
+  "headline": "VP Revenue Operations at Northwind Logistics",
+  "location": "Chicago, Illinois, United States",
+  "current_position": {
+    "title": "VP Revenue Operations",
+    "company": "Northwind Logistics",
+    "started_on": "2024-03"
+  },
+  "about": "Ten years building go-to-market systems in freight and supply chain. Currently standing up Northwind's first outbound org.",
+  "recent_activity": [
+    {
+      "key": "post-2026-09-04-hiring-revops",
+      "url": "https://www.linkedin.com/posts/dana-whitfield-hiring-revops",
+      "posted_at": "2026-09-04",
+      "text": "We are hiring a Revenue Operations Manager. If you have ever untangled lead routing that lived in six spreadsheets, we should talk."
+    }
+  ]
+}

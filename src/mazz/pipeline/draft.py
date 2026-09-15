@@ -1,0 +1,532 @@
+"""Drafting: turn qualifying signals into one grounded email.
+
+Pipeline step 4. Two rules govern everything here.
+
+**1. Grounded only in retrieved research plus the lead's `notes`.** Not "mostly
+grounded". The failure mode this product exists to fix is plausible-sounding
+embellishment -- copy that reads beautifully and asserts something nobody ever
+scraped. So the Phase 1 composer quotes fact content VERBATIM and writes nothing
+around it but fixed scaffolding.
+
+**2. No draft at all when there is no angle.** `score` decides that; this module
+honours it by returning a `DraftOutcome` with no draft and setting `no_angle`.
+It never falls back to a generic opener.
+
+--------------------------------------------------------------------------
+THE PHASE 2 SEAM  (read this before swapping in the Claude call)
+--------------------------------------------------------------------------
+Phase 1 must run with no API key, so the composer is a deterministic template.
+Phase 2 replaces it with a Claude structured-output call. The seam is:
+
+    DraftRequest   ->  Composer  ->  DraftContent
+    (what the                        (subject, body_text, signals_used)
+     model may see)
+
+* `DraftRequest` is the ONLY input a composer gets. It carries the lead fields,
+  the qualifying signals and the notes -- and nothing else. That is the grounding
+  rule expressed as a type: a composer cannot cite what it was never handed.
+* `DraftContent` is the exact structured shape the Claude call will return. It
+  is a pydantic model precisely so it can be handed to the API as the output
+  schema unchanged. Phase 2 adds no field and removes none.
+* `compose_template` is the Phase 1 implementation. Phase 2 adds
+  `compose_claude(request) -> DraftContent` next to it and passes it as the
+  `composer=` argument (or changes `default_composer()`). Nothing else moves.
+
+What is deliberately OUTSIDE the composer, and must stay outside:
+
+* **The CAN-SPAM footer.** `render_body()` appends the physical address and the
+  unsubscribe link after the composer returns. A language model that is having a
+  bad day can omit an instruction; it cannot omit a string concatenation. The
+  legally-required part of the email is therefore not in the model's hands, and
+  a missing `SENDER_POSTAL_ADDRESS` raises `MissingSenderAddress` rather than
+  quietly shipping a footerless draft.
+* **Verification.** `verify` re-derives grounding from the cache; it never takes
+  the composer's word for what it cited. A model asserting "signals_used: [x]"
+  is a claim, not evidence.
+* **The no-angle decision.** Made by `score` before a composer is ever called,
+  so there is no path where a model is asked to write something from nothing.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import logging
+import re
+from dataclasses import dataclass
+from datetime import datetime
+from typing import TYPE_CHECKING, Callable
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from mazz.config import get_settings
+from mazz.integrations.base import setting
+from mazz.models import Draft, Lead, LeadStatus, VerificationStatus
+from mazz.pipeline.score import (
+    DEFAULT_SCORING,
+    ScoredFact,
+    ScoreResult,
+    ScoringConfig,
+    SignalTier,
+    score_lead,
+)
+from mazz.schemas import Fact, FactKind
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from sqlalchemy.orm import Session
+
+    from mazz.pipeline.queue import JobContext
+
+log = logging.getLogger(__name__)
+
+__all__ = [
+    "DraftContent",
+    "DraftRequest",
+    "DraftOutcome",
+    "Composer",
+    "MissingSenderAddress",
+    "FOOTER_SEPARATOR",
+    "MAX_QUOTE_CHARS",
+    "MAX_SIGNALS",
+    "compose_template",
+    "default_composer",
+    "render_body",
+    "render_footer",
+    "split_body",
+    "unsubscribe_token",
+    "unsubscribe_url",
+    "build_request",
+    "draft_for_lead",
+    "persist_draft",
+    "handle_draft",
+]
+
+
+# --------------------------------------------------------------------------
+# Compliance footer
+# --------------------------------------------------------------------------
+
+#: Standard signature delimiter. The verifier splits on the LAST occurrence, so
+#: the footer is separable from the message even if the copy contains a dash.
+FOOTER_SEPARATOR = "\n\n-- \n"
+
+DEFAULT_UNSUBSCRIBE_BASE = "https://app.mazzsmartlead.example"
+
+
+class MissingSenderAddress(RuntimeError):
+    """`SENDER_POSTAL_ADDRESS` is unset, so no compliant email can be rendered.
+
+    Loud on purpose. CAN-SPAM requires a valid physical postal address in every
+    commercial email; a draft without one is not a slightly worse draft, it is
+    an email that must not be sent. Raising here stops the pipeline at the point
+    a human can fix it (one env var) instead of producing a queue of drafts that
+    are individually approvable and collectively a violation.
+    """
+
+
+def unsubscribe_token(lead: Lead | str) -> str:
+    """Deterministic, unguessable one-click unsubscribe token for a lead.
+
+    HMAC of the lead's email under `SESSION_SECRET`. Deterministic so the same
+    lead always gets the same link (re-drafting must not orphan a link already
+    in someone's inbox) and so Phase 1 output is reproducible; keyed so the
+    token cannot be derived from the address by a third party.
+
+    The route that consumes it belongs to the review app, not to this module.
+    """
+
+    email = lead if isinstance(lead, str) else (lead.email or "")
+    secret = (get_settings().session_secret or "").encode("utf-8")
+    return hmac.new(secret, email.strip().lower().encode("utf-8"), hashlib.sha256).hexdigest()[:32]
+
+
+def unsubscribe_url(lead: Lead | str) -> str:
+    base = str(setting("APP_BASE_URL", DEFAULT_UNSUBSCRIBE_BASE)).rstrip("/")
+    return f"{base}/u/{unsubscribe_token(lead)}"
+
+
+def render_footer(lead: Lead) -> str:
+    """The CAN-SPAM block: physical mailing address + one-click unsubscribe.
+
+    Raises `MissingSenderAddress` when the address is not configured.
+    """
+
+    address = (get_settings().sender_postal_address or "").strip()
+    if not address:
+        raise MissingSenderAddress(
+            "SENDER_POSTAL_ADDRESS is not set. Every outbound email needs a "
+            "physical mailing address (CAN-SPAM); refusing to render a draft "
+            "without one. Set it in .env — see .env.example."
+        )
+    address = " ".join(address.split())
+    return f"{address}\nUnsubscribe (one click): {unsubscribe_url(lead)}"
+
+
+def render_body(message: str, lead: Lead) -> str:
+    """Attach the compliance footer to composed message text.
+
+    Called AFTER the composer, never by it. See the Phase 2 seam note at the top
+    of this module: the footer is the one part of the email that no model gets a
+    chance to forget.
+    """
+
+    return f"{message.rstrip()}{FOOTER_SEPARATOR}{render_footer(lead)}"
+
+
+def split_body(body: str) -> tuple[str, str | None]:
+    """Split a rendered body back into (message, footer). Footer is None if absent."""
+
+    if FOOTER_SEPARATOR not in body:
+        return body, None
+    message, _, footer = body.rpartition(FOOTER_SEPARATOR)
+    return message, footer
+
+
+# --------------------------------------------------------------------------
+# The structured contract
+# --------------------------------------------------------------------------
+
+
+class DraftContent(BaseModel):
+    """EXACTLY what a composer returns — Phase 1 template or Phase 2 Claude.
+
+    This is the structured-output schema. `body_text` is the message WITHOUT the
+    compliance footer, because the footer is appended outside the composer by
+    `render_body`; a model is never asked to reproduce a legal string verbatim.
+
+    `signals_used` is the composer's own account of which facts the copy rests
+    on. The verifier treats it as a claim to be checked, not as proof.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    subject: str = Field(description="Subject line. Grounded, no invented specifics.")
+    body_text: str = Field(description="Message body WITHOUT the compliance footer.")
+    signals_used: list[str] = Field(
+        default_factory=list,
+        description="Fact ids the copy rests on. Must be ids from the request.",
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class DraftRequest:
+    """Everything a composer is allowed to see, and nothing else.
+
+    The grounding rule as a type. Note what is absent: the full fact list (only
+    QUALIFYING signals are passed), any web access, any other lead. A composer
+    cannot invent a fact it was never given, and cannot cite a fact that did not
+    clear the threshold.
+    """
+
+    lead_id: int | None
+    first_name: str
+    full_name: str
+    company_name: str | None
+    job_title: str | None
+    notes: str | None
+    signals: tuple[ScoredFact, ...]
+
+    def fact_ids(self) -> list[str]:
+        return [s.fact.id for s in self.signals]
+
+
+Composer = Callable[[DraftRequest], DraftContent]
+
+
+@dataclass(frozen=True, slots=True)
+class DraftOutcome:
+    """Result of running the drafting stage for one lead.
+
+    ``content is None`` means no angle. That is a successful, meaningful result
+    -- not an error and not a retry -- and it maps to `no_angle`.
+    """
+
+    lead_status: LeadStatus
+    score_result: ScoreResult
+    content: DraftContent | None = None
+    body: str | None = None
+    reason: str = ""
+
+    @property
+    def drafted(self) -> bool:
+        return self.content is not None
+
+
+# --------------------------------------------------------------------------
+# Phase 1 composer
+# --------------------------------------------------------------------------
+
+#: How many signals the copy may lean on. Three quotes is already a long cold
+#: email; the rest stay visible in the review UI as supporting context.
+MAX_SIGNALS = 3
+
+#: Quotes are truncated at a word boundary. Truncation keeps every token
+#: verbatim, so a shortened quote stays traceable.
+MAX_QUOTE_CHARS = 180
+
+_DATE_PREFIX = re.compile(r"^\[[^\]]*\]\s*")
+_WS = re.compile(r"\s+")
+
+
+def _clean(text: str) -> str:
+    return _WS.sub(" ", _DATE_PREFIX.sub("", text or "")).strip()
+
+
+def _quote(text: str, limit: int = MAX_QUOTE_CHARS) -> str:
+    """Verbatim snippet, truncated at a word boundary. Never paraphrased."""
+
+    cleaned = _clean(text)
+    if len(cleaned) <= limit:
+        return cleaned
+    cut = cleaned[:limit].rsplit(" ", 1)[0].rstrip(" ,;:-—")
+    return f"{cut}..."
+
+
+def _role_phrase(fact: Fact) -> str:
+    """The role title out of a job-posting fact, verbatim.
+
+    Company-adapter reqs read "Revenue Operations Manager - Own the ...", so the
+    text before the first dash is the title. If the shape is unfamiliar we fall
+    back to the first few words rather than guessing a title: a wrong job title
+    in the subject line is exactly the embellishment this product is against.
+    """
+
+    cleaned = _clean(fact.content)
+    for sep in (" - ", " — ", " – ", ": "):
+        if sep in cleaned:
+            head = cleaned.split(sep, 1)[0].strip()
+            if 2 <= len(head) <= 80:
+                return head
+    words = cleaned.split()
+    return " ".join(words[:6])
+
+
+def _first_name(full_name: str | None) -> str:
+    parts = (full_name or "").strip().split()
+    return parts[0] if parts else "there"
+
+
+def compose_template(request: DraftRequest) -> DraftContent:
+    """PHASE 1 COMPOSER. Deterministic template copy, no API key, no network.
+
+    Emits the same `DraftContent` shape the Claude call returns in Phase 2, so
+    every consumer downstream (persistence, verification, the review UI) is
+    already written against the final contract.
+
+    Every sentence is either (a) fixed scaffolding drawn from a small fixed
+    vocabulary, or (b) a verbatim quote from a qualifying fact, or (c) the
+    lead's own notes. There is no third category, which is why the output
+    verifies.
+    """
+
+    signals = request.signals[:MAX_SIGNALS]
+    if not signals:
+        raise ValueError(
+            "compose_template called with no signals; the no-angle decision "
+            "belongs to score, and a draft must never be forced from nothing"
+        )
+
+    lead_in = signals[0]
+    company = (request.company_name or "").strip()
+    used: list[str] = [lead_in.fact.id]
+
+    # --- subject ------------------------------------------------------
+    if lead_in.fact.kind == FactKind.JOB_POSTING.value:
+        role = _role_phrase(lead_in.fact)
+        subject = f"{company} — {role}".strip(" —") if company else role
+        opener = f"I saw your {role} opening:"
+    else:
+        subject = f"{company} — a quick note on your latest update".strip(" —")
+        if not company:
+            subject = "A quick note on your latest update"
+        opener = "I saw your latest update:"
+
+    # --- body ---------------------------------------------------------
+    lines: list[str] = [f"Hi {request.first_name},", ""]
+    lines.append(f'{opener} "{_quote(lead_in.fact.content)}"')
+
+    supporting = [s for s in signals[1:]]
+    if supporting:
+        lines.append("")
+        lines.append("Also on my list from your site:")
+        for s in supporting:
+            lines.append(f'- "{_quote(s.fact.content)}"')
+            used.append(s.fact.id)
+
+    notes = (request.notes or "").strip()
+    if notes:
+        lines.append("")
+        lines.append(f"From my notes: {_clean(notes)}")
+
+    lines.append("")
+    lines.append(_call_to_action(lead_in))
+    lines.append("")
+    lines.append("Worth a reply either way, and I will leave it here if not.")
+
+    return DraftContent(
+        subject=subject,
+        body_text="\n".join(lines),
+        signals_used=used,
+    )
+
+
+#: Fixed closing lines. Two properties are deliberate and must survive editing:
+#:
+#: 1. They make no claim about the recipient's company — they describe what WE
+#:    want. Anything asserting something about THEM would have to be grounded,
+#:    and scaffolding cannot be grounded.
+#: 2. They contain no digits. `verify` holds every digit in a draft to evidence
+#:    with no allow-list escape, because numbers are where hallucinated outbound
+#:    gets legally interesting. "10 minutes" would have had to be an exception,
+#:    and an exception in a fail-closed control is a hole. "A short call" costs
+#:    us nothing and keeps the rule absolute.
+_CTA_BY_TIER = {
+    SignalTier.STRONG: (
+        "If that is live for you right now, I can show you what we do for teams "
+        "in the same spot — a short call, no deck."
+    ),
+    SignalTier.MEDIUM: (
+        "If that is a current priority, I can show you what we do for teams in "
+        "the same spot — a short call, no deck."
+    ),
+}
+
+
+def _call_to_action(lead_signal: ScoredFact) -> str:
+    return _CTA_BY_TIER.get(lead_signal.tier, _CTA_BY_TIER[SignalTier.MEDIUM])
+
+
+def default_composer() -> Composer:
+    """The composer in force.
+
+    PHASE 2: return `compose_claude` here (or dispatch on whether
+    `settings.anthropic_api_key` is set). Nothing else in the pipeline changes
+    — that is the whole point of the seam.
+    """
+
+    return compose_template
+
+
+# --------------------------------------------------------------------------
+# Running the stage
+# --------------------------------------------------------------------------
+
+
+def build_request(lead: Lead, result: ScoreResult) -> DraftRequest:
+    """Assemble the composer input from a lead and its scoring verdict.
+
+    Only `result.qualifying` crosses over. Weak facts stay in the review UI as
+    context and stay out of the copy.
+    """
+
+    return DraftRequest(
+        lead_id=lead.id,
+        first_name=_first_name(lead.full_name),
+        full_name=(lead.full_name or "").strip(),
+        company_name=lead.company_name,
+        job_title=lead.job_title,
+        notes=lead.notes,
+        signals=tuple(result.qualifying),
+    )
+
+
+def draft_for_lead(
+    session: "Session",
+    lead: Lead,
+    *,
+    now: datetime | None = None,
+    config: ScoringConfig = DEFAULT_SCORING,
+    composer: Composer | None = None,
+    score_result: ScoreResult | None = None,
+) -> DraftOutcome:
+    """Score, then draft — or decline to draft. Writes nothing to the database.
+
+    Returns a `DraftOutcome`. When there is no angle, `content` is None and the
+    status is `no_angle`: the caller must NOT write a draft row.
+    """
+
+    result = score_result or score_lead(session, lead, now=now, config=config)
+
+    if not result.has_angle:
+        log.info("lead %s: declining to draft — %s", lead.id, result.rationale)
+        return DraftOutcome(
+            lead_status=LeadStatus.NO_ANGLE,
+            score_result=result,
+            reason=result.rationale,
+        )
+
+    compose = composer or default_composer()
+    content = compose(build_request(lead, result))
+
+    # A composer may only cite what it was given. In Phase 1 that is structurally
+    # true; in Phase 2 it is a model's promise, so it is checked here as well as
+    # in `verify` -- an id the request never contained means the composer went
+    # somewhere it should not have, and that is a bug, not a soft warning.
+    offered = set(result.ids())
+    stray = [fid for fid in content.signals_used if fid not in offered]
+    if stray:
+        raise ValueError(
+            f"composer cited fact ids that were not offered to it: {stray}. "
+            "A draft may only rest on signals that cleared scoring."
+        )
+
+    body = render_body(content.body_text, lead)
+    # Not READY. A freshly composed draft is unverified, and only `verify` can
+    # promote a lead to `ready` — otherwise "ready" would mean "we wrote
+    # something", which is the incumbent's definition, not ours.
+    return DraftOutcome(
+        lead_status=LeadStatus.RESEARCHING,
+        score_result=result,
+        content=content,
+        body=body,
+        reason=result.rationale,
+    )
+
+
+def persist_draft(session: "Session", lead: Lead, outcome: DraftOutcome) -> Draft | None:
+    """Write the outcome. Returns the Draft row, or None for `no_angle`.
+
+    The `no_angle` branch writes NO draft row. An empty-bodied placeholder row
+    would show up in the review table as something to look at, which is exactly
+    the busywork the brief is trying to delete.
+
+    A persisted draft starts `verification_status=pending` and the lead stays in
+    `researching` until `verify` has run. Nothing reaches `ready` on the
+    drafter's say-so — passing verification is what makes a draft reviewable.
+    """
+
+    if not outcome.drafted:
+        lead.status = LeadStatus.NO_ANGLE
+        session.flush()
+        return None
+
+    assert outcome.content is not None and outcome.body is not None
+    draft = Draft(
+        lead_id=lead.id,
+        subject=outcome.content.subject,
+        body=outcome.body,
+        signals_used=list(outcome.content.signals_used),
+        verification_status=VerificationStatus.PENDING,
+        verification_notes=None,
+    )
+    session.add(draft)
+    lead.status = LeadStatus.RESEARCHING
+    session.flush()
+    return draft
+
+
+def handle_draft(ctx: "JobContext") -> None:
+    """Queue handler for ``jobs.kind == 'draft'``.
+
+    Chains to ``verify`` only when a draft was actually written. A `no_angle`
+    lead has nothing to verify and is finished.
+    """
+
+    outcome = draft_for_lead(ctx.session, ctx.lead)
+    draft = persist_draft(ctx.session, ctx.lead, outcome)
+
+    if draft is None:
+        log.info("lead %s -> no_angle at draft stage: %s", ctx.lead.id, outcome.reason)
+        return
+
+    ctx.enqueue_next("verify")

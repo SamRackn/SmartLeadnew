@@ -1,0 +1,7 @@
+{
+  "_scenario": "provider_failure",
+  "_why": "Models a scraper outage. Must RAISE ProviderUnavailable after bounded retries, never return an empty fact list.",
+  "profile_url": "https://www.linkedin.com/in/outage-test",
+  "__simulate__": "unavailable",
+  "__status_code__": 502
+}

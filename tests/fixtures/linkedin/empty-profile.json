@@ -1,0 +1,11 @@
+{
+  "_scenario": "legitimately_empty",
+  "_why": "Profile exists but is bare. A successful lookup that yields no facts - a legitimate input to no_angle, and structurally distinct from a provider failure.",
+  "profile_url": "https://www.linkedin.com/in/empty-profile",
+  "retrieved_at": "2026-09-14T09:10:00+00:00",
+  "full_name": "",
+  "headline": "",
+  "current_position": {},
+  "about": "",
+  "recent_activity": []
+}

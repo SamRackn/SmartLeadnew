@@ -1,0 +1,8 @@
+.venv/
+.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+smartlead_outbox.jsonl
+.DS_Store
+*.egg-info/

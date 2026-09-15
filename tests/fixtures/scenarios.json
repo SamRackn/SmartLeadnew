@@ -1,0 +1,74 @@
+{
+  "_readme": "Machine-readable map of the Phase 1 provider fixtures to the downstream behaviour they exist to test. Owned by integrations-engineer; pipeline/scoring/drafting/verification tests should key off this rather than hard-coding fixture names. tests/test_adapters.py asserts this file stays consistent with what is actually on disk.",
+  "scenarios": [
+    {
+      "name": "strong_signal",
+      "domain": "northwind-logistics.com",
+      "profiles": [
+        "https://www.linkedin.com/in/dana-whitfield",
+        "https://www.linkedin.com/in/marcus-oyelaran"
+      ],
+      "expected": {
+        "has_job_posting": true,
+        "lead_status": "ready",
+        "notes": "Careers page carries a Revenue Operations Manager req plus two SDR openings - roles a B2B SaaS revenue product directly supports. Must score above threshold. Also the two-leads-one-domain case: enriching both leads must produce ONE research_cache row and ONE company-adapter call (assert adapter.call_count == 1)."
+      }
+    },
+    {
+      "name": "weak_signal_only",
+      "domain": "paperkite.io",
+      "profiles": ["https://www.linkedin.com/in/priya-raman"],
+      "expected": {
+        "has_job_posting": false,
+        "only_fact_kinds": ["homepage", "funding", "linkedin_profile"],
+        "lead_status": "no_angle",
+        "notes": "Funding news only. The brief calls funding nearly worthless because every competitor's tool leads with it. Nothing may clear the threshold and no generic draft may be forced."
+      }
+    },
+    {
+      "name": "unverifiable_claim_material",
+      "domain": "helio-medical.com",
+      "profiles": ["https://www.linkedin.com/in/tom-braddock"],
+      "expected": {
+        "has_job_posting": true,
+        "unverifiable_claim_example": "now that you've scaled to 40 support reps",
+        "absent_tokens": ["40", "headcount", "reps"],
+        "lead_status": "held",
+        "notes": "Material is real but vague: one support req and a 'the team has grown a lot' post, with no numbers anywhere. A draft asserting a specific headcount cites nothing and verification must fail closed."
+      }
+    },
+    {
+      "name": "legitimately_empty",
+      "domain": "stonebridge-partners.com",
+      "profiles": ["https://www.linkedin.com/in/empty-profile"],
+      "expected": {
+        "fetch_status": "empty",
+        "lead_status": "no_angle",
+        "notes": "Successful lookup, nothing found. A valid route to no_angle."
+      }
+    },
+    {
+      "name": "not_found",
+      "domain": "no-such-company.example",
+      "profiles": ["https://www.linkedin.com/in/no-such-person-anywhere"],
+      "expected": {
+        "fetch_status": "not_found",
+        "lead_status": "no_angle",
+        "notes": "No fixture file on purpose. Models a dead URL / dead domain: still a successful lookup, so also a valid route to no_angle."
+      }
+    },
+    {
+      "name": "provider_failure",
+      "domain": "outage-test.example",
+      "profiles": [
+        "https://www.linkedin.com/in/outage-test",
+        "https://www.linkedin.com/in/rate-limit-test"
+      ],
+      "expected": {
+        "raises": "ProviderUnavailable",
+        "lead_status": "error",
+        "notes": "The adapter raises after bounded retries. This must NEVER reach no_angle: a swallowed provider error would forge the 'we found nothing' verdict the client acts on."
+      }
+    }
+  ]
+}

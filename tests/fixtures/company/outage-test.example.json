@@ -1,0 +1,7 @@
+{
+  "_scenario": "provider_failure",
+  "_why": "Models a provider outage. The adapter must RAISE ProviderUnavailable, never return an empty fact list that the pipeline could mistake for a legitimate no_angle.",
+  "domain": "outage-test.example",
+  "__simulate__": "unavailable",
+  "__status_code__": 503
+}

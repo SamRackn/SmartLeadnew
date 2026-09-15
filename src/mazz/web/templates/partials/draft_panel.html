@@ -1,0 +1,100 @@
+{# The draft + its evidence + the approve/edit/reject actions.
+
+   Rendered both as part of the full lead_detail page and as the HTMX swap
+   target for approve/reject/edit responses (id="draft-panel" below). #}
+<div id="draft-panel">
+
+  {% if draft is none %}
+    <p class="empty">No draft for this lead.
+      {% if lead.status.value == "no_angle" %}
+        The scorer found no signal strong enough to clear the threshold —
+        see the rationale below. No draft was written on purpose; a forced
+        generic opener is exactly what this tool exists to avoid.
+      {% endif %}
+    </p>
+  {% else %}
+
+    {% if lead.status.value == "held" %}
+      <div class="held-banner">
+        <strong>HELD — cannot be approved.</strong>
+        <pre class="verification-notes">{{ draft.verification_notes }}</pre>
+      </div>
+    {% endif %}
+
+    <section class="draft-view">
+      <h2>Draft</h2>
+      <dl class="draft-fields">
+        <dt>Subject</dt>
+        <dd>{{ draft.subject }}</dd>
+        <dt>Body</dt>
+        <dd><pre class="draft-body">{{ draft.body }}</pre></dd>
+        <dt>Verification</dt>
+        <dd><span class="verification-tag verification-{{ draft.verification_status.value }}">{{ draft.verification_status.value }}</span></dd>
+      </dl>
+      {% if draft.verification_status.value != "held" and draft.verification_notes %}
+        <details>
+          <summary>Verification notes</summary>
+          <pre class="verification-notes">{{ draft.verification_notes }}</pre>
+        </details>
+      {% endif %}
+    </section>
+
+    <section class="evidence-view">
+      <h2>Cited signals &amp; sources</h2>
+      {% if not cited %}
+        <p class="empty">This draft cites no signals.</p>
+      {% else %}
+        <ul class="evidence-list">
+          {% for c in cited %}
+          <li>
+            <span class="fact-kind">{{ c.kind }}</span>
+            <blockquote>{{ c.content or "(fact id not found in current research_cache)" }}</blockquote>
+            {% if c.source_url %}
+              <a href="{{ c.source_url }}" target="_blank" rel="noopener">{{ c.source_url }}</a>
+            {% else %}
+              <span class="muted">no source URL</span>
+            {% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    </section>
+
+    <section class="actions">
+      <h2>Actions</h2>
+
+      {% if can_approve %}
+        <form hx-post="/leads/{{ lead.id }}/approve" hx-target="#draft-panel" hx-swap="outerHTML">
+          <button type="submit" class="approve">Approve &amp; push to Smartlead</button>
+        </form>
+      {% else %}
+        <p class="muted">
+          Approve is disabled: this draft's verification_status is
+          "{{ draft.verification_status.value }}", not "passed". A held or
+          pending draft can never be sent — this is enforced by the
+          <code>/approve</code> route itself, not just by hiding this button.
+        </p>
+      {% endif %}
+
+      <form hx-post="/leads/{{ lead.id }}/edit" hx-target="#draft-panel" hx-swap="outerHTML" class="edit-form">
+        <label>
+          Subject
+          <input type="text" name="subject" value="{{ draft.subject }}">
+        </label>
+        <label>
+          Body (without the compliance footer — that is appended automatically)
+          <textarea name="body_text" rows="8">{{ draft.body.split("\n\n-- \n")[0] }}</textarea>
+        </label>
+        <button type="submit">Save edit &amp; re-verify</button>
+      </form>
+
+      <form hx-post="/leads/{{ lead.id }}/reject" hx-target="#draft-panel" hx-swap="outerHTML" class="reject-form">
+        <label>
+          Reject reason (optional)
+          <input type="text" name="reason" placeholder="why this shouldn't go out">
+        </label>
+        <button type="submit" class="reject">Reject</button>
+      </form>
+    </section>
+  {% endif %}
+</div>

@@ -1,0 +1,7 @@
+{
+  "_scenario": "legitimately_empty",
+  "_why": "Site reachable, nothing recently dated. Distinct from NOT_FOUND (no such site) and from a provider failure (which raises). All three are different pipeline outcomes and only the first two may lead to no_angle.",
+  "domain": "stonebridge-partners.com",
+  "retrieved_at": "2026-09-14T09:09:00+00:00",
+  "pages": []
+}

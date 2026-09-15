@@ -1,0 +1,7 @@
+{
+  "_scenario": "provider_failure",
+  "_why": "Models a 429 from the paid scraper. Retryable, bounded, then surfaced as the real error.",
+  "profile_url": "https://www.linkedin.com/in/rate-limit-test",
+  "__simulate__": "rate_limited",
+  "__status_code__": 429
+}

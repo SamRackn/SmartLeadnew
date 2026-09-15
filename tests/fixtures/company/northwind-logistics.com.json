@@ -1,0 +1,69 @@
+{
+  "_scenario": "strong_signal",
+  "_why": "Careers page carries a req for a role a B2B SaaS revenue tool directly supports. This is the highest-value signal kind in the brief and must score above threshold.",
+  "domain": "northwind-logistics.com",
+  "retrieved_at": "2026-09-14T09:00:00+00:00",
+  "pages": [
+    {
+      "kind": "homepage",
+      "url": "https://northwind-logistics.com/",
+      "title": "Northwind Logistics - freight visibility for mid-market shippers",
+      "items": [
+        {
+          "key": "hero-positioning",
+          "text": "Northwind gives mid-market shippers one dashboard for every carrier, lane and exception. 340 shippers moved 1.2M loads with us last year.",
+          "published_at": null
+        }
+      ]
+    },
+    {
+      "kind": "careers",
+      "url": "https://northwind-logistics.com/careers",
+      "title": "Open roles at Northwind",
+      "items": [
+        {
+          "key": "job-revenue-operations-manager",
+          "url": "https://northwind-logistics.com/careers/revenue-operations-manager",
+          "text": "Revenue Operations Manager - Own the go-to-market data stack end to end. You will untangle our lead routing, rebuild reporting that the sales team currently maintains by hand in spreadsheets, and own the handoff between marketing-sourced and outbound pipeline. Remote (US).",
+          "published_at": "2026-09-02"
+        },
+        {
+          "key": "job-sdr-two-openings",
+          "url": "https://northwind-logistics.com/careers/sales-development-representative",
+          "text": "Sales Development Representative (2 openings) - We are building out our first dedicated outbound team. You will be among the first SDRs at Northwind, working new-logo accounts in food and beverage distribution. Chicago or remote.",
+          "published_at": "2026-08-27"
+        },
+        {
+          "key": "job-backend-engineer",
+          "url": "https://northwind-logistics.com/careers/backend-engineer",
+          "text": "Senior Backend Engineer - Go, Postgres, event-driven carrier integrations. Chicago hybrid.",
+          "published_at": "2026-07-15"
+        }
+      ]
+    },
+    {
+      "kind": "changelog",
+      "url": "https://northwind-logistics.com/changelog",
+      "items": [
+        {
+          "key": "changelog-2026-09-05-lane-benchmarks",
+          "url": "https://northwind-logistics.com/changelog/lane-benchmarks",
+          "text": "Shipped: lane-level benchmark reporting. Customers can now compare their own cost per mile against anonymised peer data on the same lane.",
+          "published_at": "2026-09-05"
+        }
+      ]
+    },
+    {
+      "kind": "blog",
+      "url": "https://northwind-logistics.com/blog",
+      "items": [
+        {
+          "key": "blog-2026-08-19-outbound-motion",
+          "url": "https://northwind-logistics.com/blog/building-our-outbound-motion",
+          "text": "Why we are finally building an outbound motion. For six years every Northwind customer came inbound. That stopped scaling last quarter, so we are hiring a team to go get the next 300.",
+          "published_at": "2026-08-19"
+        }
+      ]
+    }
+  ]
+}

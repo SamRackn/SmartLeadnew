@@ -1,0 +1,29 @@
+[project]
+name = "mazz"
+version = "0.1.0"
+description = "Research and personalization layer feeding Smartlead"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "sqlalchemy>=2.0",
+    "alembic",
+    "psycopg[binary]",
+    "jinja2",
+    "python-multipart",
+    "pydantic-settings",
+    "itsdangerous",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "httpx"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

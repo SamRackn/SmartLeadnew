@@ -1,0 +1,44 @@
+{
+  "_scenario": "unverifiable_claim_material",
+  "_why": "Deliberately vague material. A drafter is tempted to write a specific number ('now that you have scaled to 40 support reps') that appears in NO fact here. Verification must fail closed on that claim and hold the draft. The single support req is real and citable; the headcount is not.",
+  "domain": "helio-medical.com",
+  "retrieved_at": "2026-09-14T09:07:00+00:00",
+  "pages": [
+    {
+      "kind": "homepage",
+      "url": "https://helio-medical.com/",
+      "title": "Helio Medical - scheduling for outpatient clinics",
+      "items": [
+        {
+          "key": "hero-positioning",
+          "text": "Helio Medical runs scheduling and intake for outpatient clinics across the Southeast.",
+          "published_at": null
+        }
+      ]
+    },
+    {
+      "kind": "careers",
+      "url": "https://helio-medical.com/careers",
+      "items": [
+        {
+          "key": "job-customer-support-specialist",
+          "url": "https://helio-medical.com/careers/customer-support-specialist",
+          "text": "Customer Support Specialist - Answer inbound clinic questions by phone and email, triage scheduling issues, and escalate integration problems. Atlanta, hybrid.",
+          "published_at": "2026-09-08"
+        }
+      ]
+    },
+    {
+      "kind": "blog",
+      "url": "https://helio-medical.com/blog",
+      "items": [
+        {
+          "key": "blog-2026-09-01-spring-offsite",
+          "url": "https://helio-medical.com/blog/notes-from-our-offsite",
+          "text": "Notes from our offsite. The team has grown a lot this year and support volume has grown with it, so we spent two days mapping how a clinic question actually travels through the company.",
+          "published_at": "2026-09-01"
+        }
+      ]
+    }
+  ]
+}

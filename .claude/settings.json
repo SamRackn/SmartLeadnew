@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(sed:*)",
+      "Bash(grep:*)",
+      "Bash(rg:*)",
+      "Bash(find:*)",
+      "Bash(wc:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git add:*)",
+      "Bash(.venv/bin/pytest:*)",
+      "Bash(.venv/bin/alembic:*)",
+      "Bash(.venv/bin/python:*)",
+      "Bash(.venv/bin/pip:*)",
+      "Bash(.venv/bin/uvicorn:*)",
+      "Bash(psql -c:*)",
+      "Bash(psql -l:*)",
+      "Bash(pg_isready:*)"
+    ],
+    "ask": [
+      "Bash(dropdb:*)",
+      "Bash(rm:*)",
+      "Bash(git push:*)",
+      "Bash(brew:*)"
+    ]
+  }
+}
