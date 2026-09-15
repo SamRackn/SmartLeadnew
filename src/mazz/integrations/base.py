@@ -48,6 +48,7 @@ __all__ = [
     "ProviderError",
     "ProviderAuthError",
     "ProviderBadResponse",
+    "ProviderBlocked",
     "ProviderRateLimited",
     "ProviderUnavailable",
     "RetryPolicy",
@@ -189,6 +190,20 @@ class ProviderAuthError(ProviderError):
 class ProviderBadResponse(ProviderError):
     """Provider answered, but with something we cannot parse. Not retryable --
     a malformed payload is a mapping bug or a vendor change, not a blip."""
+
+
+class ProviderBlocked(ProviderError):
+    """robots.txt disallows the fetch, or the site answered with a hard
+    access-control refusal (401/403 on a page we did not try to evade).
+
+    Deliberately NOT retryable and deliberately NOT `FetchResult.not_found` /
+    `EMPTY`: this is not "we looked and there was nothing", it is "we did not
+    look, or were refused, on compliance grounds". Conflating the two would
+    let a blocked site silently present to the client as `no_angle` -- which
+    is exactly the swallowed-failure case the brief forbids. Callers should
+    catch this at the batch/measurement level, log it, and move on to the
+    next target; they must never retry past it or attempt to work around it.
+    """
 
 
 # --------------------------------------------------------------------------
