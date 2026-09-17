@@ -4,10 +4,12 @@ The order of operations in :mod:`mazz.ingest.csv_import` is load-bearing and is
 the brief's first compliance guardrail:
 
     validate -> derive company_domain -> CHECK SUPPRESSION -> upsert lead
-    -> enqueue exactly one job
+    -> route to a campaign -> enqueue exactly one job
 
 A suppressed lead never reaches the fourth step, so it can never produce a
-``jobs`` row and can never be researched, drafted, or pushed.
+``jobs`` row and can never be researched, drafted, or pushed. Routing runs after
+the gate and is not one: it never rejects, and an unroutable lead is admitted
+with ``campaign_id`` NULL, meaning the shipped scoring defaults.
 """
 
 from mazz.ingest.csv_import import (

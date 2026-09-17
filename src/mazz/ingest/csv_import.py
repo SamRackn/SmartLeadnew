@@ -3,7 +3,8 @@
 The order of operations is the point of this module::
 
     validate  ->  derive company_domain  ->  CHECK SUPPRESSION
-              ->  upsert lead at 'researching'  ->  enqueue ONE jobs row
+              ->  upsert lead at 'researching'  ->  route to a campaign
+              ->  enqueue ONE jobs row
 
 The suppression check sits *before* the first write. That placement is the
 brief's first compliance guardrail: "check ``suppression_list`` before a lead
@@ -20,6 +21,13 @@ this person, and the safe reading of that ambiguity is "do not contact".
 Rejection is always per row. One malformed line never costs the client the
 other twenty-four: each row runs inside its own SAVEPOINT, so a database error
 on row 7 rolls back row 7 alone and rows 8..25 still land.
+
+**Routing sits after the gate, and is not one.** `pipeline.routing` decides
+which campaign — and therefore which scoring config — a lead belongs to. It runs
+only once the lead has already been admitted, it never rejects, and an
+unroutable lead is admitted with ``campaign_id`` NULL, which means the shipped
+scoring defaults: exactly what every lead did before campaigns existed. Nothing
+about routing can reorder or soften the suppression check above it.
 """
 
 from __future__ import annotations
@@ -43,6 +51,7 @@ from mazz.ingest.validate import (
 )
 from mazz.models import Lead, LeadStatus, SuppressionEntry
 from mazz.pipeline.queue import enqueue_job
+from mazz.pipeline.routing import RoutingPolicy, assign_campaign
 
 __all__ = [
     "ImportReport",
@@ -115,10 +124,23 @@ class LeadOutcome:
     job_id: int | None
     note: str | None = None
 
+    #: Which campaign this lead was routed to, and why. NULL/"" is a legitimate
+    #: steady state, not a failure: it means the shipped scoring defaults.
+    campaign_id: int | None = None
+    routing_reason: str = ""
+
+    @property
+    def routed(self) -> bool:
+        return self.campaign_id is not None
+
     def __str__(self) -> str:
         verb = "created" if self.created else "updated"
         job = f", job {self.job_id}" if self.job_id else ", no new job"
-        return f"row {self.row_number}: {verb} lead {self.lead_id} ({self.email}){job}"
+        campaign = f", campaign {self.campaign_id}" if self.routed else ""
+        return (
+            f"row {self.row_number}: {verb} lead {self.lead_id} "
+            f"({self.email}){campaign}{job}"
+        )
 
 
 @dataclass(slots=True)
@@ -156,11 +178,26 @@ class ImportReport:
     def job_ids(self) -> list[int]:
         return [o.job_id for o in self.accepted if o.job_id is not None]
 
+    @property
+    def routed(self) -> list[LeadOutcome]:
+        return [o for o in self.accepted if o.routed]
+
+    @property
+    def unrouted(self) -> list[LeadOutcome]:
+        """Admitted, but scoring against the shipped defaults.
+
+        Worth surfacing rather than hiding: a client who expects his campaign's
+        ICP to be in force wants to know these leads are not using it.
+        """
+
+        return [o for o in self.accepted if not o.routed]
+
     def summary(self) -> str:
         return (
             f"{self.total} rows: {len(self.created)} created, "
             f"{len(self.updated)} updated, {len(self.suppressed)} suppressed, "
-            f"{len(self.invalid)} invalid, {len(self.errored)} errored"
+            f"{len(self.invalid)} invalid, {len(self.errored)} errored, "
+            f"{len(self.routed)} routed to a campaign"
         )
 
 
@@ -286,9 +323,12 @@ def _upsert_lead(session: Session, validated: ValidatedRow) -> tuple[Lead, bool]
 
 
 def _admit(
-    session: Session, validated: ValidatedRow, row_number: int
+    session: Session,
+    validated: ValidatedRow,
+    row_number: int,
+    policy: RoutingPolicy | None = None,
 ) -> LeadOutcome:
-    """Upsert the lead and enqueue exactly one enrichment job."""
+    """Upsert the lead, route it to a campaign, enqueue exactly one job."""
 
     lead, created = _upsert_lead(session, validated)
 
@@ -302,10 +342,20 @@ def _admit(
             company_domain=lead.company_domain or validated.company_domain,
             created=False,
             job_id=None,
+            campaign_id=lead.campaign_id,
+            routing_reason=(
+                "not routed: an approved/sent lead keeps the campaign its copy "
+                "was written under"
+            ),
             note=f"lead is {lead.status.value}; details updated, not re-queued",
         )
 
     lead.status = LeadStatus.RESEARCHING
+
+    # Routing: strictly after the suppression gate, and not a gate itself. It
+    # only ever fills a NULL `campaign_id`, and an unroutable lead is still
+    # admitted -- NULL means the shipped scoring defaults. See pipeline.routing.
+    decision = assign_campaign(session, lead, policy)
     session.flush()
 
     # `enqueue_job` de-duplicates against an outstanding job of the same kind,
@@ -318,6 +368,8 @@ def _admit(
         company_domain=lead.company_domain or validated.company_domain,
         created=created,
         job_id=job.id,
+        campaign_id=lead.campaign_id,
+        routing_reason=decision.reason,
         note=None if enqueued else "reused the outstanding enrich job",
     )
 
@@ -332,6 +384,7 @@ def _process_row(
     checker: SuppressionChecker,
     raw: Mapping[str, Any],
     row_number: int,
+    policy: RoutingPolicy | None = None,
 ) -> LeadOutcome | RejectedRow:
     raw_dict = {str(k): v for k, v in raw.items()}
 
@@ -373,10 +426,10 @@ def _process_row(
             raw=raw_dict,
         )
 
-    # 4. upsert at 'researching' + 5. enqueue one job
+    # 4. upsert at 'researching' + 5. route + 6. enqueue one job
     try:
         with session.begin_nested():
-            return _admit(session, validated, row_number)
+            return _admit(session, validated, row_number, policy)
     except SQLAlchemyError as exc:
         return RejectedRow(
             row_number=row_number,
@@ -392,11 +445,17 @@ def import_rows(
     rows: Iterable[Mapping[str, Any]],
     *,
     first_row_number: int = 2,
+    policy: RoutingPolicy | None = None,
 ) -> ImportReport:
     """Ingest an iterable of already-parsed rows.
 
     ``first_row_number`` defaults to 2 so reported numbers line up with what
     the client sees in his spreadsheet (row 1 being the header).
+
+    ``policy`` defaults to `routing.DEFAULT_ROUTING_POLICY` — the system decides
+    the campaign from the lead's attributes, which is the client's stated
+    workflow. Pass `routing.PinnedRoutingPolicy` to drop a whole spreadsheet
+    into one named engagement.
     """
 
     checker = SuppressionChecker(session)
@@ -406,7 +465,7 @@ def import_rows(
         row_number = first_row_number + offset
         if not any(str(v or "").strip() for v in raw.values()):
             continue  # blank line
-        outcome = _process_row(session, checker, raw, row_number)
+        outcome = _process_row(session, checker, raw, row_number, policy)
         if isinstance(outcome, RejectedRow):
             report.rejected.append(outcome)
         else:
@@ -430,31 +489,42 @@ def _iter_csv(source: str | bytes | io.IOBase) -> Iterator[dict[str, Any]]:
         yield {k: v for k, v in row.items() if k is not None}
 
 
-def import_csv(session: Session, source: str | bytes | io.IOBase) -> ImportReport:
+def import_csv(
+    session: Session,
+    source: str | bytes | io.IOBase,
+    *,
+    policy: RoutingPolicy | None = None,
+) -> ImportReport:
     """Ingest a CSV given as text, bytes, or an open file object.
 
     Unknown columns are ignored and header spellings are aliased, so the
     client's CRM export works without being re-headered.
     """
 
-    return import_rows(session, _iter_csv(source))
+    return import_rows(session, _iter_csv(source), policy=policy)
 
 
-def import_csv_file(session: Session, path: str | Path) -> ImportReport:
+def import_csv_file(
+    session: Session, path: str | Path, *, policy: RoutingPolicy | None = None
+) -> ImportReport:
     """Ingest a CSV from disk."""
 
     with Path(path).open("r", encoding="utf-8-sig", newline="") as handle:
-        return import_rows(session, list(_iter_csv(handle)))
+        return import_rows(session, list(_iter_csv(handle)), policy=policy)
 
 
 def import_lead(
-    session: Session, record: Mapping[str, Any]
+    session: Session,
+    record: Mapping[str, Any],
+    *,
+    policy: RoutingPolicy | None = None,
 ) -> LeadOutcome | RejectedRow:
     """Manual single-lead entry -- the review app's "add a lead" form.
 
-    Exactly the same path as a CSV row, including the suppression gate. There
-    is deliberately no second, looser way into the pipeline.
+    Exactly the same path as a CSV row, including the suppression gate and the
+    routing step after it. There is deliberately no second, looser way into the
+    pipeline.
     """
 
     checker = SuppressionChecker(session)
-    return _process_row(session, checker, record, row_number=1)
+    return _process_row(session, checker, record, row_number=1, policy=policy)
