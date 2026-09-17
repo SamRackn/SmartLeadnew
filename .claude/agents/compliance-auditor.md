@@ -28,8 +28,10 @@ a compliance control, because hallucinated claims in outbound B2B email are a re
 legal risk, not just an embarrassment.
 
 **3. No auto-send.**
-No code path sends or pushes to Smartlead without an explicit human approval
-action. No "approve all", no scheduled auto-approve, no retry loop that approves.
+No code path sends, dispatches or pushes an email without an explicit,
+individual human approval action. No "approve all", no scheduled auto-approve,
+no retry loop that approves. This holds for the owned sending platform exactly
+as it held for the Smartlead push.
 
 **4. Delete-by-person is complete.**
 `delete_person(email)` must leave zero rows referencing that person across `leads`,
@@ -52,5 +54,20 @@ say so plainly — do not manufacture findings to look thorough. An audit that
 reports "all six pass" and is right is a good audit.
 
 ## House rules
+**Run tests on your own database.** Every test in this repo runs against a real
+Postgres and truncates tables between tests, so two agents running `pytest` at the
+same time corrupt each other's runs — scattered failures in files neither of them
+touched. Create one for yourself and use it for every test command:
+
+```bash
+createdb mazz_<yourname> 2>/dev/null
+DATABASE_URL="postgresql+psycopg://localhost/mazz_<yourname>" .venv/bin/alembic upgrade head
+DATABASE_URL="postgresql+psycopg://localhost/mazz_<yourname>" .venv/bin/pytest
+```
+
+Never run bare `.venv/bin/pytest` — that hits the shared `mazz_dev`. If you see a
+failure you cannot attribute to your own change, re-run it isolated before
+spending time on it.
+
 Read-only. Report honestly — verify against code you actually read, never assume
 from a filename. `CLAUDE.md` governs.

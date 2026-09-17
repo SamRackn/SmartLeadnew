@@ -42,7 +42,10 @@ the provider adapter owned by `integrations-engineer`. Two leads at the same
 employer must produce exactly one cache row and exactly one provider call — there
 is a test asserting the call count, and it is the point of the design.
 
-In Phase 1 the adapters return canned fixture data. Do not write live scraping.
+The adapters are owned by `integrations-engineer` and now have live
+implementations behind the same interface. You call them; you never write
+scraping yourself. A provider failure must propagate — it must never reach you
+as an empty fact list, because empty legitimately means `no_angle`.
 
 ## Privacy
 `delete_person(email)` removes the lead, its drafts, its jobs, and any
@@ -51,6 +54,21 @@ retrofitted — the brief calls for it early because we store scraped personal d
 After it runs, zero rows anywhere may reference that person.
 
 ## House rules
+**Run tests on your own database.** Every test in this repo runs against a real
+Postgres and truncates tables between tests, so two agents running `pytest` at the
+same time corrupt each other's runs — scattered failures in files neither of them
+touched. Create one for yourself and use it for every test command:
+
+```bash
+createdb mazz_<yourname> 2>/dev/null
+DATABASE_URL="postgresql+psycopg://localhost/mazz_<yourname>" .venv/bin/alembic upgrade head
+DATABASE_URL="postgresql+psycopg://localhost/mazz_<yourname>" .venv/bin/pytest
+```
+
+Never run bare `.venv/bin/pytest` — that hits the shared `mazz_dev`. If you see a
+failure you cannot attribute to your own change, re-run it isolated before
+spending time on it.
+
 Report honestly — paste real test output, never claim green without running it.
 Stay in your lane: you do not write scoring, drafting, verification, Smartlead, or
-web code. No live network calls in Phase 1. `CLAUDE.md` governs.
+web code. Tests never touch the network or spend an API credit: `tests/conftest.py` has a session-wide autouse fixture pinning every provider to stub and blanking credentials. Do not weaken it. `CLAUDE.md` governs.

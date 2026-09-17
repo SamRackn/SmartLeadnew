@@ -13,7 +13,11 @@ says it, and then proves it was true.
 - `tests/test_score.py`, `tests/test_draft.py`, `tests/test_verify.py`
 
 ## Scoring
-Rank retrieved facts by *reason to reach out right now* for a B2B SaaS pitch:
+Rank retrieved facts by *reason to reach out right now*. **The ICP is
+per-campaign, not global** — ClientRise runs outbound on behalf of each
+agency-client at that client's own target industry, so `ScoringConfig` is
+loaded per campaign rather than from one module constant. See
+`docs/DECISIONS.md`. The tiers themselves are fixed:
 - **Strong** — a job posting for a role the client's product replaces or supports.
   This is the best signal there is; it means budget and pain, right now.
 - **Medium** — a recently dated blog post, changelog entry, or press item.
@@ -29,10 +33,16 @@ Grounded **only** in retrieved research plus the lead's `notes` field. No invent
 facts, no plausible-sounding embellishment. The output is structured: subject,
 body, and `signals_used` — the list of fact ids the copy actually rests on.
 
-Phase 1: emit deterministic template copy from the scored signals, in exactly the
-structured shape the Claude call will return later. No API key needed to run it.
-Phase 2 swaps the body of the function for a Claude structured-output call; the
-contract around it must not change.
+Both composers exist behind one `Composer` seam: `compose_template` is
+deterministic and needs no API key, `compose_claude` is the real structured-output
+call, batched and prompt-cached. `DRAFT_COMPOSER` selects between them and stays
+`template` until the verifier is precise enough to run against paraphrase.
+The contract around the seam must not change, and the compliance footer is
+appended by `render_body` OUTSIDE the composer so no model can omit it.
+
+AI is 57-70% of cost per usable lead at every scale, so cost engineering here is
+work-order item 1: batch, cache the frozen prefix, settle `no_angle` inline and
+never batch it. Do not trade draft quality for it without measuring first.
 
 ## Verification
 Every factual claim in a draft traces to a specific cached fact id or to the
@@ -44,6 +54,22 @@ Failure means `verification_status=failed`, lead status `held`, and the draft is
 that a tired reviewer clicks past.
 
 ## House rules
+**Run tests on your own database.** Every test in this repo runs against a real
+Postgres and truncates tables between tests, so two agents running `pytest` at the
+same time corrupt each other's runs — scattered failures in files neither of them
+touched. Create one for yourself and use it for every test command:
+
+```bash
+createdb mazz_<yourname> 2>/dev/null
+DATABASE_URL="postgresql+psycopg://localhost/mazz_<yourname>" .venv/bin/alembic upgrade head
+DATABASE_URL="postgresql+psycopg://localhost/mazz_<yourname>" .venv/bin/pytest
+```
+
+Never run bare `.venv/bin/pytest` — that hits the shared `mazz_dev`. If you see a
+failure you cannot attribute to your own change, re-run it isolated before
+spending time on it.
+
 Report honestly — paste real test output. Stay in your lane: you do not touch
-schema, ingest, queue, Smartlead, or web code. No live LLM or network calls in
-Phase 1. `CLAUDE.md` governs.
+schema, ingest, queue, Smartlead, or web code. Tests never touch the network or spend an API credit:
+`tests/conftest.py` pins every provider to stub and blanks credentials via a
+session-wide autouse fixture. Do not weaken it. `CLAUDE.md` governs.

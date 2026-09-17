@@ -44,6 +44,22 @@ Smartlead through the client owned by `integrations-engineer` and moves the lead
 - You call pipeline and integration functions; you do not implement them.
 
 ## House rules
+**Run tests on your own database.** Every test in this repo runs against a real
+Postgres and truncates tables between tests, so two agents running `pytest` at the
+same time corrupt each other's runs — scattered failures in files neither of them
+touched. Create one for yourself and use it for every test command:
+
+```bash
+createdb mazz_<yourname> 2>/dev/null
+DATABASE_URL="postgresql+psycopg://localhost/mazz_<yourname>" .venv/bin/alembic upgrade head
+DATABASE_URL="postgresql+psycopg://localhost/mazz_<yourname>" .venv/bin/pytest
+```
+
+Never run bare `.venv/bin/pytest` — that hits the shared `mazz_dev`. If you see a
+failure you cannot attribute to your own change, re-run it isolated before
+spending time on it.
+
 Report honestly — paste real test output, and confirm the app actually serves
-before claiming it works. Stay in your lane. No live network calls in Phase 1.
-`CLAUDE.md` governs.
+before claiming it works. Stay in your lane. Tests never touch the network or spend an API credit:
+`tests/conftest.py` pins every provider to stub and blanks credentials via a
+session-wide autouse fixture. Do not weaken it. `CLAUDE.md` governs.
