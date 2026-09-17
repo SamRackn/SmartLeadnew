@@ -1,0 +1,977 @@
+{
+  "_readme": "The W1 labelled evaluation set: 63 drafts with a known verdict (the spec asked for 50), half written to be caught and half written to be let through. It exists for two jobs. (1) It is the evidence that the claim-level verifier is BOTH sound and usable: the false-negative rate over the `fail` cases must be zero, because a fabricated claim that passes is the failure this whole product exists to prevent, and the false-positive rate over the `pass` cases must stay low enough that a `held` draft still means something to the reviewer. (2) It is the permanent regression suite for every later change to the verifier, the lexicon, or the drafting prompt: a prompt edit that starts producing copy this set marks as legitimate, or a lexicon edit that starts admitting fabrication, shows up here as a number rather than as a surprise in the client's review queue. Run it with tests/test_verify.py. The corpus below is copied verbatim from the Phase 1 seed fixtures (tests/fixtures/company/*.json), INCLUDING the '[date] ' prefix that the company adapter prepends to fact content, so the evidence has exactly the shape production stores in research_cache. It is copied rather than imported on purpose: those fixtures belong to integrations-engineer and are free to change, and a regression suite whose labels can move underneath it is not a regression suite.",
+  "leads": {
+    "dana": {
+      "full_name": "Dana Whitfield",
+      "email": "dana.whitfield@northwind-logistics.com",
+      "company_name": "Northwind Logistics",
+      "company_domain": "northwind-logistics.com",
+      "website": "https://www.northwind-logistics.com/",
+      "job_title": "VP Revenue Operations",
+      "location": "Columbus, OH, United States",
+      "industry_primary": "Logistics & Supply Chain",
+      "notes": "Met at MODEX; RevOps team is stretched thin."
+    },
+    "marcus": {
+      "full_name": "Marcus Oyelaran",
+      "email": "marcus.oyelaran@northwind-logistics.com",
+      "company_name": "Northwind Logistics",
+      "company_domain": "northwind-logistics.com",
+      "website": "https://www.northwind-logistics.com/",
+      "job_title": "Head of Sales",
+      "location": "Chicago, IL, United States",
+      "notes": null
+    },
+    "tom": {
+      "full_name": "Tom Braddock",
+      "email": "tom.braddock@helio-medical.com",
+      "company_name": "Helio Medical",
+      "company_domain": "helio-medical.com",
+      "website": "https://helio-medical.com/",
+      "job_title": "Director of Support",
+      "location": "Atlanta, GA, United States",
+      "notes": null
+    },
+    "priya": {
+      "full_name": "Priya Raman",
+      "email": "priya.raman@paperkite.io",
+      "company_name": "PaperKite",
+      "company_domain": "paperkite.io",
+      "website": "https://paperkite.io/",
+      "job_title": "COO",
+      "location": "Austin, TX, United States",
+      "notes": null
+    }
+  },
+  "facts": {
+    "nw_revops": {
+      "kind": "job_posting",
+      "source_url": "https://northwind-logistics.com/careers/revenue-operations-manager",
+      "content": "[2026-09-02] Revenue Operations Manager - Own the go-to-market data stack end to end. You will untangle our lead routing, rebuild reporting that the sales team currently maintains by hand in spreadsheets, and own the handoff between marketing-sourced and outbound pipeline. Remote (US)."
+    },
+    "nw_sdr": {
+      "kind": "job_posting",
+      "source_url": "https://northwind-logistics.com/careers/sales-development-representative",
+      "content": "[2026-08-27] Sales Development Representative (2 openings) - We are building out our first dedicated outbound team. You will be among the first SDRs at Northwind, working new-logo accounts in food and beverage distribution. Chicago or remote."
+    },
+    "nw_blog": {
+      "kind": "blog_post",
+      "source_url": "https://northwind-logistics.com/blog/building-our-outbound-motion",
+      "content": "[2026-08-19] Why we are finally building an outbound motion. For six years every Northwind customer came inbound. That stopped scaling last quarter, so we are hiring a team to go get the next 300."
+    },
+    "nw_changelog": {
+      "kind": "changelog",
+      "source_url": "https://northwind-logistics.com/changelog/lane-benchmarks",
+      "content": "[2026-09-05] Shipped: lane-level benchmark reporting. Customers can now compare their own cost per mile against anonymised peer data on the same lane."
+    },
+    "nw_home": {
+      "kind": "homepage",
+      "source_url": "https://northwind-logistics.com/",
+      "content": "Northwind gives mid-market shippers one dashboard for every carrier, lane and exception. 340 shippers moved 1.2M loads with us last year."
+    },
+    "helio_support": {
+      "kind": "job_posting",
+      "source_url": "https://helio-medical.com/careers/customer-support-specialist",
+      "content": "[2026-09-08] Customer Support Specialist - Answer inbound clinic questions by phone and email, triage scheduling issues, and escalate integration problems. Atlanta, hybrid."
+    },
+    "helio_blog": {
+      "kind": "blog_post",
+      "source_url": "https://helio-medical.com/blog/notes-from-our-offsite",
+      "content": "[2026-09-01] Notes from our offsite. The team has grown a lot this year and support volume has grown with it, so we spent two days mapping how a clinic question actually travels through the company."
+    },
+    "pk_funding": {
+      "kind": "funding",
+      "source_url": "https://paperkite.io/press/series-a",
+      "content": "[2026-08-11] PaperKite raises $12M Series A led by Fernbrook Ventures to accelerate product development and grow the team."
+    },
+    "pk_home": {
+      "kind": "homepage",
+      "source_url": "https://paperkite.io/",
+      "content": "PaperKite makes document workflows simple for modern teams."
+    },
+    "pk_funding_no_url": {
+      "kind": "funding",
+      "source_url": null,
+      "content": "[2026-08-11] PaperKite raises $12M Series A led by Fernbrook Ventures to accelerate product development and grow the team."
+    }
+  },
+  "cases": [
+    {
+      "id": "fab-invented-headcount-40",
+      "expect": "fail",
+      "category": "fabricated_number",
+      "why": "The scenario the fixtures were built for. Helio's material is deliberately vague ('the team has grown a lot'); 40 appears in no fact. This is the exact claim a recipient's lawyer notices.",
+      "lead": "tom",
+      "cite": [
+        "helio_support",
+        "helio_blog"
+      ],
+      "subject": "Helio Medical support",
+      "body": "Tom, I saw you are hiring a Customer Support Specialist. Now that you have scaled to 40 support reps, triaging clinic questions by hand has to be getting expensive.",
+      "expect_claim": {
+        "kind": "number",
+        "token": "40"
+      }
+    },
+    {
+      "id": "fab-number-drift-340-to-345",
+      "expect": "fail",
+      "category": "fabricated_number",
+      "why": "Subtle drift: the homepage says 340 shippers, the copy says 345. One digit, and the whole sentence reads as researched.",
+      "lead": "dana",
+      "cite": [
+        "nw_home"
+      ],
+      "subject": "345 shippers",
+      "body": "Dana, 345 shippers on one dashboard is a lot of lanes to keep clean.",
+      "expect_claim": {
+        "kind": "number",
+        "token": "345"
+      }
+    },
+    {
+      "id": "fab-number-drift-2-to-3-openings",
+      "expect": "fail",
+      "category": "fabricated_number",
+      "why": "The req says 2 openings. Three is close enough to sound researched and wrong enough to be a false statement about their hiring plan.",
+      "lead": "dana",
+      "cite": [
+        "nw_sdr"
+      ],
+      "subject": "Your three SDR openings",
+      "body": "Dana, three SDR openings at once says the outbound team is being built in a hurry.",
+      "expect_claim": {
+        "kind": "number",
+        "token": "three"
+      }
+    },
+    {
+      "id": "fab-invented-percentage",
+      "expect": "fail",
+      "category": "fabricated_number",
+      "why": "A performance statistic attached to their own operation. Nothing in the evidence measures routing time at all.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Lead routing",
+      "body": "Dana, the Revenue Operations Manager req mentions untangling lead routing. Teams doing that by hand usually lose 30% of the week to it.",
+      "expect_claim": {
+        "kind": "number",
+        "token": "30%"
+      }
+    },
+    {
+      "id": "fab-funding-amount-drift",
+      "expect": "fail",
+      "category": "fabricated_number",
+      "why": "The round was $12M. $15M is a fabricated figure about their balance sheet.",
+      "lead": "priya",
+      "cite": [
+        "pk_funding"
+      ],
+      "subject": "Congratulations on the round",
+      "body": "Priya, congratulations on the $15M Series A. Growing the team after a round like that is its own kind of work.",
+      "expect_claim": {
+        "kind": "number",
+        "token": "$15M"
+      }
+    },
+    {
+      "id": "fab-funding-magnitude-drift",
+      "expect": "fail",
+      "category": "fabricated_number",
+      "why": "Same digits, wrong magnitude: $12B is not $12M. Number canonicalisation must not fold a suffix away.",
+      "lead": "priya",
+      "cite": [
+        "pk_funding"
+      ],
+      "subject": "Congratulations on the round",
+      "body": "Priya, congratulations on the $12B Series A led by Fernbrook Ventures.",
+      "expect_claim": {
+        "kind": "number",
+        "token": "$12B"
+      }
+    },
+    {
+      "id": "fab-invented-loads-figure",
+      "expect": "fail",
+      "category": "fabricated_number",
+      "why": "1.2M loads in the evidence, 2M in the copy. Rounding someone else's metric up is still inventing it.",
+      "lead": "dana",
+      "cite": [
+        "nw_home"
+      ],
+      "subject": "2M loads",
+      "body": "Dana, 2M loads a year through one dashboard is a serious amount of exception handling.",
+      "expect_claim": {
+        "kind": "number",
+        "token": "2M"
+      }
+    },
+    {
+      "id": "fab-invented-company-acquisition",
+      "expect": "fail",
+      "category": "fabricated_entity",
+      "why": "An acquisition that never happened, with a named counterparty. Legal exposure in one clause.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Revenue Operations Manager",
+      "body": "Dana, I saw the Revenue Operations Manager req. After the acquisition of Brightpath Freight, getting the go-to-market data stack straight must be urgent.",
+      "expect_claim": {
+        "kind": "entity",
+        "token": "Brightpath"
+      }
+    },
+    {
+      "id": "fab-wrong-company-name",
+      "expect": "fail",
+      "category": "fabricated_entity",
+      "why": "Addressed to the right person at the wrong company. A merge-field failure and a misdirected claim at the same time.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Westwind Logistics hiring",
+      "body": "Dana, I saw Westwind Logistics is hiring a Revenue Operations Manager to own the go-to-market data stack.",
+      "expect_claim": {
+        "kind": "entity",
+        "token": "Westwind"
+      }
+    },
+    {
+      "id": "fab-investor-from-another-company",
+      "expect": "fail",
+      "category": "fabricated_entity",
+      "why": "Fernbrook Ventures is real, and it is PaperKite's investor. Cited against Northwind's job req it supports nothing: the corpus is per-company and the verifier must not leak across it.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Revenue Operations Manager",
+      "body": "Dana, since Fernbrook Ventures came in you have been rebuilding the go-to-market data stack. The Revenue Operations Manager req reads that way too.",
+      "expect_claim": {
+        "kind": "entity",
+        "token": "Fernbrook"
+      }
+    },
+    {
+      "id": "fab-invented-product-name",
+      "expect": "fail",
+      "category": "fabricated_entity",
+      "why": "Naming a tool they were never observed to use. Plausible for a support team, and entirely invented.",
+      "lead": "tom",
+      "cite": [
+        "helio_support"
+      ],
+      "subject": "Clinic questions",
+      "body": "Tom, you are hiring a Customer Support Specialist to triage clinic questions. A tool like Zendesk tends to buckle at exactly that point.",
+      "expect_claim": {
+        "kind": "entity",
+        "token": "Zendesk"
+      }
+    },
+    {
+      "id": "fab-invented-person",
+      "expect": "fail",
+      "category": "fabricated_entity",
+      "why": "A named colleague nobody retrieved. Naming the wrong person to the right person is a particularly bad look.",
+      "lead": "dana",
+      "cite": [
+        "nw_sdr"
+      ],
+      "subject": "Outbound team",
+      "body": "Dana, I saw you are building out the outbound team. Worth a word with Helen Vasquez before the first SDRs start.",
+      "expect_claim": {
+        "kind": "entity",
+        "token": "Helen"
+      }
+    },
+    {
+      "id": "fab-invented-role-chief-revenue-officer",
+      "expect": "fail",
+      "category": "fabricated_role",
+      "why": "Helio posted a Customer Support Specialist. A CRO search is a different company's story.",
+      "lead": "tom",
+      "cite": [
+        "helio_support"
+      ],
+      "subject": "Your Chief Revenue Officer search",
+      "body": "Tom, hiring a Chief Revenue Officer usually means the go-to-market plan is being rebuilt from scratch.",
+      "expect_claim": {
+        "kind": "role",
+        "token": "Chief Revenue Officer"
+      }
+    },
+    {
+      "id": "fab-invented-role-recombined-words",
+      "expect": "fail",
+      "category": "fabricated_role",
+      "why": "The hard one for a token-level checker: every word of 'Head of Revenue Operations' is in the evidence, and that title is not. This is why titles are checked as whole phrases.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Revenue Operations",
+      "body": "Dana, I saw you are hiring a Head of Revenue Operations to own the go-to-market data stack.",
+      "expect_claim": {
+        "kind": "role",
+        "token": "Head of Revenue Operations"
+      }
+    },
+    {
+      "id": "fab-invented-role-seniority-bump",
+      "expect": "fail",
+      "category": "fabricated_role",
+      "why": "'Senior Revenue Operations Manager' is not the posted title. Seniority is a detail about their org they did not publish.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Revenue Operations",
+      "body": "Dana, the Senior Revenue Operations Manager req you posted reads like the reporting stack is held together by hand.",
+      "expect_claim": {
+        "kind": "role",
+        "token": "Senior Revenue Operations Manager"
+      }
+    },
+    {
+      "id": "fab-invented-month",
+      "expect": "fail",
+      "category": "fabricated_date",
+      "why": "The req is dated 2026-09-02. March is a fabricated date, and a wrong date is what makes a reader think you are working from stale data.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Revenue Operations Manager",
+      "body": "Dana, the Revenue Operations Manager role you posted in March is still open by the look of it.",
+      "expect_claim": {
+        "kind": "date",
+        "token": "March"
+      }
+    },
+    {
+      "id": "fab-invented-day",
+      "expect": "fail",
+      "category": "fabricated_date",
+      "why": "Right month, wrong day. The verifier has no clock and must not guess: September 20 is not September 2.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Revenue Operations Manager",
+      "body": "Dana, I read the Revenue Operations Manager req you put up on September 20.",
+      "expect_claim": {
+        "kind": "date",
+        "token": "September 20"
+      }
+    },
+    {
+      "id": "fab-invented-relative-date",
+      "expect": "fail",
+      "category": "fabricated_date",
+      "why": "The offsite post says 'this year'. 'Last week' is a dated claim about when something happened that no evidence makes.",
+      "lead": "tom",
+      "cite": [
+        "helio_blog"
+      ],
+      "subject": "Notes from your offsite",
+      "body": "Tom, the offsite you ran last week put support volume right at the centre of things.",
+      "expect_claim": {
+        "kind": "date",
+        "token": "last week"
+      }
+    },
+    {
+      "id": "fab-invented-quarter",
+      "expect": "fail",
+      "category": "fabricated_date",
+      "why": "A specific quarter nobody stated. Quarters read as insider knowledge, which is exactly why they need evidence.",
+      "lead": "dana",
+      "cite": [
+        "nw_blog"
+      ],
+      "subject": "Outbound motion",
+      "body": "Dana, your post says inbound stopped working, and Q1 2026 is when that usually starts to hurt.",
+      "expect_claim": {
+        "kind": "date",
+        "token": "Q1 2026"
+      }
+    },
+    {
+      "id": "fab-claim-citing-unsupporting-fact",
+      "expect": "fail",
+      "category": "unsupported_by_citation",
+      "why": "The lane-benchmark claim is TRUE of this company and the draft cites the job req instead. A citation is only worth what the cited row says; resolving the id is not the same as the id supporting the sentence.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Lane benchmarks",
+      "body": "Dana, shipping lane-level benchmark reporting while also hiring for the go-to-market data stack is a lot at once.",
+      "expect_claim": {
+        "kind": "word",
+        "token": "benchmark"
+      }
+    },
+    {
+      "id": "fab-funding-claim-on-job-citation",
+      "expect": "fail",
+      "category": "unsupported_by_citation",
+      "why": "'Series' is licensed by a cited funding fact and by nothing else. Cited here is a job posting, so the funding claim has no evidence behind it.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Revenue Operations Manager",
+      "body": "Dana, hiring a Revenue Operations Manager straight after a Series B is the usual pattern.",
+      "expect_claim": {
+        "kind": "entity",
+        "token": "Series"
+      }
+    },
+    {
+      "id": "fab-invented-metric-vocabulary",
+      "expect": "fail",
+      "category": "fabricated_term",
+      "why": "Churn is a specific business metric asserted about them. Nothing retrieved mentions retention at all.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Revenue Operations Manager",
+      "body": "Dana, the Revenue Operations Manager req plus your churn problem is a familiar combination.",
+      "expect_claim": {
+        "kind": "word",
+        "token": "churn"
+      }
+    },
+    {
+      "id": "fab-invented-headcount-term",
+      "expect": "fail",
+      "category": "fabricated_term",
+      "why": "'Headcount doubled' is a quantity claim wearing a word instead of a digit. The fixtures list 'headcount' as a token that must never pass.",
+      "lead": "tom",
+      "cite": [
+        "helio_blog"
+      ],
+      "subject": "Support volume",
+      "body": "Tom, your offsite notes say support volume has grown. Headcount doubled over the same stretch, I imagine.",
+      "expect_claim": {
+        "kind": "word",
+        "token": "Headcount"
+      }
+    },
+    {
+      "id": "fab-fabricated-quote",
+      "expect": "fail",
+      "category": "fabricated_quote",
+      "why": "Quotation marks are a promise that these are their words. This sentence appears nowhere.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Revenue Operations Manager",
+      "body": "Dana, your req says \"we are drowning in manual routing work\", which is a hard thing to admit in public.",
+      "expect_claim": {
+        "kind": "quote",
+        "token": "we are drowning in manual routing work"
+      }
+    },
+    {
+      "id": "fab-subtly-altered-quote",
+      "expect": "fail",
+      "category": "fabricated_quote",
+      "why": "A real quote with one noun swapped: spreadsheets becomes Salesforce. It is the alteration that makes it a false attribution.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Revenue Operations Manager",
+      "body": "Dana, the req says you want to \"rebuild reporting that the sales team currently maintains by hand in Salesforce\".",
+      "expect_claim": {
+        "kind": "quote",
+        "token": "rebuild reporting that the sales team currently maintains by hand in Salesforce"
+      }
+    },
+    {
+      "id": "fab-inferred-tooling",
+      "expect": "fail",
+      "category": "fabricated_term",
+      "why": "A CRM migration inferred from a data-stack req. Plausible, specific, and not stated anywhere.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Go-to-market data stack",
+      "body": "Dana, your CRM migration and the Revenue Operations Manager req are pulling on the same rope.",
+      "expect_claim": {
+        "kind": "entity",
+        "token": "CRM"
+      }
+    },
+    {
+      "id": "fab-invented-customer-name",
+      "expect": "fail",
+      "category": "fabricated_entity",
+      "why": "Naming one of their customers. If it is wrong it is embarrassing; if it is right by accident it looks like surveillance.",
+      "lead": "dana",
+      "cite": [
+        "nw_changelog"
+      ],
+      "subject": "Lane benchmarks",
+      "body": "Dana, lane-level benchmark reporting is the kind of thing Kellogg asks for and nobody else funds.",
+      "expect_claim": {
+        "kind": "entity",
+        "token": "Kellogg"
+      }
+    },
+    {
+      "id": "struct-dangling-citation",
+      "expect": "fail",
+      "category": "structural",
+      "why": "A citation that resolves to nothing. Structural, unambiguous, and unchanged from Phase 1.",
+      "lead": "dana",
+      "cite": [
+        "job_posting:deadbeefdeadbeef"
+      ],
+      "subject": "Northwind Logistics",
+      "body": "Dana, a quick note about Northwind Logistics.",
+      "expect_problem": true
+    },
+    {
+      "id": "struct-fact-without-source-url",
+      "expect": "fail",
+      "category": "structural",
+      "why": "schemas.Fact says a fact with no source_url is untraceable. We cannot show a recipient's counsel what we relied on, so it may not be relied on.",
+      "lead": "priya",
+      "cite": [
+        "pk_funding_no_url"
+      ],
+      "subject": "PaperKite",
+      "body": "Priya, congratulations on the Series A.",
+      "expect_problem": true
+    },
+    {
+      "id": "struct-no-citations-at-all",
+      "expect": "fail",
+      "category": "structural",
+      "why": "Nothing to check against is not the same as nothing to object to.",
+      "lead": "dana",
+      "cite": [],
+      "subject": "Northwind Logistics",
+      "body": "Dana, I saw Northwind Logistics is hiring.",
+      "expect_problem": true
+    },
+    {
+      "id": "struct-missing-footer",
+      "expect": "fail",
+      "category": "structural",
+      "why": "No physical address and no unsubscribe link. Perfectly grounded copy that must still never be sent.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Revenue Operations Manager",
+      "body": "Dana, I saw you are hiring a Revenue Operations Manager to own the go-to-market data stack.",
+      "footer": "missing",
+      "expect_problem": true
+    },
+    {
+      "id": "struct-tampered-footer-address",
+      "expect": "fail",
+      "category": "structural",
+      "why": "A footer that does not match the configured sender address. Either the address is wrong or something edited the email after rendering; both are failures.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Revenue Operations Manager",
+      "body": "Dana, I saw you are hiring a Revenue Operations Manager to own the go-to-market data stack.",
+      "footer": "tampered",
+      "expect_problem": true
+    },
+    {
+      "id": "struct-footer-for-a-different-lead",
+      "expect": "fail",
+      "category": "structural",
+      "why": "The unsubscribe link belongs to someone else, so the one-click opt-out would suppress the wrong person. Structurally identical to having no unsubscribe at all.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Revenue Operations Manager",
+      "body": "Dana, I saw you are hiring a Revenue Operations Manager to own the go-to-market data stack.",
+      "footer": "other_lead",
+      "expect_problem": true
+    },
+    {
+      "id": "ok-template-verbatim-quote",
+      "expect": "pass",
+      "category": "template",
+      "why": "What compose_template emits today: fixed scaffolding around a verbatim quote. If this ever fails, Phase 1 output has started being held.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Northwind Logistics — Revenue Operations Manager",
+      "body": "Hi Dana,\n\nI saw your Revenue Operations Manager opening: \"Revenue Operations Manager - Own the go-to-market data stack end to end. You will untangle our lead routing, rebuild reporting that the sales team currently maintains by hand in...\"\n\nIf that is live for you right now, I can show you what we do for teams in the same spot — a short call, no deck.\n\nWorth a reply either way, and I will leave it here if not."
+    },
+    {
+      "id": "ok-paraphrase-hiring",
+      "expect": "pass",
+      "category": "known_false_positive",
+      "why": "'hiring' — the first of the five words the Phase 1 verifier flagged. The posting never uses the word; the fact's KIND is job_posting, and that kind is retrieved evidence too.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Revenue Operations Manager",
+      "body": "Dana, I saw you are hiring a Revenue Operations Manager to own the go-to-market data stack end to end. Untangling lead routing and rebuilding reporting by hand is the part that never fits in the week."
+    },
+    {
+      "id": "ok-paraphrase-scaled",
+      "expect": "pass",
+      "category": "known_false_positive",
+      "why": "'scaled' against evidence that says 'stopped scaling' — a tense change, not a claim. 'six years' also has to survive the spelled-number check.",
+      "lead": "dana",
+      "cite": [
+        "nw_blog"
+      ],
+      "subject": "Outbound motion",
+      "body": "Dana, your post says inbound scaled for six years and then stopped scaling last quarter, so you are building an outbound motion. That is usually the moment the list work starts."
+    },
+    {
+      "id": "ok-paraphrase-reps",
+      "expect": "pass",
+      "category": "known_false_positive",
+      "why": "'reps' — a plain abbreviation of Sales Development Representative, which is exactly what the cited req says.",
+      "lead": "marcus",
+      "cite": [
+        "nw_sdr"
+      ],
+      "subject": "Your first SDRs",
+      "body": "Marcus, the first SDRs at Northwind are about to start, and two reps working new-logo accounts in food and beverage distribution will generate a lot of list work."
+    },
+    {
+      "id": "ok-paraphrase-since",
+      "expect": "pass",
+      "category": "known_false_positive",
+      "why": "'since' — a conjunction the Phase 1 hand list simply did not contain. It asserts nothing about anybody.",
+      "lead": "marcus",
+      "cite": [
+        "nw_sdr"
+      ],
+      "subject": "Outbound team",
+      "body": "Marcus, since you are building out your first dedicated outbound team, the new-logo accounts in food and beverage distribution will need a list nobody has built yet."
+    },
+    {
+      "id": "ok-paraphrase-series",
+      "expect": "pass",
+      "category": "known_false_positive",
+      "why": "'Series' over a cited funding fact. The word is licensed by the kind and the amount is quoted exactly.",
+      "lead": "priya",
+      "cite": [
+        "pk_funding",
+        "pk_home"
+      ],
+      "subject": "PaperKite's Series A",
+      "body": "Priya, congratulations on the $12M Series A led by Fernbrook Ventures. Growing the team is the stated plan, and document workflows get messier with every new person."
+    },
+    {
+      "id": "ok-synonym-recruiting",
+      "expect": "pass",
+      "category": "synonym",
+      "why": "'recruiting' for 'hiring', both licensed by the job_posting kind. A synonym is not a new claim.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Revenue operations",
+      "body": "Dana, you are recruiting for revenue operations and the req is specific about the go-to-market data stack. That reads like a build, not a tidy-up."
+    },
+    {
+      "id": "ok-tense-change",
+      "expect": "pass",
+      "category": "tense",
+      "why": "Evidence: 'We are building out our first dedicated outbound team'. Copy: 'you were building out'. Tense is not a fact.",
+      "lead": "marcus",
+      "cite": [
+        "nw_sdr"
+      ],
+      "subject": "Outbound team",
+      "body": "Marcus, you were building out your first dedicated outbound team when this went up, working new-logo accounts in food and beverage distribution out of Chicago."
+    },
+    {
+      "id": "ok-pluralisation",
+      "expect": "pass",
+      "category": "plural",
+      "why": "'two openings' against '(2 openings)'. A spelled cardinal is the same number, and an -s is not a claim.",
+      "lead": "marcus",
+      "cite": [
+        "nw_sdr"
+      ],
+      "subject": "Two SDR openings",
+      "body": "Marcus, two Sales Development Representative openings at once reads like a real outbound build."
+    },
+    {
+      "id": "ok-reordering",
+      "expect": "pass",
+      "category": "reordering",
+      "why": "The same nouns in a different order, with the specifics intact.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Lead routing and reporting",
+      "body": "Dana, rebuilding reporting and untangling lead routing is most of the Revenue Operations Manager req, and the handoff between marketing-sourced and outbound pipeline is the rest of it."
+    },
+    {
+      "id": "ok-number-exact",
+      "expect": "pass",
+      "category": "number",
+      "why": "Both figures quoted exactly as the homepage states them.",
+      "lead": "dana",
+      "cite": [
+        "nw_home"
+      ],
+      "subject": "340 shippers",
+      "body": "Dana, 340 shippers and 1.2M loads through one dashboard is a lot of carriers, lanes and exceptions to keep straight."
+    },
+    {
+      "id": "ok-number-magnitude-spelled-out",
+      "expect": "pass",
+      "category": "number",
+      "why": "'$12 million' and '$12M' are the same number written two ways, so canonicalisation must match them. It must not match $12M to a bare 12.",
+      "lead": "priya",
+      "cite": [
+        "pk_funding"
+      ],
+      "subject": "The Series A",
+      "body": "Priya, a $12 million Series A led by Fernbrook Ventures, with product development and growing the team as the stated use of it."
+    },
+    {
+      "id": "ok-date-from-iso-prefix",
+      "expect": "pass",
+      "category": "date",
+      "why": "The fact content carries '[2026-09-02]'. 'September 2' is that date in words, and matching it is exact-match, not inference.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Revenue Operations Manager",
+      "body": "Dana, the Revenue Operations Manager req you posted on September 2 is specific about owning the go-to-market data stack end to end."
+    },
+    {
+      "id": "ok-relative-date-supported",
+      "expect": "pass",
+      "category": "date",
+      "why": "'this year' is in the cited post, word for word.",
+      "lead": "tom",
+      "cite": [
+        "helio_blog"
+      ],
+      "subject": "Your offsite notes",
+      "body": "Tom, your offsite notes say the team has grown a lot this year and that support volume has grown with it. Mapping how a clinic question travels is the right place to start."
+    },
+    {
+      "id": "ok-grounded-in-lead-notes",
+      "expect": "pass",
+      "category": "notes",
+      "why": "The sender's own notes are legitimate grounding — he wrote them. MODEX and the stretched RevOps team both come from there.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "After MODEX",
+      "body": "Dana, good to meet at MODEX. You said the RevOps team is stretched thin, and now there is a Revenue Operations Manager req for the go-to-market data stack."
+    },
+    {
+      "id": "ok-grounded-in-lead-record",
+      "expect": "pass",
+      "category": "identity",
+      "why": "Name, title, company and location came from the client's own CSV. Those are not hallucinations.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Dana — Northwind Logistics",
+      "body": "Dana Whitfield, VP Revenue Operations at Northwind Logistics in Columbus — I saw the Revenue Operations Manager req for the go-to-market data stack."
+    },
+    {
+      "id": "ok-abbreviation-revops",
+      "expect": "pass",
+      "category": "abbreviation",
+      "why": "'RevOps' expands to Revenue Operations, which the cited req says. This lead has no notes, so the expansion is doing the work on its own.",
+      "lead": "marcus",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "RevOps hiring",
+      "body": "Marcus, the RevOps req is specific: own the go-to-market data stack end to end, untangle lead routing, rebuild reporting."
+    },
+    {
+      "id": "ok-role-title-exact",
+      "expect": "pass",
+      "category": "role",
+      "why": "The posted title, used as posted.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Revenue Operations Manager",
+      "body": "Dana, hiring a Revenue Operations Manager to own the handoff between marketing-sourced and outbound pipeline is a good sign the problem is being taken seriously."
+    },
+    {
+      "id": "ok-role-title-plural",
+      "expect": "pass",
+      "category": "role",
+      "why": "Two of the same posted role, so the title is plural. Still the posted title.",
+      "lead": "marcus",
+      "cite": [
+        "nw_sdr"
+      ],
+      "subject": "Sales Development Representatives",
+      "body": "Marcus, hiring Sales Development Representatives for new-logo accounts in food and beverage distribution means somebody has to build those lists."
+    },
+    {
+      "id": "ok-helio-support-paraphrase",
+      "expect": "pass",
+      "category": "paraphrase",
+      "why": "Restates the support req in different words, with no number and no invented consequence.",
+      "lead": "tom",
+      "cite": [
+        "helio_support"
+      ],
+      "subject": "Clinic questions",
+      "body": "Tom, you are hiring a Customer Support Specialist to answer inbound clinic questions by phone and email and to escalate integration problems. Triage like that is usually the first thing to get expensive."
+    },
+    {
+      "id": "ok-changelog-paraphrase",
+      "expect": "pass",
+      "category": "paraphrase",
+      "why": "'you shipped' over a cited changelog entry, which is what a changelog entry is.",
+      "lead": "dana",
+      "cite": [
+        "nw_changelog"
+      ],
+      "subject": "Lane-level benchmarks",
+      "body": "Dana, you shipped lane-level benchmark reporting so customers can compare their own cost per mile against anonymised peer data on the same lane. That is a hard thing to explain in a cold email, and a good reason to be talking."
+    },
+    {
+      "id": "ok-sender-side-offer",
+      "expect": "pass",
+      "category": "scaffolding",
+      "why": "Everything after the first sentence is about the sender, not the recipient. Sender-side scaffolding asserts nothing checkable and must not need evidence.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Revenue Operations Manager",
+      "body": "Dana, I saw the Revenue Operations Manager req. If that is live for you right now, I can show you what we do for teams in the same spot — a short call, no deck. Worth a reply either way, and I will leave it here if not."
+    },
+    {
+      "id": "ok-two-facts-llm-style",
+      "expect": "pass",
+      "category": "paraphrase",
+      "why": "The flagship case: the kind of email compose_claude is meant to write. Two facts, ordinary English between them, every specific traceable. If this is held, Phase 2 cannot ship.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops",
+        "nw_blog"
+      ],
+      "subject": "Revenue Operations Manager, and the outbound motion",
+      "body": "Dana, you are hiring a Revenue Operations Manager to own the go-to-market data stack, and your post says inbound stopped scaling last quarter so you are finally building an outbound motion.\n\nThose two land on the same person. The handoff between marketing-sourced and outbound pipeline is the part that gets rebuilt by hand in spreadsheets first.\n\nIf that is live right now, I can show you what we do for teams in the same spot — a short call, no deck."
+    },
+    {
+      "id": "ok-question-not-assertion",
+      "expect": "pass",
+      "category": "scaffolding",
+      "why": "A question about their plans is not a claim about their plans, as long as the specifics in it are grounded.",
+      "lead": "marcus",
+      "cite": [
+        "nw_sdr"
+      ],
+      "subject": "Your first SDRs",
+      "body": "Marcus, is the first dedicated outbound team going to work new-logo accounts in food and beverage distribution out of Chicago, or remote? Either way the list has to come from somewhere."
+    },
+    {
+      "id": "ok-hyphenated-compound",
+      "expect": "pass",
+      "category": "paraphrase",
+      "why": "'go-to-market' and 'new-logo' are hyphenated compounds in the evidence and in the copy. A hyphen must not read as a new word.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops",
+        "nw_sdr"
+      ],
+      "subject": "Go-to-market data stack",
+      "body": "Dana, the go-to-market data stack and the new-logo accounts are the same problem seen from two ends: one req owns the reporting, the other works the accounts."
+    },
+    {
+      "id": "ok-quote-truncated-verbatim",
+      "expect": "pass",
+      "category": "quote",
+      "why": "A verbatim quote cut at a word boundary, the way the template truncates. Truncation keeps every token, so it stays traceable.",
+      "lead": "tom",
+      "cite": [
+        "helio_support"
+      ],
+      "subject": "Customer Support Specialist",
+      "body": "Tom, your req says \"Answer inbound clinic questions by phone and email, triage scheduling issues...\" — that is a lot for one line."
+    },
+    {
+      "id": "ok-possessive-and-contraction",
+      "expect": "pass",
+      "category": "paraphrase",
+      "why": "Possessives and contractions are punctuation, not claims. Northwind's == Northwind.",
+      "lead": "dana",
+      "cite": [
+        "nw_home"
+      ],
+      "subject": "Northwind's dashboard",
+      "body": "Dana, Northwind's dashboard covers every carrier, lane and exception for mid-market shippers — you've got 340 of them on it."
+    },
+    {
+      "id": "ok-acronym-from-evidence",
+      "expect": "pass",
+      "category": "abbreviation",
+      "why": "'SDRs' is the evidence's own acronym, used as the evidence uses it.",
+      "lead": "marcus",
+      "cite": [
+        "nw_sdr"
+      ],
+      "subject": "First SDRs at Northwind",
+      "body": "Marcus, the first SDRs at Northwind are going to be working new-logo accounts in food and beverage distribution from day one."
+    },
+    {
+      "id": "ok-notes-only-claim",
+      "expect": "pass",
+      "category": "notes",
+      "why": "A draft resting mostly on the sender's notes, with one cited fact. The notes are grounding in their own right.",
+      "lead": "dana",
+      "cite": [
+        "nw_sdr"
+      ],
+      "subject": "MODEX follow-up",
+      "body": "Dana, following up from MODEX — you mentioned the RevOps team is stretched thin, and you are now building out a first dedicated outbound team on top of that."
+    },
+    {
+      "id": "ok-multiple-facts-one-unused",
+      "expect": "pass",
+      "category": "citation",
+      "why": "Citing more than the copy leans on is not a fabrication. The verifier checks that claims are covered, not that every citation earned its place.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops",
+        "nw_changelog",
+        "nw_home"
+      ],
+      "subject": "Revenue Operations Manager",
+      "body": "Dana, I saw you are hiring a Revenue Operations Manager to untangle lead routing and rebuild reporting."
+    }
+  ]
+}

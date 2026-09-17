@@ -36,6 +36,10 @@ _SAFE_ENV: dict[str, str] = {
     # developer's `.env` would route every drafting test through a paid,
     # non-deterministic model call.
     "DRAFT_COMPOSER": "template",
+    # Same hazard on the verification side: `VERIFY_JUDGE=claude` turns the
+    # optional entailment judge on, and `handle_verify` reads it from settings,
+    # so a developer's `.env` could route queue tests through a paid model call.
+    "VERIFY_JUDGE": "off",
 }
 
 
