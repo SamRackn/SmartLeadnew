@@ -47,7 +47,20 @@ EMPTY_DOMAIN = "stonebridge-partners.com"
 MISSING_DOMAIN = "no-such-company.example"
 OUTAGE_DOMAIN = "outage-test.example"
 
-_TABLES = ("jobs", "drafts", "leads", "research_cache", "suppression_list")
+# Every table, so `reset_db()` actually resets. TRUNCATE ... CASCADE only
+# follows references *into* the listed tables, so a parent side (draft_batches,
+# campaigns, workspaces) is NOT reached by truncating its children and has to
+# be named here or its rows survive into the next test.
+_TABLES = (
+    "jobs",
+    "drafts",
+    "draft_batches",
+    "leads",
+    "campaigns",
+    "workspaces",
+    "research_cache",
+    "suppression_list",
+)
 
 
 def utcnow() -> datetime:

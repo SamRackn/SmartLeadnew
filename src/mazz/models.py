@@ -1,7 +1,9 @@
 """SQLAlchemy 2.x models — the whole persistence layer.
 
-Five tables, per the brief's data model:
+The tables, per CLAUDE.md's data model:
 
+  workspaces        one per agency-client ClientRise runs outbound for
+  campaigns         a workspace's engagement + its scoring configuration
   leads             the incoming record + pipeline status
   research_cache    scraped facts, keyed by COMPANY DOMAIN (not by person)
   drafts            generated copy + the fact ids it rests on
@@ -15,6 +17,18 @@ Cascade semantics (delete-by-person, GDPR/CCPA):
   COMPANY-scoped and shared between colleagues, so it is deliberately NOT
   cascaded — the privacy module prunes individual person-specific facts out of
   the JSONB list by fact id / subject_email. See mazz.schemas.Fact.
+
+  leads.campaign_id points the other way (child -> parent), so it can neither
+  block nor survive a person deletion: dropping the lead drops the reference.
+  It is ON DELETE SET NULL so that retiring a campaign never deletes people,
+  and never cascades into their drafts and jobs.
+
+Tenancy boundary:
+  workspaces scope CAMPAIGNS, not RESEARCH. research_cache stays keyed by
+  company domain alone and is deliberately shared across workspaces — two
+  agency-clients targeting the same employer must still cost one research
+  operation. That dedup is the largest cost lever in the system; do not add a
+  workspace_id to research_cache.
 """
 
 from __future__ import annotations
@@ -33,6 +47,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -104,6 +119,145 @@ def _utcnow_column(**kwargs) -> Mapped[datetime]:
 
 
 # --------------------------------------------------------------------------
+# workspaces
+# --------------------------------------------------------------------------
+
+
+class Workspace(Base):
+    """One agency-client that ClientRise runs outbound on behalf of.
+
+    The client's own Smartlead templates say the operating model is per-client:
+    "Change the highlighted segments for clients target industry", and a booking
+    email offering "our Founder, CLIENT NAME" (docs/CLIENT-REPLY-TEMPLATES.md).
+    So the prospect ICP — and therefore the scoring vocabulary — varies per
+    engagement. This table is the thing a campaign, and through it a scoring
+    config, belongs to. ClientRise's own outbound is just another row.
+
+    Deliberately minimal: identity and a display name. There is no auth, no user
+    membership and no tenant-isolation middleware here, and adding the table
+    does not create any — the review app is single-user session auth today, and
+    real multi-tenancy is a separate piece of work (CLAUDE.md work-order item 5).
+    Nothing in the pipeline filters by workspace yet; do not assume it does.
+    """
+
+    __tablename__ = "workspaces"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    #: Human-stable handle (``acme-digital``). Unique, and the identifier a CSV
+    #: import or CLI names a workspace by, so that renaming the display name
+    #: never breaks a reference and a numeric id never has to be typed.
+    slug: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    created_at: Mapped[datetime] = _utcnow_column(
+        nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = _utcnow_column(
+        nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    campaigns: Mapped[list["Campaign"]] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="Campaign.name",
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<Workspace {self.id} {self.slug}>"
+
+
+# --------------------------------------------------------------------------
+# campaigns
+# --------------------------------------------------------------------------
+
+
+class Campaign(Base):
+    """An engagement inside a workspace, carrying its own scoring configuration.
+
+    Why the config lives here rather than in code: ``pipeline.score`` ships one
+    ``SUPPORTED_ROLE_TERMS`` vocabulary written for a B2B SaaS seller (revops,
+    sdr, sales engineer, crm). ClientRise is not a SaaS, and it sells for many
+    different agency-clients whose ICPs have nothing in common. That vocabulary
+    decides which leads clear the threshold and which land ``no_angle``, so it is
+    the single biggest lever on both cost per usable lead and on conversations
+    missed — and it cannot be one global constant.
+
+    ``scoring_config`` is a JSONB object whose keys are ``ScoringConfig`` field
+    names. It is a PARTIAL override: ``{}`` (the default) means "use
+    ``DEFAULT_SCORING`` unchanged", and a config naming only
+    ``supported_role_terms`` changes only that. Stored as a plain object rather
+    than a typed column set because the knobs are judgement calls the client will
+    move, and adding one must not need a migration.
+
+        {"threshold": 45.0,
+         "supported_role_terms": ["paid media", "performance marketing"]}
+
+    Two constraints on the shape, both enforced where they can be:
+      * it must be a JSON OBJECT, not a list or a scalar — a CHECK does that in
+        the database, because a malformed config silently falling back to the
+        SaaS defaults is exactly the failure this table exists to prevent;
+      * ``supported_role_terms`` / ``off_target_role_terms`` arrive as JSON
+        ARRAYS and must be rebuilt into the frozensets ``ScoringConfig`` wants.
+        That coercion belongs in ``pipeline.score`` (models must not import the
+        pipeline), and ``ScoringConfig.__post_init__`` still gets the last word:
+        a config where funding alone could clear the threshold is refused there,
+        per guardrail 2, no matter who stored it.
+
+    ``segment`` is the segment identifier from CLAUDE.md's routing seam
+    (``lead -> RoutingPolicy.route(lead) -> (campaign, segment, mailbox)``).
+    There is deliberately no mailbox column: ``mailboxes`` is work-order item 4
+    and does not exist yet. One-campaign-per-mailbox stays reachable without a
+    migration because the relation can be carried on the mailbox row when that
+    table lands.
+    """
+
+    __tablename__ = "campaigns"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    #: Routing segment this campaign serves. Free text, like ``jobs.kind``: the
+    #: segmentation a client agrees on is theirs, not ours, and a new one must
+    #: not need a migration.
+    segment: Mapped[str | None] = mapped_column(String(64))
+
+    #: Partial ``ScoringConfig`` override. ``{}`` == the shipped defaults.
+    scoring_config: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+
+    created_at: Mapped[datetime] = _utcnow_column(
+        nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = _utcnow_column(
+        nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    workspace: Mapped[Workspace] = relationship(back_populates="campaigns")
+    leads: Mapped[list["Lead"]] = relationship(
+        back_populates="campaign",
+        passive_deletes=True,
+    )
+
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "name", name="uq_campaigns_workspace_id_name"),
+        CheckConstraint(
+            "jsonb_typeof(scoring_config) = 'object'",
+            name="scoring_config_is_object",
+        ),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<Campaign {self.id} ws={self.workspace_id} {self.name!r}>"
+
+
+# --------------------------------------------------------------------------
 # leads
 # --------------------------------------------------------------------------
 
@@ -143,6 +297,33 @@ class Lead(Base):
     #: the same employer share one cache row.
     company_domain: Mapped[str | None] = mapped_column(String(253), index=True)
 
+    # --- tenancy --------------------------------------------------------
+    #: Which campaign (and through it, which workspace and scoring config) this
+    #: lead belongs to.
+    #:
+    #: NULLABLE on purpose, and it stays nullable. Every lead already in the
+    #: database predates campaigns and must keep flowing through the pipeline
+    #: unchanged — an unassigned lead scores against DEFAULT_SCORING, exactly as
+    #: it does today. Backfilling a "default campaign" would be a lie about which
+    #: engagement those leads came from.
+    #:
+    #: ON DELETE SET NULL, chosen over CASCADE and RESTRICT:
+    #:   * CASCADE would mean retiring a campaign deletes its prospects, and
+    #:     (through leads' own cascades) their drafts and queued jobs. Deleting
+    #:     people is delete-by-person's job, never a config change's side effect.
+    #:   * RESTRICT would block a campaign delete for as long as any lead
+    #:     referenced it.
+    #: SET NULL keeps the lead valid and falls back to the shipped defaults,
+    #: which is what the nullable column already means. Delete-by-person is
+    #: untouched either way: the reference lives on the lead row, so deleting
+    #: the lead deletes the reference, and `campaigns` holds no personal data
+    #: for privacy.find_person_references to find.
+    #: INDEXED: "all leads in this campaign" is the review app's and the router's
+    #: hot query.
+    campaign_id: Mapped[int | None] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="SET NULL"), index=True
+    )
+
     # --- pipeline -------------------------------------------------------
     status: Mapped[LeadStatus] = mapped_column(
         lead_status_enum,
@@ -170,6 +351,8 @@ class Lead(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+    #: No cascade: a lead is not owned by its campaign (see campaign_id).
+    campaign: Mapped["Campaign | None"] = relationship(back_populates="leads")
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<Lead {self.id} {self.email} {self.status}>"
@@ -445,6 +628,7 @@ class Job(Base):
 
 __all__ = [
     "Base",
+    "Campaign",
     "Draft",
     "DraftBatch",
     "Job",
@@ -454,4 +638,5 @@ __all__ = [
     "ResearchCache",
     "SuppressionEntry",
     "VerificationStatus",
+    "Workspace",
 ]
