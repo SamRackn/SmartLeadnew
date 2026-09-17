@@ -38,14 +38,14 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime, timezone
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
 from sqlalchemy import select
 
-from mazz.models import Lead, LeadStatus, ResearchCache
+from mazz.models import Campaign, Lead, LeadStatus, ResearchCache
 from mazz.schemas import Fact, FactKind
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -60,6 +60,8 @@ __all__ = [
     "RoleFit",
     "ScoringConfig",
     "DEFAULT_SCORING",
+    "UNCONFIRMED_DATED_CONTENT_KIND",
+    "UNCONFIRMED_JOB_POSTING_KIND",
     "ScoredFact",
     "ScoreResult",
     "classify_role_fit",
@@ -70,6 +72,8 @@ __all__ = [
     "facts_for_domain",
     "facts_for_lead",
     "parse_facts",
+    "config_for_lead",
+    "scoring_config_from_json",
     "score_lead",
     "handle_score",
 ]
@@ -411,6 +415,59 @@ _MEDIUM_KINDS = {
     FactKind.PRESS.value,
 }
 
+# --------------------------------------------------------------------------
+# Unconfirmed-provenance sentinels
+# --------------------------------------------------------------------------
+#
+# The ingest layer tags every careers-page and dated-content candidate with how
+# it was identified, and refuses to admit a low-confidence one at its nominal
+# kind — it emits one of these sentinels instead. That closes the guardrail gap
+# in CLAUDE.md from the producing side: verification cannot catch a false fact,
+# because a misidentified filter control is exactly as *traceable* as a real
+# req once it is in the cache.
+#
+# These already failed closed here with no code at all: an unrecognised kind
+# lands on `unknown_kind` (5.0) at WEAK, and WEAK can never qualify however
+# fresh it is. Naming them explicitly changes NOTHING about that arithmetic.
+# What it changes is what the reviewer reads. "unknown fact kind
+# 'job_posting_unconfirmed'; scored weak until the scorer learns it" says the
+# scorer is out of date. It is not: the pipeline looked, found something
+# job-shaped, and could not confirm it was a real req. That is a finding, and
+# the reviewer should see it as one.
+#
+# Mirrored as strings rather than imported from `mazz.integrations.company`.
+# The scorer reads whatever is in `research_cache` and must not depend on which
+# adapter produced it — any future provider can emit these. `test_score.py`
+# asserts the strings still match the producer's constants, so a rename over
+# there fails the build here rather than silently reverting these facts to the
+# generic unknown-kind message.
+UNCONFIRMED_JOB_POSTING_KIND = "job_posting_unconfirmed"
+UNCONFIRMED_DATED_CONTENT_KIND = "dated_content_unconfirmed"
+
+_UNCONFIRMED_KINDS = {
+    UNCONFIRMED_JOB_POSTING_KIND: (
+        "job candidate we could not confirm is a real req"
+    ),
+    UNCONFIRMED_DATED_CONTENT_KIND: (
+        "dated item whose date we could not confirm"
+    ),
+}
+
+
+def _provenance_suffix(fact: Fact, *, only: bool = False) -> str:
+    """How a demoted candidate was identified, in the reviewer's own line.
+
+    The ingest layer records `identification_method` on anything it had to
+    judge. Surfacing it means "we could not confirm it" comes with the reason,
+    which is the difference between a reviewer trusting the verdict and
+    wondering whether the scorer is broken.
+    """
+
+    method = (fact.metadata or {}).get("identification_method")
+    if not method:
+        return ""
+    return f" (identified {'only ' if only else ''}by {str(method)!r})"
+
 
 def score_fact(
     fact: Fact,
@@ -459,9 +516,36 @@ def score_fact(
     elif kind == FactKind.LEAD_NOTES.value:
         base, tier = config.lead_notes, SignalTier.WEAK
         why = "lead notes — grounding material, not a timing signal"
+    elif kind in _UNCONFIRMED_KINDS:
+        # Deliberately still WEAK at the unknown-kind weight. The weight is not
+        # what keeps this out of a draft — the tier is, structurally — so there
+        # is no knob here to misconfigure. It is not dropped either: the
+        # reviewer sees it in the signal list, correctly labelled as something
+        # we found and could not stand behind.
+        base, tier = config.unknown_kind, SignalTier.WEAK
+        why = (
+            f"{_UNCONFIRMED_KINDS[kind]}"
+            f"{_provenance_suffix(fact, only=True)}; not a reason to reach out until it is"
+            " confirmed"
+        )
     else:
         base, tier = config.unknown_kind, SignalTier.WEAK
         why = f"unknown fact kind {kind!r}; scored weak until the scorer learns it"
+
+    # A medium-confidence identification is ADMITTED at its nominal kind and
+    # scores exactly like a high-confidence one. That is deliberate and it is
+    # the honest position: nobody has measured how much less often a
+    # title-vocabulary match is a real req than an ATS-host match, and inventing
+    # a multiplier would put a made-up number on the largest lever in the
+    # system. It is said out loud in the reason instead, where a reviewer who
+    # has seen a few of them can judge, and where a future measurement has
+    # something to compare against.
+    metadata = fact.metadata or {}
+    if str(metadata.get("confidence") or "").lower() == "medium":
+        why += (
+            "; medium-confidence identification "
+            f"({str(metadata.get('identification_method'))!r})"
+        )
 
     score = round(base * multiplier, 2)
 
@@ -587,17 +671,147 @@ def facts_for_lead(session: "Session", lead: Lead) -> list[Fact]:
     return facts_for_domain(session, lead.company_domain)
 
 
+# --------------------------------------------------------------------------
+# Per-campaign configuration
+# --------------------------------------------------------------------------
+#
+# ClientRise runs outbound on behalf of each agency-client at that client's own
+# target industry, so the ICP is per engagement (docs/DECISIONS.md, and the
+# client's own templates: "Change the highlighted segments for clients target
+# industry"). The vocabulary in SUPPORTED_ROLE_TERMS above is written for a B2B
+# SaaS seller, which ClientRise is not — and that vocabulary decides which leads
+# clear the threshold and which are settled `no_angle`. One global constant
+# cannot serve two engagements, so the config is loaded from the lead's campaign.
+
+#: `ScoringConfig` fields that are sets in Python and arrays in JSON.
+_FROZENSET_FIELDS = ("supported_role_terms", "off_target_role_terms")
+
+
+def scoring_config_from_json(stored: Mapping[str, Any]) -> ScoringConfig:
+    """Rebuild a stored `campaigns.scoring_config` into a `ScoringConfig`.
+
+    A PARTIAL override, spread over the shipped defaults: a row naming only
+    ``threshold`` keeps every shipped weight, and ``{}`` means the defaults
+    unchanged. That is what makes the column safe to add a knob to later.
+
+    Three things it refuses to do, all for the same reason — a client's broken
+    config silently reverting to the SaaS vocabulary would move that client's
+    `no_angle` rate for reasons nobody can see, and `no_angle` is the number the
+    whole product is judged on:
+
+    * it does not swallow an unknown key (a typo'd knob would otherwise be a
+      setting that reads as applied and is not);
+    * it does not swallow a non-object (the database has a CHECK for this, and
+      this is the same refusal one layer up);
+    * it does not catch `ScoringConfig.__post_init__`. Guardrail 2 — funding
+      alone can never clear the threshold — gets the last word over anything
+      anybody stored, and a config that breaks it fails the job.
+
+    Role terms are matched case-insensitively against lower-cased fact content,
+    so they are normalised here rather than quietly never matching: a client who
+    writes "Paid Media" means the same thing as "paid media".
+    """
+
+    if not isinstance(stored, Mapping):
+        raise TypeError(
+            f"campaigns.scoring_config must be a JSON object, got "
+            f"{type(stored).__name__}: a malformed config must fail loudly, not "
+            "fall back to the shipped defaults"
+        )
+    if not stored:
+        return DEFAULT_SCORING
+
+    valid = {f.name for f in fields(ScoringConfig)}
+    unknown = sorted(set(stored) - valid)
+    if unknown:
+        raise ValueError(
+            f"campaigns.scoring_config names unknown scoring knobs {unknown}; "
+            f"valid keys are {sorted(valid)}. Refusing to apply a config that is "
+            "partly ignored — a typo'd knob would read as set and do nothing."
+        )
+
+    kwargs: dict[str, Any] = {name: getattr(DEFAULT_SCORING, name) for name in valid}
+    kwargs.update(stored)
+    for key in _FROZENSET_FIELDS:
+        kwargs[key] = _coerce_role_terms(key, kwargs[key])
+    return ScoringConfig(**kwargs)
+
+
+def _coerce_role_terms(key: str, value: Any) -> frozenset[str]:
+    """JSON has no frozenset. Rebuild one, and refuse anything that is not terms."""
+
+    if isinstance(value, (str, bytes)):
+        raise ValueError(
+            f"campaigns.scoring_config[{key!r}] must be an array of role terms, "
+            f"not a single string ({value!r}). One string would be read as a set "
+            "of its characters and match nearly every req."
+        )
+    try:
+        terms = list(value)
+    except TypeError:
+        raise ValueError(
+            f"campaigns.scoring_config[{key!r}] must be an array of role terms, "
+            f"got {type(value).__name__}"
+        ) from None
+    cleaned: set[str] = set()
+    for term in terms:
+        if not isinstance(term, str) or not term.strip():
+            raise ValueError(
+                f"campaigns.scoring_config[{key!r}] contains {term!r}; every role "
+                "term must be a non-empty string"
+            )
+        cleaned.add(term.strip().lower())
+    return frozenset(cleaned)
+
+
+def config_for_lead(session: "Session", lead: Lead) -> ScoringConfig:
+    """The scoring config in force for this lead: its campaign's, or the defaults.
+
+    ``leads.campaign_id`` is nullable and every lead in the database predates
+    campaigns, so NULL is a steady state rather than a migration to finish — it
+    means the shipped defaults, exactly as before.
+    """
+
+    campaign_id = getattr(lead, "campaign_id", None)
+    if campaign_id is None:
+        return DEFAULT_SCORING
+
+    campaign = session.get(Campaign, campaign_id)
+    if campaign is None:
+        # The FK is ON DELETE SET NULL, so this should be unreachable. If it
+        # happens, the id is stale rather than the config being wrong, and the
+        # shipped defaults are what a NULL would have meant anyway — but it is
+        # worth a line in the log, because it means something raced.
+        log.warning(
+            "lead %s references campaign %s, which does not exist; scoring with "
+            "the shipped defaults",
+            lead.id,
+            campaign_id,
+        )
+        return DEFAULT_SCORING
+
+    return scoring_config_from_json(campaign.scoring_config or {})
+
+
 def score_lead(
     session: "Session",
     lead: Lead,
     *,
     now: datetime | None = None,
-    config: ScoringConfig = DEFAULT_SCORING,
+    config: ScoringConfig | None = None,
 ) -> ScoreResult:
-    """Score one lead's cached research. Does not write anything."""
+    """Score one lead's cached research. Does not write anything.
 
+    ``config=None`` — the normal path — resolves the lead's campaign config.
+    Pass one explicitly only to score a lead against a config it does not have
+    (the review app's "what would this look like under X" has no caller yet).
+    """
+
+    resolved = config if config is not None else config_for_lead(session, lead)
     facts = facts_for_lead(session, lead)
-    return score_facts(facts, now=now, config=config, company_domain=lead.company_domain)
+    return score_facts(
+        facts, now=now, config=resolved, company_domain=lead.company_domain
+    )
 
 
 def handle_score(ctx: "JobContext") -> None:
@@ -606,6 +820,10 @@ def handle_score(ctx: "JobContext") -> None:
     On an angle: mark the lead READY-for-drafting and chain to ``draft``.
     On no angle: set ``no_angle`` and STOP. No draft job is queued, because the
     correct output for this lead is nothing at all, plainly labelled.
+
+    Passes no config on purpose: `score_lead` resolves the lead's own campaign
+    config. A config argument here would be one ICP applied to every client's
+    prospects, which is the thing per-campaign scoring exists to prevent.
     """
 
     result = score_lead(ctx.session, ctx.lead)

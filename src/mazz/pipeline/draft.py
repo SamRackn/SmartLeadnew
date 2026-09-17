@@ -63,7 +63,6 @@ from mazz.config import get_settings
 from mazz.integrations.base import setting
 from mazz.models import Draft, Lead, LeadStatus, VerificationStatus
 from mazz.pipeline.score import (
-    DEFAULT_SCORING,
     ScoredFact,
     ScoreResult,
     ScoringConfig,
@@ -449,7 +448,7 @@ def draft_for_lead(
     lead: Lead,
     *,
     now: datetime | None = None,
-    config: ScoringConfig = DEFAULT_SCORING,
+    config: ScoringConfig | None = None,
     composer: Composer | None = None,
     score_result: ScoreResult | None = None,
 ) -> DraftOutcome:
@@ -457,6 +456,13 @@ def draft_for_lead(
 
     Returns a `DraftOutcome`. When there is no angle, `content` is None and the
     status is `no_angle`: the caller must NOT write a draft row.
+
+    ``config=None`` means "this lead's campaign config", resolved by
+    `score.score_lead`. It must stay None-by-default rather than
+    `DEFAULT_SCORING`: passing the shipped SaaS defaults explicitly would
+    override the campaign's own vocabulary here and nowhere else, so the same
+    lead would score one way at the scoring step and another way at the drafting
+    step — and the second one is the one that decides whether an email exists.
     """
 
     result = score_result or score_lead(session, lead, now=now, config=config)

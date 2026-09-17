@@ -76,7 +76,7 @@ from mazz.pipeline.queue import (
     fail_job,
     utcnow,
 )
-from mazz.pipeline.score import DEFAULT_SCORING, ScoringConfig, score_lead
+from mazz.pipeline.score import ScoringConfig, score_lead
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from anthropic import Anthropic
@@ -186,7 +186,7 @@ def build_batch(
     jobs: list[Job],
     *,
     now: datetime | None = None,
-    config: ScoringConfig = DEFAULT_SCORING,
+    config: ScoringConfig | None = None,
 ) -> BatchPlan:
     """Score each claimed lead; batch only the ones with something to say.
 
@@ -194,6 +194,14 @@ def build_batch(
     `draft_for_lead` would settle it. It must stay that way: a `no_angle` lead
     that goes into the batch pays for a model call whose only correct answer is
     "do not write this email".
+
+    ``config=None`` means each lead is scored against ITS OWN campaign config,
+    resolved per lead by `score.score_lead`. That is not a default worth
+    changing: a batch is claimed off one queue and routinely mixes leads from
+    several campaigns, so a single config for the whole batch would score one
+    agency-client's prospects against another's ICP — and this is the step that
+    decides which of them get an email at all. Pass one explicitly only to
+    score a whole batch against a hypothetical.
     """
 
     plan = BatchPlan()

@@ -21,18 +21,25 @@ from sqlalchemy.orm import sessionmaker
 
 from mazz.db import get_engine
 from mazz.integrations.company import StubCompanyAdapter
-from mazz.models import Lead, LeadStatus, ResearchCache
+from mazz.models import Campaign, Lead, LeadStatus, ResearchCache, Workspace
+from mazz.pipeline.queue import JobContext, enqueue_job
 from mazz.pipeline.score import (
     DEFAULT_SCORING,
+    UNCONFIRMED_DATED_CONTENT_KIND,
+    UNCONFIRMED_JOB_POSTING_KIND,
     RoleFit,
     ScoringConfig,
     SignalTier,
     classify_role_fit,
+    config_for_lead,
     facts_for_lead,
+    handle_score,
     published_at_of,
     recency_multiplier,
+    score_fact,
     score_facts,
     score_lead,
+    scoring_config_from_json,
 )
 from mazz.schemas import Fact, FactKind
 
@@ -337,3 +344,421 @@ def test_a_lead_with_no_cache_row_has_no_angle(session):
 
     assert facts_for_lead(session, lead) == []
     assert result.has_angle is False
+
+
+# ==========================================================================
+# Unconfirmed provenance: the two sentinel kinds from ingest
+# ==========================================================================
+#
+# `integrations.company` refuses to admit a low-confidence careers-page or
+# dated-content candidate at its nominal kind and emits a sentinel instead.
+# These tests pin down both halves of the deal: it stays non-qualifying (the
+# safety property, which held before the scorer knew the kind existed), and the
+# reviewer is told what actually happened (the readability fix).
+
+
+def test_an_unconfirmed_job_candidate_can_never_qualify_on_its_own():
+    """A misidentified filter control must not manufacture an angle.
+
+    This is the guardrail-gap case from CLAUDE.md seen from the scoring side:
+    verification cannot catch a false fact, because a fake req is exactly as
+    traceable as a real one once it is cached. So the scorer refuses it here.
+    """
+
+    unconfirmed = make_fact(
+        UNCONFIRMED_JOB_POSTING_KIND,
+        "Revenue Operations — see all departments",
+        published=NOW.date().isoformat(),
+    )
+    result = score_facts([unconfirmed], now=NOW)
+    scored = result.scored[0]
+
+    assert scored.tier is SignalTier.WEAK
+    assert scored.score < DEFAULT_SCORING.threshold
+    assert result.has_angle is False
+    assert result.lead_status is LeadStatus.NO_ANGLE
+    # ...even though its text would score STRONG at the confirmed kind.
+    confirmed = make_fact(
+        FactKind.JOB_POSTING.value,
+        "Revenue Operations — see all departments",
+        published=NOW.date().isoformat(),
+    )
+    assert score_facts([confirmed], now=NOW).has_angle is True
+
+
+def test_an_unconfirmed_dated_item_can_never_qualify_on_its_own():
+    """One tier down, same rule. A fresh blog_post clears 40.0 alone; a block
+    we could not confirm is dated content must not."""
+
+    unconfirmed = make_fact(
+        UNCONFIRMED_DATED_CONTENT_KIND,
+        "Shipped: lane-level benchmark reporting.",
+        published=NOW.date().isoformat(),
+    )
+    result = score_facts([unconfirmed], now=NOW)
+
+    assert result.scored[0].tier is SignalTier.WEAK
+    assert result.has_angle is False
+    assert score_facts(
+        [make_fact(FactKind.BLOG_POST.value, "Shipped: lane-level benchmark reporting.", published=NOW.date().isoformat())],
+        now=NOW,
+    ).has_angle is True
+
+
+@pytest.mark.parametrize(
+    "kind, expected_phrase",
+    [
+        (UNCONFIRMED_JOB_POSTING_KIND, "could not confirm is a real req"),
+        (UNCONFIRMED_DATED_CONTENT_KIND, "date we could not confirm"),
+    ],
+)
+def test_the_reviewer_is_told_we_could_not_confirm_it_not_that_we_are_out_of_date(
+    kind, expected_phrase
+):
+    """`reason` is what the review UI renders. "unknown fact kind" reads as a
+    stale scorer; the truth is that we looked and could not stand behind it."""
+
+    fact = Fact(
+        id=f"{kind}:readability",
+        kind=kind,
+        content="Marketing — open roles",
+        source_url="https://example.test/careers",
+        retrieved_at=NOW,
+        metadata={"published_at": None, "identification_method": "href_keyword"},
+    )
+    scored = score_fact(fact, now=NOW, config=DEFAULT_SCORING)
+
+    assert expected_phrase in scored.reason
+    assert "unknown fact kind" not in scored.reason
+    assert "href_keyword" in scored.reason, "say HOW it was identified, not just that it failed"
+    assert scored.tier is SignalTier.WEAK
+
+
+def test_a_medium_confidence_identification_is_admitted_and_says_so():
+    """Admitted at full weight, and labelled. Nobody has measured how much less
+    often a title-vocabulary match is a real req than an ATS-host match, so
+    there is no multiplier here to justify — only a note for the reviewer."""
+
+    fact = Fact(
+        id="job_posting:medium",
+        kind=FactKind.JOB_POSTING.value,
+        content="Revenue Operations Manager - own the go-to-market data stack.",
+        source_url="https://example.test/careers/revops",
+        retrieved_at=NOW,
+        metadata={"published_at": NOW.date().isoformat(), "identification_method": "title_signal", "confidence": "medium"},
+    )
+    scored = score_fact(fact, now=NOW, config=DEFAULT_SCORING)
+
+    assert scored.tier is SignalTier.STRONG
+    assert scored.score == DEFAULT_SCORING.job_posting_supported
+    assert "medium-confidence" in scored.reason
+    assert "title_signal" in scored.reason
+
+
+def test_the_sentinel_kind_strings_still_match_the_producer():
+    """The strings are mirrored, not imported — the scorer reads the cache and
+    must not depend on which adapter filled it. This is the guard against that
+    mirror drifting: a rename in ingest fails here instead of silently
+    reverting those facts to the generic unknown-kind message."""
+
+    from mazz.integrations.company import (
+        UNCONFIRMED_DATED_CONTENT_KIND as PRODUCED_DATED,
+        UNCONFIRMED_JOB_POSTING_KIND as PRODUCED_JOB,
+    )
+
+    assert UNCONFIRMED_JOB_POSTING_KIND == PRODUCED_JOB
+    assert UNCONFIRMED_DATED_CONTENT_KIND == PRODUCED_DATED
+
+
+# ==========================================================================
+# The per-campaign scoring config
+# ==========================================================================
+#
+# `tests/test_workspaces.py::_as_scoring_config` is the contract these satisfy;
+# it was written before this loader existed. Everything it asserts is asserted
+# here too, against `scoring_config_from_json` itself.
+
+AGENCY_CONFIG = {
+    "threshold": 45.0,
+    "supported_role_terms": ["paid media", "performance marketing", "head of growth"],
+    "off_target_role_terms": ["welder", "line cook"],
+}
+
+
+def test_a_stored_config_rebuilds_with_frozensets_not_lists():
+    """JSON has no frozenset, and `classify_role_fit` iterates the field."""
+
+    config = scoring_config_from_json(AGENCY_CONFIG)
+
+    assert isinstance(config.supported_role_terms, frozenset)
+    assert isinstance(config.off_target_role_terms, frozenset)
+    assert "paid media" in config.supported_role_terms
+    assert config.threshold == 45.0
+
+
+def test_a_stored_config_is_a_partial_override_not_a_replacement():
+    """A row naming only `threshold` keeps every shipped weight. Otherwise
+    setting one knob would silently reset the other twenty."""
+
+    config = scoring_config_from_json({"threshold": 55.0})
+
+    assert config.threshold == 55.0
+    assert config.job_posting_supported == DEFAULT_SCORING.job_posting_supported
+    assert config.funding == DEFAULT_SCORING.funding
+    assert config.supported_role_terms == DEFAULT_SCORING.supported_role_terms
+
+
+def test_an_empty_config_means_the_shipped_defaults():
+    assert scoring_config_from_json({}) == DEFAULT_SCORING
+
+
+def test_guardrail_2_has_the_last_word_over_a_stored_config():
+    """Funding alone can never clear the threshold, whoever wrote the row.
+    `ScoringConfig.__post_init__` is not caught here — it fails the job."""
+
+    with pytest.raises(ValueError, match="funding must score below the threshold"):
+        scoring_config_from_json({"threshold": 10.0, "funding": 60.0})
+
+
+def test_an_unknown_knob_is_refused_rather_than_ignored():
+    """A typo'd key would otherwise read as a setting that is applied and does
+    nothing — for a client whose whole engagement is that vocabulary."""
+
+    with pytest.raises(ValueError, match="unknown scoring knobs"):
+        scoring_config_from_json({"treshold": 45.0})
+
+
+def test_a_config_that_is_not_an_object_is_refused():
+    """The database has a CHECK for this. This is the same refusal one layer
+    up, because falling back to the SaaS defaults is the failure to avoid."""
+
+    with pytest.raises(TypeError):
+        scoring_config_from_json([1, 2])  # type: ignore[arg-type]
+
+
+def test_role_terms_must_be_a_list_not_one_string():
+    """`frozenset("paid media")` is a set of eleven characters, and "a" matches
+    almost every req ever written. Refuse it rather than score on it."""
+
+    with pytest.raises(ValueError, match="array of role terms"):
+        scoring_config_from_json({"supported_role_terms": "paid media"})
+
+
+def test_an_empty_or_non_string_role_term_is_refused():
+    with pytest.raises(ValueError, match="non-empty string"):
+        scoring_config_from_json({"supported_role_terms": ["paid media", ""]})
+    with pytest.raises(ValueError, match="non-empty string"):
+        scoring_config_from_json({"supported_role_terms": ["paid media", 42]})
+
+
+def test_role_terms_are_normalised_so_a_client_capital_still_matches():
+    """Terms are matched against lower-cased content, so "Paid Media" stored by
+    a client would otherwise never fire — a config that reads as applied and
+    silently is not."""
+
+    config = scoring_config_from_json({"supported_role_terms": ["  Paid Media  "]})
+
+    assert config.supported_role_terms == frozenset({"paid media"})
+    fit, matched = classify_role_fit("Hiring a Paid Media Manager", config)
+    assert fit is RoleFit.SUPPORTED
+    assert matched == "paid media"
+
+
+# --------------------------------------------------------------------------
+# Loading it from the lead's campaign
+# --------------------------------------------------------------------------
+
+
+def _campaign(session, *, scoring_config: dict, slug: str = "acme-digital") -> Campaign:
+    workspace = Workspace(slug=slug, name=slug.replace("-", " ").title())
+    session.add(workspace)
+    session.flush()
+    campaign = Campaign(
+        workspace_id=workspace.id,
+        name="Q4 push",
+        segment="agency-smb",
+        scoring_config=scoring_config,
+    )
+    session.add(campaign)
+    session.flush()
+    return campaign
+
+
+def _lead_with_facts(session, facts, *, email: str, campaign: Campaign | None = None) -> Lead:
+    domain = email.split("@", 1)[1]
+    session.add(
+        ResearchCache(
+            company_domain=domain,
+            company_name="Test Co",
+            facts=[f.model_dump(mode="json") for f in facts],
+            fetched_at=NOW,
+        )
+    )
+    lead = Lead(
+        full_name="Test Person",
+        email=email,
+        company_name="Test Co",
+        company_domain=domain,
+        status=LeadStatus.RESEARCHING,
+        campaign_id=campaign.id if campaign else None,
+    )
+    session.add(lead)
+    session.flush()
+    return lead
+
+
+#: A req the SHIPPED vocabulary calls off-target and an agency's vocabulary
+#: calls the whole reason to reach out. This one fact is the entire argument
+#: for per-campaign config.
+RECRUITER_REQ = "Hiring a Recruiter to place candidates with our agency clients."
+
+
+def test_a_lead_with_no_campaign_scores_exactly_as_before(session):
+    """Every lead in the database predates campaigns. NULL is a steady state."""
+
+    lead = _lead_with_facts(
+        session,
+        [make_fact(FactKind.JOB_POSTING.value, RECRUITER_REQ, published=NOW.date().isoformat())],
+        email="nocampaign@no-campaign.example",
+    )
+
+    assert lead.campaign_id is None
+    assert config_for_lead(session, lead) == DEFAULT_SCORING
+    assert score_lead(session, lead, now=NOW).has_angle is False
+
+
+def test_an_empty_campaign_config_means_the_shipped_defaults(session):
+    campaign = _campaign(session, scoring_config={}, slug="empty-config")
+    lead = _lead_with_facts(
+        session,
+        [make_fact(FactKind.JOB_POSTING.value, RECRUITER_REQ, published=NOW.date().isoformat())],
+        email="empty@empty-config.example",
+        campaign=campaign,
+    )
+
+    assert config_for_lead(session, lead) == DEFAULT_SCORING
+
+
+def test_the_campaigns_vocabulary_decides_whether_the_lead_is_worth_an_email(session):
+    """The whole point, end to end through the database.
+
+    The same cached req is `no_angle` under the shipped SaaS vocabulary and a
+    STRONG angle under the agency's. Nothing about the research changed — only
+    whose ICP we are scoring against.
+    """
+
+    req = make_fact(FactKind.JOB_POSTING.value, RECRUITER_REQ, published=NOW.date().isoformat())
+
+    plain = _lead_with_facts(session, [req], email="plain@staffing-co.example")
+    assert score_lead(session, plain, now=NOW).has_angle is False
+
+    campaign = _campaign(
+        session,
+        scoring_config={"supported_role_terms": ["recruiter", "talent partner"]},
+        slug="staffing-agency",
+    )
+    targeted = _lead_with_facts(
+        session, [req], email="targeted@staffing-agency.example", campaign=campaign
+    )
+
+    result = score_lead(session, targeted, now=NOW)
+    assert result.has_angle is True
+    assert result.top.tier is SignalTier.STRONG
+    assert result.top.role_fit is RoleFit.SUPPORTED
+
+
+def test_a_campaign_can_also_raise_the_bar(session):
+    """It cuts both ways: a client who only wants job reqs can price a fresh
+    blog post out of qualifying. Fewer drafts is a legitimate setting."""
+
+    post = make_fact(
+        FactKind.BLOG_POST.value, "Notes from our offsite.", published=NOW.date().isoformat()
+    )
+
+    assert score_facts([post], now=NOW).has_angle is True
+
+    campaign = _campaign(session, scoring_config={"threshold": 50.0}, slug="reqs-only")
+    lead = _lead_with_facts(session, [post], email="strict@reqs-only.example", campaign=campaign)
+
+    result = score_lead(session, lead, now=NOW)
+    assert result.has_angle is False
+    assert result.threshold == 50.0
+
+
+def test_a_broken_campaign_config_fails_the_job_rather_than_reverting(session):
+    """Fail closed. A silent fallback to the shipped SaaS vocabulary would move
+    this client's `no_angle` rate for reasons nobody can see — and `no_angle`
+    is the number the product is judged on."""
+
+    campaign = _campaign(
+        session, scoring_config={"threshold": 10.0, "funding": 60.0}, slug="broken-config"
+    )
+    lead = _lead_with_facts(
+        session,
+        [make_fact(FactKind.FUNDING.value, "Acme raises $30M.", published=NOW.date().isoformat())],
+        email="broken@broken-config.example",
+        campaign=campaign,
+    )
+
+    with pytest.raises(ValueError, match="funding must score below the threshold"):
+        config_for_lead(session, lead)
+    with pytest.raises(ValueError, match="funding must score below the threshold"):
+        score_lead(session, lead, now=NOW)
+
+
+def test_an_explicit_config_still_wins_over_the_campaigns(session):
+    """The `config=` argument is for asking "what would this look like under X".
+    It must not be what the pipeline passes — see `draft.draft_for_lead`."""
+
+    campaign = _campaign(
+        session, scoring_config={"supported_role_terms": ["recruiter"]}, slug="explicit-override"
+    )
+    lead = _lead_with_facts(
+        session,
+        [make_fact(FactKind.JOB_POSTING.value, RECRUITER_REQ, published=NOW.date().isoformat())],
+        email="explicit@explicit-override.example",
+        campaign=campaign,
+    )
+
+    assert score_lead(session, lead, now=NOW).has_angle is True
+    assert score_lead(session, lead, now=NOW, config=DEFAULT_SCORING).has_angle is False
+
+
+def test_handle_score_honours_the_campaign_config(session):
+    """The wiring this task exists to fix: `handle_score` used to call
+    `score_lead(session, lead)` and silently take DEFAULT_SCORING, so a
+    campaign's vocabulary never reached the pipeline at all."""
+
+    campaign = _campaign(
+        session, scoring_config={"supported_role_terms": ["recruiter"]}, slug="queued-agency"
+    )
+    lead = _lead_with_facts(
+        session,
+        [make_fact(FactKind.JOB_POSTING.value, RECRUITER_REQ, published=NOW.date().isoformat())],
+        email="queued@queued-agency.example",
+        campaign=campaign,
+    )
+    job = enqueue_job(session, lead.id, "score")[0]
+
+    handle_score(JobContext(session=session, job=job, lead=lead, handlers={}))
+
+    assert lead.status is not LeadStatus.NO_ANGLE, (
+        "the shipped vocabulary calls this req off-target; the campaign's does not, "
+        "and the campaign's is the one that governs"
+    )
+
+
+def test_handle_score_still_reaches_no_angle_for_a_lead_with_no_campaign(session):
+    """The negative half of the same wiring: nothing about this change may make
+    a weak lead look worked."""
+
+    lead = _lead_with_facts(
+        session,
+        [make_fact(FactKind.FUNDING.value, "Acme raises $30M.", published=NOW.date().isoformat())],
+        email="weak@no-campaign-weak.example",
+    )
+    job = enqueue_job(session, lead.id, "score")[0]
+
+    handle_score(JobContext(session=session, job=job, lead=lead, handlers={}))
+
+    assert lead.status is LeadStatus.NO_ANGLE
