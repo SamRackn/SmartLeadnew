@@ -20,6 +20,15 @@ engine" spike: can company-site scraping alone replace paid LinkedIn/company
 enrichment? See `pages_payload_to_facts` for why both adapters share one
 normalization path, and `mazz.integrations._html` for the (dependency-free)
 parsing underneath the live one.
+
+Classifying is not the same as trusting. Verification (a later pipeline step)
+proves a drafted claim traces to a cached Fact; it can never prove the Fact
+itself is true. So a JOB_POSTING item extracted with nothing to corroborate it
+beyond "this href is a sub-path of the careers page" -- indistinguishable from
+a department filter control or a policy page sharing that same path pattern --
+is refused at that STRONG-tier kind here, at ingest, rather than trusted
+through to the drafter. See `UNCONFIRMED_JOB_POSTING_KIND` below for the
+mechanism and why it fails closed without any pipeline change.
 """
 
 from __future__ import annotations
@@ -30,7 +39,7 @@ import time
 import urllib.robotparser as robotparser
 from pathlib import Path
 from typing import Any, Mapping, Sequence
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 try:
     import httpx
@@ -47,10 +56,14 @@ from mazz.integrations._html import (
     extract_dated_items,
     extract_job_items,
     extract_meta_description,
+    extract_sitemap_urls,
     extract_title,
     fallback_candidates,
     find_external_ats_link,
+    find_feed_link,
     find_page_links,
+    page_has_apply_signal,
+    parse_feed_dates,
 )
 from mazz.integrations.base import (
     Fact,
@@ -77,6 +90,8 @@ from mazz.integrations.base import (
 __all__ = [
     "PAGE_KINDS",
     "PAGE_KIND_TO_FACT_KIND",
+    "UNCONFIRMED_JOB_POSTING_KIND",
+    "UNCONFIRMED_DATED_CONTENT_KIND",
     "InvalidDomain",
     "CompanyAdapter",
     "StubCompanyAdapter",
@@ -104,6 +119,82 @@ PAGE_KIND_TO_FACT_KIND: Mapping[str, str] = {
 }
 
 _KNOWN_FACT_KINDS = {k.value for k in FactKind}
+
+# --------------------------------------------------------------------------
+# Research provenance at cache-ingest (CLAUDE.md "Known gap in the guardrails")
+# --------------------------------------------------------------------------
+#
+# Verification proves a drafted claim traces to a cached Fact. It does NOT
+# prove the Fact itself is true -- a scraper that misidentifies a filter
+# control or a policy page as a job req puts a false JOB_POSTING in
+# research_cache, and score.py's job_posting_supported weight (75.0, the
+# single highest score in the system) lets that one bad fact single-handedly
+# clear the 40.0 threshold and produce a verified, human-approvable email
+# asserting a role that does not exist. That is legal exposure in cold
+# outreach, not a quality nit (measured live in the W3 own-engine spike:
+# Trello-style JS careers hubs where every "job" is a department filter, and
+# Zapier-style careers paths mixing real reqs with policy pages).
+#
+# The fix has to live at INGEST, because verification cannot see it: a false
+# job req is exactly as "verifiable" as a real one once it is in the cache.
+# `_html.extract_job_items` tags every candidate with how it was identified
+# (`identification_method`) and how much that method is worth
+# (`confidence`: "high" / "medium" / "low"). Below, `pages_payload_to_facts`
+# refuses to admit a "low"-confidence candidate at the `JOB_POSTING` kind --
+# it demotes it to `UNCONFIRMED_JOB_POSTING_KIND` instead.
+#
+# That sentinel string is deliberately OUTSIDE `FactKind`'s vocabulary.
+# `Fact.kind` is a plain `str` precisely so a producer can express something
+# the shared vocabulary has no name for yet (see `mazz.schemas`), and
+# `score.py` already treats any kind it does not recognise as
+# `SignalTier.WEAK` at its lowest base weight (`unknown_kind`), and
+# structurally excludes WEAK facts from ever qualifying alone (the same rule
+# that keeps funding news from single-handedly producing a draft). So this
+# fails closed with ZERO changes to `mazz/pipeline/score.py`: a downgraded
+# fact cannot promote a lead out of `no_angle` by itself, today, as shipped.
+#
+# It is NOT dropped -- the fact is still emitted, with its content, source
+# URL and a `provenance_note` explaining the demotion, so it is visible in
+# the research cache and review UI as "we found something and did not trust
+# it enough to call it a job posting", never a silent empty that could be
+# mistaken for "nothing here."
+#
+# `score.py` can be taught to do something smarter with this than the
+# generic unknown-kind fallback (e.g. recognise the sentinel kind
+# explicitly, or read `metadata["confidence"]` for a finer-grained
+# multiplier) without a migration -- the string and the metadata are already
+# flowing through `research_cache` today. See this module's docstring /
+# integrations-engineer's handoff note for the exact ask.
+UNCONFIRMED_JOB_POSTING_KIND = "job_posting_unconfirmed"
+
+# The same gap, one tier down. `blog_post` (42.0), `changelog` (45.0) and
+# `press` (40.0) each clear the 40.0 threshold ALONE when fresh -- and
+# recency is most of that score, so a misidentified block (a nav element, a
+# cookie banner, a dated testimonial) does not just add a bad fact, it adds
+# one at maximum weight if a wrong-but-fresh-looking date gets attached to
+# it. `_html.extract_dated_items` tags every item the same way
+# (`identification_method` / `confidence`); a "low"-confidence one is
+# demoted here exactly like a low-confidence job candidate, for the same
+# fails-closed-with-zero-score.py-changes reason.
+UNCONFIRMED_DATED_CONTENT_KIND = "dated_content_unconfirmed"
+
+# Fact kinds this ingest-provenance check covers. A candidate resolving to one
+# of these gets identification_method/confidence recorded in metadata, and is
+# demoted to the matching *_unconfirmed sentinel if confidence is "low".
+_JOB_POSTING_KINDS = {FactKind.JOB_POSTING.value}
+_DATED_CONTENT_KINDS = {
+    FactKind.BLOG_POST.value,
+    FactKind.CHANGELOG.value,
+    FactKind.PRESS.value,
+}
+
+# identification_method values that are not, on their own, trustworthy enough
+# to admit a candidate at its nominal (STRONG- or MEDIUM-tier) kind. Keyed by
+# the *confidence* level the producer (`_html.extract_job_items`,
+# `_html.extract_dated_items`, or any future producer of this item shape)
+# assigns, not by method name, so a new low-trust method can be added there
+# without touching this module.
+_LOW_CONFIDENCE_LEVELS = {"low"}
 
 _SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 _DOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
@@ -236,6 +327,44 @@ def pages_payload_to_facts(
                     provider=provider,
                     target=domain,
                 )
+
+            # -- provenance at ingest: how was this item identified, and is
+            # that good enough evidence to claim its nominal kind (STRONG for
+            # a job posting, MEDIUM for blog/changelog/press)? See the
+            # module-level comments above `UNCONFIRMED_JOB_POSTING_KIND` /
+            # `UNCONFIRMED_DATED_CONTENT_KIND`. Every other kind (funding,
+            # homepage, careers_page...) is untouched. Absent fields mean
+            # "declared": hand-authored fixture data and already-structured
+            # provider payloads (Bright Data's LinkedIn `updates`, emitted as
+            # BLOG_POST) are real self-published content, not an inference
+            # this check needs to second-guess -- they default to high.
+            is_job_posting_candidate = fact_kind in _JOB_POSTING_KINDS
+            is_dated_content_candidate = fact_kind in _DATED_CONTENT_KINDS
+            has_provenance_signal = is_job_posting_candidate or is_dated_content_candidate
+            identification_method = str(item.get("identification_method") or "declared")
+            confidence = str(item.get("confidence") or "high")
+            provenance_note: str | None = None
+            demoted_from_kind: str | None = None
+            if is_job_posting_candidate and confidence in _LOW_CONFIDENCE_LEVELS:
+                demoted_from_kind = fact_kind
+                provenance_note = (
+                    f"downgraded from {FactKind.JOB_POSTING.value}: identified only by "
+                    f"{identification_method!r} -- no ATS host, href keyword, job-title "
+                    "vocabulary, apply-link, or JSON-LD corroboration. Indistinguishable "
+                    "from a filter control or a policy page under the same path pattern."
+                )
+                fact_kind = UNCONFIRMED_JOB_POSTING_KIND
+            elif is_dated_content_candidate and confidence in _LOW_CONFIDENCE_LEVELS:
+                demoted_from_kind = fact_kind
+                provenance_note = (
+                    f"downgraded from {fact_kind}: its date was identified only by "
+                    f"{identification_method!r} -- no JSON-LD/feed corroboration and "
+                    "no machine-readable <time> element in a genuine content block. "
+                    "Indistinguishable from a misread nav element, cookie banner or "
+                    "dated testimonial."
+                )
+                fact_kind = UNCONFIRMED_DATED_CONTENT_KIND
+
             source_url = item.get("url") or page_url
             natural_key = item.get("key")
             if not natural_key:
@@ -249,6 +378,17 @@ def pages_payload_to_facts(
             content = str(text).strip()
             if published_at:
                 content = f"[{published_at}] {content}"
+            metadata = {
+                "page_kind": page_kind,
+                "published_at": published_at,
+                "domain": domain,
+            }
+            if has_provenance_signal:
+                metadata["identification_method"] = identification_method
+                metadata["confidence"] = confidence
+            if provenance_note:
+                metadata["provenance_note"] = provenance_note
+                metadata["original_kind"] = demoted_from_kind
             facts.append(
                 build_fact(
                     kind=fact_kind,
@@ -260,11 +400,7 @@ def pages_payload_to_facts(
                     natural_key=str(natural_key),
                     # Company facts are about the COMPANY, so no subject_email:
                     # they are not pruned by delete-by-person.
-                    metadata={
-                        "page_kind": page_kind,
-                        "published_at": published_at,
-                        "domain": domain,
-                    },
+                    metadata=metadata,
                 )
             )
     return facts
@@ -345,8 +481,18 @@ class LiveCompanyAdapter(CompanyAdapter):
         user_agent: str | None = None,
         rate_limit_seconds: float = 1.0,
         request_timeout: float = 10.0,
+        apply_link_probe_limit: int = 8,
     ) -> None:
         super().__init__(retry_policy=retry_policy, sleep=sleep)
+        # Recall recovery for careers items that are STILL "url_shape_only"
+        # after every free/cheap corroboration (JSON-LD, ATS host, href
+        # keyword, title vocabulary): fetch the candidate's OWN page and look
+        # for a real apply mechanism. This is the most expensive
+        # signal available (one extra fetch per candidate), so it is bounded
+        # per company rather than applied to every ambiguous item -- cost per
+        # usable lead is the stated primary objective, and an unbounded probe
+        # would scale with the page's junk-link count, not its job count.
+        self._apply_link_probe_limit = apply_link_probe_limit
         if http_client is None:
             if httpx is None:  # pragma: no cover - exercised only without the dep installed
                 raise ImportError(
@@ -487,6 +633,15 @@ class LiveCompanyAdapter(CompanyAdapter):
             }
         ]
 
+        # Recall-recovery corroboration, discovered/fetched ONCE per company
+        # and reused across every secondary page it applies to. Best-effort:
+        # not existing, or the fetch failing, is never a provider failure --
+        # just less corroboration available. NOTE: sitemap discovery is NOT
+        # called here -- see `_discover_sitemap_urls`'s docstring for why it
+        # was tried, measured unsafe on a real site, and retired rather than
+        # spending a request on a signal we now know we do not trust.
+        feed_dates = self._discover_feed_dates(homepage_html, homepage_url)
+
         blocked_pages: list[str] = []
         skipped_pages: list[str] = []
         discovered = find_page_links(homepage_html, homepage_url)
@@ -497,6 +652,7 @@ class LiveCompanyAdapter(CompanyAdapter):
                 homepage_url,
                 blocked=blocked_pages,
                 skipped=skipped_pages,
+                feed_dates=feed_dates,
             )
             if page is not None:
                 pages.append(page)
@@ -524,6 +680,7 @@ class LiveCompanyAdapter(CompanyAdapter):
         *,
         blocked: list[str],
         skipped: list[str],
+        feed_dates: "Mapping[str, str]",
     ) -> dict[str, Any] | None:
         """Fetch one of careers/blog/changelog/press. Never raises: a page
         that is blocked, missing, or errors is recorded and skipped -- only
@@ -576,12 +733,104 @@ class LiveCompanyAdapter(CompanyAdapter):
                             hop_items = extract_job_items(ats_resp.text, ats_link)
                             if hop_items:
                                 items, page_url = hop_items, ats_link
+            items = self._rescue_low_confidence_job_items(items)
         else:
-            items = extract_dated_items(html, page_url)
+            items = extract_dated_items(html, page_url, feed_dates=feed_dates)
 
         if not items:
             return None
         return {"kind": kind, "url": page_url, "items": items}
+
+    # -- recall recovery: cheap, once-per-company corroboration ------------
+
+    def _discover_sitemap_urls(self, homepage_url: str) -> "set[str]":
+        """Best-effort `sitemap.xml` fetch, once per company.
+
+        NOT called from `_fetch_payload` -- deliberately dormant. It was
+        built and wired in, then measured live against a real careers site
+        (asana.com, 2026-09-17): the site's own sitemap.xml lists its
+        per-location and per-department FILTER pages ("Chicago", "Dublin",
+        "Business & Marketing"...) as real, distinct, crawlable URLs
+        alongside actual reqs. "This URL is in the sitemap" turned out to
+        prove "this is a real page", not "this is a job requisition", and
+        promoted 19 facet pages to JOB_POSTING in one company; they missed
+        the scoring threshold by 10 points only because they were undated.
+        Retired as a job-confidence signal rather than shipped on a
+        near-miss. Left in place, tested, and reachable (`extract_sitemap_urls`
+        is a correct, general XML-sitemap reader) for a future, stricter
+        combination heuristic -- see the "sitemap" note in
+        `_html.extract_job_items`'s docstring for the full writeup, and this
+        agent's handoff report for the measurement.
+
+        Absence, a block, or a parse failure all just mean "no sitemap
+        corroboration available" -- never a provider failure; a sitemap is a
+        bonus signal, not something every site is obligated to publish.
+        """
+        sitemap_url = urljoin(homepage_url, "/sitemap.xml")
+        if not self._robots_allows(sitemap_url):
+            return set()
+        try:
+            resp = self._get(sitemap_url)
+        except ProviderError:
+            return set()
+        if resp is None:
+            return set()
+        return extract_sitemap_urls(resp.text)
+
+    def _discover_feed_dates(self, homepage_html: str, homepage_url: str) -> "dict[str, str]":
+        """Best-effort RSS/Atom feed fetch, once per company, if the homepage
+        links to one at all. Same best-effort posture as the sitemap: most
+        sites do not publish a feed, and that is not a failure."""
+        feed_url = find_feed_link(homepage_html, homepage_url)
+        if feed_url is None:
+            return {}
+        if not self._robots_allows(feed_url):
+            return {}
+        try:
+            resp = self._get(feed_url)
+        except ProviderError:
+            return {}
+        if resp is None:
+            return {}
+        return parse_feed_dates(resp.text)
+
+    def _rescue_low_confidence_job_items(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Last-resort recall recovery for careers items still stuck at
+        ``confidence="low"`` after every free/cheap signal: fetch the
+        candidate's OWN page and look for a real apply mechanism
+        (`page_has_apply_signal`). Bounded by `apply_link_probe_limit`
+        because this is the single most expensive corroboration available
+        -- it is deliberately not run on every ambiguous item, only up to
+        the cap, so cost per company stays bounded rather than scaling with
+        how many junk links a bad careers page happens to have.
+
+        A probe that fails for any reason (robots, network, non-2xx) just
+        leaves that item exactly as it was -- this can only ever RAISE an
+        item's confidence, never lower one, so a probe failure is never a
+        precision regression.
+        """
+        budget = self._apply_link_probe_limit
+        if budget <= 0:
+            return items
+        for item in items:
+            if budget <= 0:
+                break
+            if item.get("confidence") != "low":
+                continue
+            url = item.get("url")
+            if not url or not self._robots_allows(url):
+                continue
+            budget -= 1
+            try:
+                resp = self._get(url)
+            except ProviderError:
+                continue
+            if resp is None:
+                continue
+            if page_has_apply_signal(resp.text, url):
+                item["identification_method"] = "apply_link"
+                item["confidence"] = "high"
+        return items
 
     def _payload_to_facts(self, domain: str, payload: Mapping[str, Any]) -> list[Fact]:
         return pages_payload_to_facts(provider=self.provider, domain=domain, payload=payload)

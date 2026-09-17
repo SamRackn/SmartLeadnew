@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><title>Jobs at JSHub</title></head>
+<body>
+  <div id="jobs-app">
+    <!-- Real listings render client-side (React) once the bundle loads; a
+         plain HTTP fetch only ever sees this filter shell. Every "job" a
+         static scrape can find here is actually a department filter, not
+         an individual req -- the JS-rendered-hub false positive. -->
+    <nav class="department-filters">
+      <a href="/jobs/department/engineering">Engineering</a>
+      <a href="/jobs/department/design">Design</a>
+      <a href="/jobs/department/marketing">Marketing</a>
+      <a href="/jobs/department/people">People</a>
+      <a href="/jobs/department/all">All teams</a>
+    </nav>
+    <div id="jobs-root"></div>
+  </div>
+</body>
+</html>

@@ -280,6 +280,10 @@ def test_company_facts_carry_no_subject_email():
 
 
 def test_company_no_vendor_shape_leaks_into_facts():
+    """`identification_method`/`confidence` are this codebase's own research-
+    provenance vocabulary (`mazz.integrations.company`'s ingest-time gate) --
+    additive, and asserted below to carry no Bright-Data-shaped values either,
+    not just no Bright-Data-shaped KEYS."""
     client = FakeBrightDataClient({COMPANY_URL: (200, COMPANY_OK)})
     co = make_co(client)
     result = co.fetch_company(DOMAIN)
@@ -287,10 +291,22 @@ def test_company_no_vendor_shape_leaks_into_facts():
     banned = {"post_id", "likes_count", "comments_count", "specialties", "company_size", "employees"}
     for fact in result.facts:
         dumped = fact.model_dump(mode="json")
-        assert set(dumped["metadata"].keys()) <= {"page_kind", "published_at", "domain"}
+        assert set(dumped["metadata"].keys()) <= {
+            "page_kind",
+            "published_at",
+            "domain",
+            "identification_method",
+            "confidence",
+        }
         for key in banned:
             assert key not in dumped["metadata"]
             assert key not in dumped["content"]
+        # A self-published LinkedIn post is real dated content, declared by
+        # the payload rather than inferred from HTML shape -- never mistaken
+        # for a Bright-Data-specific provenance value.
+        if "identification_method" in dumped["metadata"]:
+            assert dumped["metadata"]["identification_method"] == "declared"
+            assert dumped["metadata"]["confidence"] == "high"
 
 
 def test_company_fact_ids_are_stable_across_instances():

@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import json
 import socket
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+
+from mazz.integrations import _html
 
 import pytest
 
@@ -452,6 +455,130 @@ def test_item_without_key_is_rejected(tmp_path: Path):
 
 
 # =====================================================================
+# Research provenance at cache-ingest (CLAUDE.md known guardrail gap)
+# =====================================================================
+
+
+def test_low_confidence_job_item_is_demoted_not_dropped(tmp_path: Path):
+    """A producer-declared low-confidence job candidate must not surface as
+    JOB_POSTING (the STRONG tier) -- but it must also not vanish. It stays
+    visible, under a distinct kind, with the reason recorded."""
+    (tmp_path / "company").mkdir()
+    (tmp_path / "company" / "lowconf.example.json").write_text(
+        json.dumps(
+            {
+                "pages": [
+                    {
+                        "kind": "careers",
+                        "url": "https://lowconf.example/careers",
+                        "items": [
+                            {
+                                "key": "https://lowconf.example/careers/engineering",
+                                "url": "https://lowconf.example/careers/engineering",
+                                "text": "Engineering",
+                                "identification_method": "url_shape_only",
+                                "confidence": "low",
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = StubCompanyAdapter(fixtures_dir=tmp_path).fetch_company("lowconf.example")
+
+    assert result.ok
+    assert not any(f.kind == FactKind.JOB_POSTING.value for f in result.facts)
+    fact = result.facts[0]
+    assert fact.kind == "job_posting_unconfirmed"
+    assert fact.content == "Engineering"
+    assert fact.metadata["original_kind"] == FactKind.JOB_POSTING.value
+    assert fact.metadata["confidence"] == "low"
+    assert fact.metadata["identification_method"] == "url_shape_only"
+    assert "downgraded" in fact.metadata["provenance_note"]
+
+
+def test_declared_job_item_without_confidence_field_is_trusted_by_default(
+    tmp_path: Path,
+):
+    """Backward compatibility: hand-authored fixtures (and any provider payload
+    that never set identification_method/confidence) are 'declared', not
+    inferred -- they default to high confidence and are not second-guessed.
+    This is what keeps every pre-existing stub fixture unaffected."""
+    (tmp_path / "company").mkdir()
+    (tmp_path / "company" / "declared.example.json").write_text(
+        json.dumps(
+            {
+                "pages": [
+                    {
+                        "kind": "careers",
+                        "url": "https://declared.example/careers",
+                        "items": [
+                            {
+                                "key": "https://declared.example/careers/whatever",
+                                "url": "https://declared.example/careers/whatever",
+                                "text": "Whatever",
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = StubCompanyAdapter(fixtures_dir=tmp_path).fetch_company("declared.example")
+
+    fact = result.facts[0]
+    assert fact.kind == FactKind.JOB_POSTING.value
+    assert fact.metadata["identification_method"] == "declared"
+    assert fact.metadata["confidence"] == "high"
+
+
+def test_low_confidence_fact_id_is_still_stable():
+    """The demotion changes `kind`, which is part of the id's hash input by
+    design (make_fact_id(kind, source_url, natural_key)) -- but for one fixed
+    (kind, source_url, natural_key), re-parsing must still produce the same
+    id every time. A copy-edit to the item's TEXT must not move it."""
+    payload = {
+        "pages": [
+            {
+                "kind": "careers",
+                "url": "https://lowconf2.example/careers",
+                "items": [
+                    {
+                        "key": "https://lowconf2.example/careers/engineering",
+                        "url": "https://lowconf2.example/careers/engineering",
+                        "text": "Engineering",
+                        "confidence": "low",
+                    }
+                ],
+            }
+        ]
+    }
+
+    def make(fixtures_dir: Path, text: str) -> None:
+        (fixtures_dir / "company").mkdir(exist_ok=True)
+        edited = json.loads(json.dumps(payload))
+        edited["pages"][0]["items"][0]["text"] = text
+        (fixtures_dir / "company" / "lowconf2.example.json").write_text(
+            json.dumps(edited), encoding="utf-8"
+        )
+
+    with tempfile.TemporaryDirectory() as d1, tempfile.TemporaryDirectory() as d2:
+        make(Path(d1), "Engineering")
+        make(Path(d2), "Engineering (all locations)")
+        before = StubCompanyAdapter(fixtures_dir=Path(d1)).fetch_company(
+            "lowconf2.example"
+        )
+        after = StubCompanyAdapter(fixtures_dir=Path(d2)).fetch_company(
+            "lowconf2.example"
+        )
+        assert before.facts[0].id == after.facts[0].id
+        assert before.facts[0].kind == after.facts[0].kind == "job_posting_unconfirmed"
+
+
+# =====================================================================
 # Phase 1 guarantees
 # =====================================================================
 
@@ -535,3 +662,400 @@ def test_scenarios_manifest_matches_the_fixtures_on_disk():
         for url in scenario["profiles"]:
             profile = li.fetch_profile(url)
             assert isinstance(profile, FetchResult), name
+
+
+# =====================================================================
+# _html: dated-content provenance ladder (pure functions, no adapter)
+#
+# blog_post (42.0), changelog (45.0) and press (40.0) each clear the 40.0
+# scoring threshold ALONE when fresh, so this is the same known-gap failure
+# as job postings, one tier down -- and recency being most of the score
+# means a WRONG-but-fresh date is worse than a merely undated fact.
+# =====================================================================
+
+
+def test_time_datetime_attribute_in_a_real_block_is_high_confidence():
+    html = """
+    <article>
+      <a href="/blog/post-1">A real post</a>
+      <time datetime="2026-09-01">September 1, 2026</time>
+    </article>
+    """
+    items = _html.extract_dated_items(html, "https://x.example/blog")
+    assert len(items) == 1
+    assert items[0]["identification_method"] == "time_attr"
+    assert items[0]["confidence"] == "high"
+    assert items[0]["published_at"] == "2026-09-01"
+
+
+def test_bare_text_date_scan_in_a_real_block_is_low_confidence():
+    """No <time> tag at all -- the date came from scanning the block's raw
+    text. This is where a testimonial dateline or a copyright year becomes a
+    publication date."""
+    html = """
+    <article>
+      <a href="/blog/post-2">A block with no time tag</a>
+      <p>Proudly serving logistics teams since March 3, 2019.</p>
+    </article>
+    """
+    items = _html.extract_dated_items(html, "https://x.example/blog")
+    assert len(items) == 1
+    assert items[0]["identification_method"] == "text_scan"
+    assert items[0]["confidence"] == "low"
+    assert items[0]["published_at"] == "2019-03-03"
+
+
+def test_whole_page_proximity_fallback_is_capped_at_low_confidence():
+    """No <article>/<li> blocks at all: the item comes from pairing a bare
+    <time> tag with the nearest PRECEDING anchor anywhere on the page. That
+    pairing is itself a guess, so it is capped at low confidence even though
+    the date was read from a real <time datetime> attribute -- a real,
+    correctly-dated post and a testimonial's incidental date are equally
+    plausible outputs of this path, and the ingest gate cannot tell them
+    apart without stronger corroboration."""
+    html = """
+    <p>
+      <a href="/blog/scaling-support">Scaling support without burning out the team</a>
+      <time datetime="2026-09-01">September 1, 2026</time>
+    </p>
+    <p>
+      <a href="/customers/acme-logistics">Acme Logistics</a> has trusted us
+      <time>since March 3, 2019</time> with their entire support desk.
+    </p>
+    """
+    items = _html.extract_dated_items(html, "https://testimonial.example/blog")
+    by_url = {i["url"]: i for i in items}
+    assert by_url["https://testimonial.example/blog/scaling-support"]["identification_method"] == (
+        "proximity_fallback"
+    )
+    assert by_url["https://testimonial.example/blog/scaling-support"]["confidence"] == "low"
+    testimonial = by_url["https://testimonial.example/customers/acme-logistics"]
+    assert testimonial["identification_method"] == "proximity_fallback"
+    assert testimonial["confidence"] == "low"
+    # The regression this guards: the testimonial's "since March 3, 2019" is
+    # parseable as a real date, which is exactly the risk -- it must still be
+    # marked low confidence, not silently trusted because it happened to parse.
+    assert testimonial["published_at"] == "2019-03-03"
+
+
+def test_feed_date_rescues_the_real_post_but_not_the_testimonial():
+    html = """
+    <p>
+      <a href="/blog/scaling-support">Scaling support without burning out the team</a>
+      <time datetime="2026-09-01">September 1, 2026</time>
+    </p>
+    <p>
+      <a href="/customers/acme-logistics">Acme Logistics</a> has trusted us
+      <time>since March 3, 2019</time> with their entire support desk.
+    </p>
+    """
+    feed_dates = {
+        "https://testimonial.example/blog/scaling-support": "2026-09-01",
+    }
+    items = _html.extract_dated_items(
+        html, "https://testimonial.example/blog", feed_dates=feed_dates
+    )
+    by_url = {i["url"]: i for i in items}
+    rescued = by_url["https://testimonial.example/blog/scaling-support"]
+    assert rescued["identification_method"] == "feed"
+    assert rescued["confidence"] == "high"
+    # The testimonial is NOT in the feed (it is not a real post) and stays low.
+    testimonial = by_url["https://testimonial.example/customers/acme-logistics"]
+    assert testimonial["identification_method"] == "proximity_fallback"
+    assert testimonial["confidence"] == "low"
+
+
+def test_json_ld_article_rescues_an_undated_block():
+    html = """
+    <article>
+      <a href="/changelog/growth-wizard-update">Ship notes</a>
+    </article>
+    <script type="application/ld+json">
+    {
+      "@type": "BlogPosting",
+      "url": "https://x.example/changelog/growth-wizard-update",
+      "datePublished": "2026-09-10"
+    }
+    </script>
+    """
+    items = _html.extract_dated_items(html, "https://x.example/changelog")
+    assert len(items) == 1
+    assert items[0]["identification_method"] == "json_ld"
+    assert items[0]["confidence"] == "high"
+    assert items[0]["published_at"] == "2026-09-10"
+
+
+def test_undated_block_is_not_marked_low_confidence():
+    """No date evidence anywhere means published_at stays None -- that is
+    already heavily discounted downstream by score.py's undated_multiplier,
+    so it must not ALSO be marked "low" confidence; there is nothing wrong
+    to be low-confidence about."""
+    html = """
+    <article>
+      <a href="/blog/no-date-anywhere">A post with genuinely no date</a>
+      <p>Just some words, no dates in sight.</p>
+    </article>
+    """
+    items = _html.extract_dated_items(html, "https://x.example/blog")
+    assert len(items) == 1
+    assert items[0]["published_at"] is None
+    assert items[0]["identification_method"] == "undated"
+    assert items[0]["confidence"] == "n/a"
+
+
+def test_extract_json_ld_dated_urls_walks_a_graph():
+    html = """
+    <script type="application/ld+json">
+    {
+      "@graph": [
+        {"@type": "BlogPosting", "url": "https://x.example/blog/a", "datePublished": "2026-01-01"},
+        {"@type": "WebPage", "url": "https://x.example/blog"}
+      ]
+    }
+    </script>
+    """
+    dated = _html.extract_json_ld_dated_urls(html, "https://x.example/blog")
+    assert dated == {"https://x.example/blog/a": "2026-01-01"}
+
+
+def test_parse_feed_dates_reads_rss_and_atom():
+    rss = """<?xml version="1.0"?>
+    <rss version="2.0"><channel>
+      <item>
+        <link>https://x.example/blog/a</link>
+        <pubDate>Tue, 15 Sep 2026 00:00:00 GMT</pubDate>
+      </item>
+    </channel></rss>
+    """
+    assert _html.parse_feed_dates(rss) == {"https://x.example/blog/a": "2026-09-15"}
+
+    atom = """<?xml version="1.0"?>
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <entry>
+        <link rel="alternate" href="https://x.example/blog/b"/>
+        <updated>2026-09-16T10:00:00Z</updated>
+      </entry>
+    </feed>
+    """
+    assert _html.parse_feed_dates(atom) == {"https://x.example/blog/b": "2026-09-16"}
+
+
+def test_parse_feed_dates_never_raises_on_garbage():
+    assert _html.parse_feed_dates("not xml at all <<<") == {}
+    assert _html.parse_feed_dates("") == {}
+
+
+def test_find_feed_link_prefers_first_rss_or_atom_alternate():
+    html = """
+    <head>
+      <link rel="stylesheet" href="/style.css">
+      <link rel="alternate" type="application/rss+xml" href="/feed.xml">
+    </head>
+    """
+    assert _html.find_feed_link(html, "https://x.example/") == "https://x.example/feed.xml"
+    assert _html.find_feed_link("<head></head>", "https://x.example/") is None
+
+
+def test_extract_sitemap_urls_is_never_raising_on_garbage():
+    xml = """<?xml version="1.0"?>
+    <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+      <url><loc>https://x.example/careers/a</loc></url>
+      <url><loc>https://x.example/blog/b</loc></url>
+    </urlset>
+    """
+    assert _html.extract_sitemap_urls(xml) == {
+        "https://x.example/careers/a",
+        "https://x.example/blog/b",
+    }
+    assert _html.extract_sitemap_urls("not xml") == set()
+
+
+def test_page_has_apply_signal_detects_apply_text_and_ats_links():
+    assert _html.page_has_apply_signal(
+        '<a href="/apply/here">Apply Now</a>', "https://x.example/careers/role"
+    )
+    assert _html.page_has_apply_signal(
+        '<a href="https://boards.greenhouse.io/x/jobs/1">See listing</a>',
+        "https://x.example/careers/role",
+    )
+    assert not _html.page_has_apply_signal(
+        '<a href="/">Home</a><p>Nothing to apply for here.</p>',
+        "https://x.example/careers/role",
+    )
+
+
+def test_page_has_apply_signal_reads_a_same_page_apply_anchor():
+    """Confirmed live against buffer.com's own careers pages: a real apply
+    CTA that jumps to an embedded form on the SAME page (`href="#apply"`)
+    rather than linking out. `extract_links` drops fragment-only hrefs on
+    purpose (not a distinct page to discover); this check must not inherit
+    that filtering, or it silently misses this common real-world pattern."""
+    assert _html.page_has_apply_signal(
+        '<a href="#apply">Apply</a><section id="apply">...</section>',
+        "https://x.example/careers/role",
+    )
+
+
+def test_extract_job_items_does_not_accept_a_sitemap_signal():
+    """Regression guard for a deliberate retirement, not an oversight: a
+    sitemap-listed URL was tried as a job-confidence signal and measured
+    live against a real careers site (asana.com) to promote 19
+    per-location/per-department FILTER pages -- real, distinct, sitemap-
+    indexed pages that are not job reqs -- to JOB_POSTING at once. See
+    `_html.extract_job_items`'s docstring and
+    `LiveCompanyAdapter._discover_sitemap_urls`'s docstring for the full
+    writeup. `extract_job_items` must not silently accept a `sitemap_urls`
+    kwarg again without that decision being revisited on purpose."""
+    with pytest.raises(TypeError):
+        _html.extract_job_items(
+            "<a href='/careers/x'>X</a>",
+            "https://x.example/careers",
+            sitemap_urls={"https://x.example/careers/x"},
+        )
+
+
+# =====================================================================
+# company.pages_payload_to_facts: MEDIUM-tier (blog/changelog/press)
+# demotion, mirroring the job-posting mechanism above it in the file.
+# =====================================================================
+
+
+def test_low_confidence_dated_item_is_demoted_not_dropped(tmp_path: Path):
+    (tmp_path / "company").mkdir()
+    (tmp_path / "company" / "lowdate.example.json").write_text(
+        json.dumps(
+            {
+                "pages": [
+                    {
+                        "kind": "blog",
+                        "url": "https://lowdate.example/blog",
+                        "items": [
+                            {
+                                "key": "https://lowdate.example/customers/acme",
+                                "url": "https://lowdate.example/customers/acme",
+                                "text": "Acme Logistics testimonial",
+                                "published_at": "2019-03-03",
+                                "identification_method": "proximity_fallback",
+                                "confidence": "low",
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = StubCompanyAdapter(fixtures_dir=tmp_path).fetch_company("lowdate.example")
+
+    assert result.ok
+    assert not any(f.kind == FactKind.BLOG_POST.value for f in result.facts)
+    fact = result.facts[0]
+    assert fact.kind == "dated_content_unconfirmed"
+    assert fact.metadata["original_kind"] == FactKind.BLOG_POST.value
+    assert fact.metadata["confidence"] == "low"
+    assert fact.metadata["identification_method"] == "proximity_fallback"
+    assert "downgraded" in fact.metadata["provenance_note"]
+
+
+def test_high_confidence_dated_item_keeps_its_kind(tmp_path: Path):
+    (tmp_path / "company").mkdir()
+    (tmp_path / "company" / "highdate.example.json").write_text(
+        json.dumps(
+            {
+                "pages": [
+                    {
+                        "kind": "changelog",
+                        "url": "https://highdate.example/changelog",
+                        "items": [
+                            {
+                                "key": "https://highdate.example/changelog/a",
+                                "url": "https://highdate.example/changelog/a",
+                                "text": "Shipped: real thing",
+                                "published_at": "2026-09-01",
+                                "identification_method": "time_attr",
+                                "confidence": "high",
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = StubCompanyAdapter(fixtures_dir=tmp_path).fetch_company("highdate.example")
+
+    fact = result.facts[0]
+    assert fact.kind == FactKind.CHANGELOG.value
+    assert fact.metadata["identification_method"] == "time_attr"
+    assert fact.metadata["confidence"] == "high"
+    assert "provenance_note" not in fact.metadata
+
+
+def test_dated_content_confidence_fails_closed_against_the_real_scorer():
+    """The compliance-critical claim, proven against mazz.pipeline.score
+    directly (read-only import; score.py is not owned by this agent): four
+    maximally-fresh demoted facts must not be able to promote a lead out of
+    no_angle on their own, while a genuine fresh blog post still qualifies."""
+    from mazz.pipeline.score import score_facts
+
+    now = datetime(2026, 9, 15, tzinfo=timezone.utc)
+    payload = {
+        "retrieved_at": now.isoformat(),
+        "pages": [
+            {
+                "kind": "blog",
+                "url": "https://fresh.example/blog",
+                "items": [
+                    {
+                        "key": f"https://fresh.example/blog/testimonial-{i}",
+                        "url": f"https://fresh.example/blog/testimonial-{i}",
+                        "text": f"Testimonial {i}",
+                        "published_at": now.date().isoformat(),
+                        "identification_method": "proximity_fallback",
+                        "confidence": "low",
+                    }
+                    for i in range(4)
+                ],
+            }
+        ],
+    }
+    with tempfile.TemporaryDirectory() as d:
+        fixtures = Path(d)
+        (fixtures / "company").mkdir()
+        (fixtures / "company" / "demoted.example.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+        demoted_result = StubCompanyAdapter(fixtures_dir=fixtures).fetch_company(
+            "demoted.example"
+        )
+
+        genuine_payload = {
+            "retrieved_at": now.isoformat(),
+            "pages": [
+                {
+                    "kind": "blog",
+                    "url": "https://fresh.example/blog",
+                    "items": [
+                        {
+                            "key": "https://fresh.example/blog/real-post",
+                            "url": "https://fresh.example/blog/real-post",
+                            "text": "A genuine fresh post",
+                            "published_at": now.date().isoformat(),
+                        }
+                    ],
+                }
+            ],
+        }
+        (fixtures / "company" / "genuine.example.json").write_text(
+            json.dumps(genuine_payload), encoding="utf-8"
+        )
+        genuine_result = StubCompanyAdapter(fixtures_dir=fixtures).fetch_company(
+            "genuine.example"
+        )
+
+    demoted_scored = score_facts(demoted_result.facts, now=now)
+    assert demoted_scored.has_angle is False
+
+    genuine_scored = score_facts(genuine_result.facts, now=now)
+    assert genuine_scored.has_angle is True
+    assert genuine_scored.top.tier.value == "medium"
