@@ -10,6 +10,10 @@
   <header class="topbar">
     <a class="brand" href="/leads">MazzSmartLead Review</a>
     {% if user %}
+      <nav class="topbar-nav">
+        <a href="/leads">leads</a>
+        <a href="/workspaces">workspaces</a>
+      </nav>
       <span class="topbar-user">{{ user }}</span>
       <form method="post" action="/logout" class="inline-form">
         <button type="submit" class="link-button">log out</button>

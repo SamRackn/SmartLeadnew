@@ -16,6 +16,7 @@ Three things are being pinned down here:
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -41,6 +42,7 @@ from mazz.pipeline.draft import (
     split_body,
     unsubscribe_token,
 )
+from mazz.pipeline.compose_claude import parse_message
 from mazz.pipeline.score import score_lead
 from mazz.schemas import Fact
 
@@ -48,6 +50,30 @@ FIXTURES = Path(__file__).parent / "fixtures"
 SCENARIOS = {s["name"]: s for s in json.loads((FIXTURES / "scenarios.json").read_text())["scenarios"]}
 
 NOW = datetime(2026, 9, 14, 12, 0, 0, tzinfo=timezone.utc)
+
+
+@dataclass
+class _StubTextBlock:
+    text: str
+    type: str = "text"
+
+
+@dataclass
+class _StubMessage:
+    """The minimum `parse_message` reads: a text block and a stop_reason.
+
+    Deliberately not the SDK's `Message`. These tests are about what the parse
+    path does to the model's STRING, so building a real Message would only add
+    required fields that have nothing to do with the assertion.
+    """
+
+    text: str
+    stop_reason: str = "end_turn"
+    stop_details: object = None
+
+    @property
+    def content(self) -> list:
+        return [_StubTextBlock(self.text)]
 TEST_ADDRESS = "Mazz Outreach LLC, 1100 W Fulton Market, Suite 300, Chicago IL 60607"
 
 
@@ -300,6 +326,113 @@ def test_an_unset_sender_address_fails_loudly_instead_of_shipping_a_footerless_d
         draft_for_lead(session, lead, now=NOW)
 
     assert draft_count(session, lead.id) == 0
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "PLACEHOLDER - Mazz Ltd, 12 Rue Centrale, 75002 Paris, France",
+        "TODO set the real address",
+        "123 Main St, Anytown",
+        "Your Company Address, City",
+        "CHANGEME",
+        "XXX, XXX",
+    ],
+)
+def test_a_placeholder_sender_address_is_refused_like_an_empty_one(
+    session, monkeypatch, address
+):
+    """A fabricated CAN-SPAM address is worse than a missing one.
+
+    The first live run rendered `PLACEHOLDER - Mazz Ltd, 12 Rue Centrale, 75002
+    Paris, France` into all four footers, because the guard only asked whether
+    the value was empty. That footer looks compliant to a reviewer, to an
+    auditor skimming for a footer, and to every test that asserts one is
+    present — while the email carries a mailing address that is not the
+    sender's. So a stand-in fails closed exactly as an unset value does.
+    """
+
+    lead = seed(
+        session,
+        "northwind-logistics.com",
+        email=f"draft-placeholder-{abs(hash(address)) % 9999}@northwind-logistics.com",
+        company="Northwind Logistics",
+    )
+
+    monkeypatch.setenv("SENDER_POSTAL_ADDRESS", address)
+    reload_settings()
+
+    with pytest.raises(MissingSenderAddress) as raised:
+        draft_for_lead(session, lead, now=NOW)
+
+    assert "placeholder" in str(raised.value).lower()
+    assert draft_count(session, lead.id) == 0
+
+
+def test_a_real_address_that_merely_contains_the_letters_is_not_refused(session, monkeypatch):
+    """The check is whole-word. Refusing a real street because it contains
+    'example' inside a longer word would be a new way to fail closed on
+    legitimate configuration."""
+
+    monkeypatch.setenv(
+        "SENDER_POSTAL_ADDRESS", "Mazz Ltd, 36 Examplethorpe Lane, Toddington, Bedfordshire"
+    )
+    reload_settings()
+
+    lead = seed(
+        session,
+        "northwind-logistics.com",
+        email="draft-realaddr@northwind-logistics.com",
+        company="Northwind Logistics",
+    )
+    outcome = draft_for_lead(session, lead, now=NOW)
+
+    assert "Examplethorpe" in outcome.body
+
+
+def test_a_double_encoded_escape_is_decoded_before_it_becomes_an_email():
+    """One live draft of four came back with the six literal characters
+    `\\u2014` where an em dash belonged: the model escaped its own backslash and
+    structured output validated it, because a string with a backslash in it is a
+    perfectly good string.
+
+    Repaired in the composer's parse path rather than in the verifier, because
+    the copy is broken whatever verification says about it — a reviewer could
+    approve `\\u2014` straight into someone's inbox. (It also produced a bogus
+    `number '2014'` flag: the digits inside the escape read as a year.)
+    """
+
+    message = _StubMessage(
+        json.dumps(
+            {
+                "subject": "Your Revenue Operations Manager posting",
+                "body_text": "Marcus \\u2014 the routing work, or the reporting work?",
+                "signals_used": ["job_posting:abc"],
+            }
+        )
+    )
+
+    content = parse_message(message)
+
+    assert content.body_text == "Marcus — the routing work, or the reporting work?"
+    assert "\\u" not in content.body_text
+    assert "2014" not in content.body_text
+
+
+def test_decoding_leaves_ordinary_copy_exactly_as_written():
+    message = _StubMessage(
+        json.dumps(
+            {
+                "subject": "Your Revenue Operations Manager posting",
+                "body_text": "Marcus — two openings, 50% remote.\n\nWorth a call?",
+                "signals_used": [],
+            }
+        )
+    )
+
+    assert parse_message(message).body_text == (
+        "Marcus — two openings, 50% remote.\n\nWorth a call?"
+    )
 
 
 def test_the_unsubscribe_token_is_stable_and_not_the_raw_address(session):

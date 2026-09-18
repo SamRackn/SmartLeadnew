@@ -762,3 +762,262 @@ def test_handle_score_still_reaches_no_angle_for_a_lead_with_no_campaign(session
     handle_score(JobContext(session=session, job=job, lead=lead, handlers={}))
 
     assert lead.status is LeadStatus.NO_ANGLE
+
+
+# ==========================================================================
+# A narrowed vocabulary has to actually narrow
+# ==========================================================================
+#
+# The bug these cover: `classify_role_fit` returns UNCLASSIFIED for a req that
+# matches neither list, and UNCLASSIFIED used to score 55.0 at STRONG
+# unconditionally — fifteen points clear of the 40.0 default threshold. So a
+# campaign that narrowed `supported_role_terms` to its client's ICP still
+# qualified nearly every req at every company, at a slightly lower score. The
+# config read as applied and barely moved a verdict, which is the one thing the
+# per-campaign decision (docs/DECISIONS.md) exists to buy.
+#
+# The end-to-end test in tests/test_routing.py did not catch it because its
+# campaign specifies `off_target_role_terms` AND raises the threshold to 45 —
+# the fully-specified, favourable case. A partially-specified config is the
+# common one, and it is the one asserted here.
+
+#: Matches NEITHER vocabulary: not in the shipped SaaS list, not in a staffing
+#: agency's. It is `UNCLASSIFIED` under both, which is what isolates the rule
+#: under test from any change in `classify_role_fit`.
+UNCLASSIFIED_REQ = "Hiring a Paid Media Manager to own our ecommerce accounts."
+
+#: The probe's own req. Under the SHIPPED vocabulary this is SUPPORTED
+#: ("revenue operations"); under a staffing agency's it matches nothing. It is
+#: the case that made the bug visible, kept verbatim at the bottom of this file.
+PROBE_REQ = "Hiring a Revenue Operations Manager"
+
+#: Names nothing but the client's ICP. No off-target list, no threshold — the
+#: config an operator actually writes on day one.
+NARROWED_ONLY = {"supported_role_terms": ["recruiter", "talent acquisition"]}
+
+
+def test_a_narrowed_vocabulary_rejects_a_req_outside_it(session):
+    """Direction one. The req the operator did NOT ask for is now `no_angle`.
+
+    Same fact, same freshness, same 40.0 threshold: the only thing that changed
+    is that this campaign stated its ICP.
+    """
+
+    req = make_fact(
+        FactKind.JOB_POSTING.value, UNCLASSIFIED_REQ, published=NOW.date().isoformat()
+    )
+
+    # Shipped defaults: unrecognised req, still hiring, still STRONG. Unchanged.
+    shipped = score_facts([req], now=NOW)
+    assert shipped.scored[0].tier is SignalTier.STRONG
+    assert shipped.scored[0].score == DEFAULT_SCORING.job_posting_unclassified
+    assert shipped.has_angle is True
+
+    campaign = _campaign(session, scoring_config=NARROWED_ONLY, slug="narrowed-only")
+    lead = _lead_with_facts(
+        session, [req], email="rev@narrowed-only.example", campaign=campaign
+    )
+
+    result = score_lead(session, lead, now=NOW)
+
+    assert result.has_angle is False, (
+        "a campaign whose ICP is recruiting roles must not be handed a RevOps req "
+        "just because neither vocabulary named it"
+    )
+    assert result.scored[0].tier is SignalTier.WEAK
+    assert result.scored[0].role_fit is RoleFit.UNCLASSIFIED
+    assert result.scored[0].score == DEFAULT_SCORING.job_posting_off_target
+    assert "vocabulary" in result.scored[0].reason
+
+
+def test_a_narrowed_vocabulary_still_accepts_the_req_it_named(session):
+    """Direction two, and the half that stops this becoming "reject everything".
+
+    The same campaign, the same threshold, the req it exists to find: STRONG.
+    """
+
+    req = make_fact(
+        FactKind.JOB_POSTING.value, RECRUITER_REQ, published=NOW.date().isoformat()
+    )
+
+    campaign = _campaign(session, scoring_config=NARROWED_ONLY, slug="narrowed-accepts")
+    lead = _lead_with_facts(
+        session, [req], email="rec@narrowed-accepts.example", campaign=campaign
+    )
+
+    result = score_lead(session, lead, now=NOW)
+
+    assert result.has_angle is True
+    assert result.top.tier is SignalTier.STRONG
+    assert result.top.role_fit is RoleFit.SUPPORTED
+
+
+def test_the_campaign_vocabulary_is_scored_at_the_full_supported_weight(session):
+    """The narrowed vocabulary buys the FULL supported weight, not a discount.
+
+    `scripts/seed_demo.py` section 10 shows this with a scraped, undated req and
+    prints 41.25, which invites the reading that routing costs the req some of
+    its weight. It does not. The only term between 75.0 and 41.25 is the undated
+    recency discount, and an unrouted lead pays exactly the same one — asserted
+    here as arithmetic so a change to either number fails the build instead of
+    silently moving what the demo claims, or what a client's `no_angle` rate is.
+    """
+
+    dated = make_fact(
+        FactKind.JOB_POSTING.value, RECRUITER_REQ, published=NOW.date().isoformat()
+    )
+    undated = Fact(
+        id="job_posting:undated-recruiter",
+        kind=FactKind.JOB_POSTING.value,
+        content=RECRUITER_REQ,
+        source_url="https://x.example/careers/recruiter",
+        retrieved_at=NOW,  # scraped this second; NOT a publication date
+        metadata={},
+    )
+    assert published_at_of(undated) is None
+
+    config = scoring_config_from_json(NARROWED_ONLY)
+
+    # Under the campaign's vocabulary: full shipped weight, undiscounted.
+    assert score_fact(dated, now=NOW, config=config).score == (
+        DEFAULT_SCORING.job_posting_supported
+    )
+
+    # The demo's number, decomposed: base x undated, nothing else.
+    scored = score_fact(undated, now=NOW, config=config)
+    assert scored.tier is SignalTier.STRONG
+    assert scored.role_fit is RoleFit.SUPPORTED
+    assert scored.score == round(
+        DEFAULT_SCORING.job_posting_supported * DEFAULT_SCORING.undated_multiplier, 2
+    ) == 41.25
+
+    # ...and the undated discount is not something routing introduced: the same
+    # fact under the shipped vocabulary pays it too, off a smaller base.
+    unrouted = score_fact(undated, now=NOW)
+    assert unrouted.role_fit is RoleFit.OFF_TARGET  # "recruiter" is off-target there
+    assert unrouted.score == round(
+        DEFAULT_SCORING.job_posting_off_target * DEFAULT_SCORING.undated_multiplier, 2
+    )
+
+
+def test_an_unrouted_lead_is_untouched_by_the_narrowing_rule(session):
+    """`campaign_id IS NULL` is a steady state, not a migration to finish, and
+    a lot of committed behaviour rests on it. An unrecognised req is still
+    55.0 at STRONG for those leads, exactly as before."""
+
+    lead = _lead_with_facts(
+        session,
+        [make_fact(FactKind.JOB_POSTING.value, UNCLASSIFIED_REQ, published=NOW.date().isoformat())],
+        email="nobody@unrouted-unclassified.example",
+    )
+
+    assert lead.campaign_id is None
+    result = score_lead(session, lead, now=NOW)
+
+    assert DEFAULT_SCORING.treats_unclassified_as_off_target is False
+    assert result.has_angle is True
+    assert result.top.tier is SignalTier.STRONG
+    assert result.top.score == 55.0
+
+
+def test_a_campaign_that_narrows_only_the_off_target_list_keeps_the_old_reading(session):
+    """The rule keys on the SUPPORTED vocabulary, because that is the one that
+    states an ICP. A campaign that only adds off-target terms has not said what
+    it sells to, so "we do not recognise this role" still means what it used to."""
+
+    config = scoring_config_from_json({"off_target_role_terms": ["welder"]})
+
+    assert config.vocabulary_is_customised is False
+    assert config.treats_unclassified_as_off_target is False
+    scored = score_fact(
+        make_fact(FactKind.JOB_POSTING.value, UNCLASSIFIED_REQ, published=NOW.date().isoformat()),
+        now=NOW,
+        config=config,
+    )
+    assert scored.tier is SignalTier.STRONG
+
+
+def test_a_campaign_storing_the_shipped_vocabulary_has_not_narrowed_anything():
+    """Customisation is derived by comparison, not by a flag that can drift.
+    A row echoing the shipped list back is the shipped list."""
+
+    config = scoring_config_from_json(
+        {"supported_role_terms": sorted(DEFAULT_SCORING.supported_role_terms)}
+    )
+
+    assert config.supported_role_terms == DEFAULT_SCORING.supported_role_terms
+    assert config.treats_unclassified_as_off_target is False
+
+
+def test_a_client_can_opt_back_into_taking_any_hiring_signal():
+    """The escape hatch, written down rather than inherited. An agency-client
+    who will work any req can say so — and it takes an explicit line."""
+
+    config = scoring_config_from_json(
+        {**NARROWED_ONLY, "unclassified_is_off_target": False}
+    )
+
+    assert config.vocabulary_is_customised is True
+    assert config.treats_unclassified_as_off_target is False
+    scored = score_fact(
+        make_fact(FactKind.JOB_POSTING.value, UNCLASSIFIED_REQ, published=NOW.date().isoformat()),
+        now=NOW,
+        config=config,
+    )
+    assert scored.tier is SignalTier.STRONG
+    assert scored.score == DEFAULT_SCORING.job_posting_unclassified
+
+
+def test_a_vocabulary_plus_an_unclassified_weight_is_refused_as_contradictory():
+    """Setting both states two incompatible things, and one of them would be a
+    knob that reads as applied and is never consulted — the same failure as a
+    typo'd key, refused the same way."""
+
+    with pytest.raises(ValueError, match="never read"):
+        scoring_config_from_json({**NARROWED_ONLY, "job_posting_unclassified": 70.0})
+
+    # Saying which you mean resolves it, in either direction.
+    loose = scoring_config_from_json(
+        {**NARROWED_ONLY, "job_posting_unclassified": 70.0, "unclassified_is_off_target": False}
+    )
+    assert loose.job_posting_unclassified == 70.0
+    tight = scoring_config_from_json(
+        {**NARROWED_ONLY, "job_posting_unclassified": 70.0, "unclassified_is_off_target": True}
+    )
+    assert tight.treats_unclassified_as_off_target is True
+
+
+def test_the_narrowing_flag_must_be_a_real_boolean():
+    """JSON's "false" is truthy in Python, and this flag decides whether a whole
+    class of reqs can reach a draft."""
+
+    with pytest.raises(ValueError, match="must be true, false or absent"):
+        scoring_config_from_json({"unclassified_is_off_target": "false"})
+
+
+def test_funding_still_cannot_clear_under_a_narrowed_campaign_config():
+    """Guardrail 2 is orthogonal to all of this and stays orthogonal."""
+
+    with pytest.raises(ValueError, match="funding must score below the threshold"):
+        scoring_config_from_json({**NARROWED_ONLY, "threshold": 10.0, "funding": 60.0})
+
+    config = scoring_config_from_json({**NARROWED_ONLY, "funding": 39.0})
+    fresh = make_fact(
+        FactKind.FUNDING.value, "Acme raises $450M.", published=NOW.date().isoformat()
+    )
+    assert score_facts([fresh], now=NOW, config=config).has_angle is False
+
+
+def test_narrowing_is_what_flips_the_verdict_not_the_threshold(session):
+    """The probe's exact measurement, as a regression: the ONLY difference
+    between these two configs is the vocabulary. Same threshold, same fact."""
+
+    req = make_fact(
+        FactKind.JOB_POSTING.value, PROBE_REQ, published=NOW.date().isoformat()
+    )
+    loose = scoring_config_from_json({})
+    narrowed = scoring_config_from_json(NARROWED_ONLY)
+
+    assert loose.threshold == narrowed.threshold == 40.0
+    assert score_facts([req], now=NOW, config=loose).has_angle is True
+    assert score_facts([req], now=NOW, config=narrowed).has_angle is False

@@ -55,11 +55,16 @@ import re
 
 __all__ = [
     "ABBREVIATIONS",
+    "COGNITION_VERBS",
     "COMMON_ENGLISH",
+    "FIRST_PERSON_MARKERS",
+    "FORWARD_RELATIVE_PHRASES",
     "IRREGULAR_FORMS",
     "KIND_VOCABULARY",
     "MAGNITUDES",
     "NUMBER_WORDS",
+    "OTHER_PARTY_MARKERS",
+    "PAST_RELATIVE_PHRASES",
     "RELATIVE_DATE_PHRASES",
     "MONTHS",
     "is_common",
@@ -228,6 +233,35 @@ way week weeks word words work world
 year years
 """
 
+#: Admitted after the first live `compose_claude` run, which held 4 of 4 drafts.
+#: Every word here was flagged as an untraceable CLAIM in copy that an operator
+#: read line by line against its evidence and found clean, and every one of them
+#: answers the three admission questions above with a yes: it could appear in a
+#: letter about any company at all, a recipient reading it without evidence
+#: behind it would shrug, and it is not a word we would cite a source for.
+#:
+#: Nothing from the business register got in on this ticket. `dashboard`,
+#: `ramping` and `sequencing` were flagged in the same run and are deliberately
+#: NOT here: they name a tool and two operating states, they are the kind of
+#: word a retrieved fact would contain, and admitting them to buy two passing
+#: drafts is how a floor becomes a hole. Those drafts are still held, and the
+#: measurement in `docs/` says so rather than hiding it.
+#:
+#: `today`, `tonight` and `tomorrow` are here for a second reason: they moved
+#: out of the date-claim set (see `FORWARD_RELATIVE_PHRASES`), so they now reach
+#: the word check, and a bare present or future deictic asserts nothing.
+_ORDINARY_PROSE = """
+compare compared compares comparing curious
+describe described describes describing
+elsewhere exercise exercises
+friction
+normally
+rarer
+surface surfaced surfaces surfacing
+today tomorrow tonight typically
+vary varied varies varying
+"""
+
 #: Courtesies, greetings and the fixed scaffolding our own composers emit. These
 #: are sender-side: none of them says anything about the recipient.
 _SCAFFOLDING = """
@@ -258,7 +292,9 @@ minute minutes
 
 COMMON_ENGLISH: frozenset[str] = frozenset(
     w
-    for w in (_GRAMMAR + _VERBS + _MODIFIERS + _TIME + _NOUNS + _SCAFFOLDING).split()
+    for w in (
+        _GRAMMAR + _VERBS + _MODIFIERS + _TIME + _NOUNS + _ORDINARY_PROSE + _SCAFFOLDING
+    ).split()
     if w
 )
 
@@ -442,12 +478,12 @@ MONTHS: dict[str, int] = {
     "dec": 12,
 }
 
-#: Relative dates. These are dated-event claims with the date left implicit, and
-#: they are checked like any other date: the phrase must be in the evidence. The
-#: verifier has no clock and must not acquire one — "last quarter" is true or
-#: false only relative to when the source said it, which is the source's job to
-#: say.
-RELATIVE_DATE_PHRASES: frozenset[str] = frozenset(
+#: Relative dates that DATE AN EVENT: they assert that something happened, or is
+#: happening, in a stated past or current period. These are checked like any
+#: other date — the phrase must be in the evidence. The verifier has no clock
+#: and must not acquire one — "last quarter" is true or false only relative to
+#: when the source said it, which is the source's job to say.
+PAST_RELATIVE_PHRASES: frozenset[str] = frozenset(
     {
         "last week",
         "last month",
@@ -457,19 +493,98 @@ RELATIVE_DATE_PHRASES: frozenset[str] = frozenset(
         "this month",
         "this quarter",
         "this year",
-        "next week",
-        "next month",
-        "next quarter",
-        "next year",
         "past week",
         "past month",
         "past quarter",
         "past year",
         "yesterday",
+    }
+)
+
+#: Forward-looking and present-deictic time words, which are NOT dated-event
+#: claims and are not required to appear in the evidence.
+#:
+#: Measured, not assumed: on the first live `compose_claude` run every one of
+#: the four drafts was held, and two of the holds were here — `date 'next week'`
+#: from "Worth a short call in the next week or two?" and `date 'today'` from
+#: "I'd be curious how you're handling it today". Neither sentence dates an
+#: event. The first proposes a meeting and the second means "at present"; there
+#: is no fact about the recipient in either, so there is nothing for evidence to
+#: support or contradict.
+#:
+#: This does not open a hole for invented future or present claims, because the
+#: EVENT word carries the claim and event words are not ordinary English. "You
+#: are launching next quarter" still fails on `launching`; "you migrate tomorrow"
+#: still fails on `migrate`. What is dropped is only the bare time word, which
+#: on its own asserts nothing — and a control that holds a draft for saying
+#: "today" is a control reviewers learn to click past.
+FORWARD_RELATIVE_PHRASES: frozenset[str] = frozenset(
+    {
+        "next week",
+        "next month",
+        "next quarter",
+        "next year",
         "today",
         "tonight",
         "tomorrow",
     }
+)
+
+#: Both sets. Kept as a name because it is exported and imported elsewhere;
+#: `verify.py` requires evidence for `PAST_RELATIVE_PHRASES` only.
+RELATIVE_DATE_PHRASES: frozenset[str] = PAST_RELATIVE_PHRASES | FORWARD_RELATIVE_PHRASES
+
+
+# --------------------------------------------------------------------------
+# Speaker markers
+# --------------------------------------------------------------------------
+#
+# Who is a sentence about? A claim that needs evidence is an assertion about the
+# RECIPIENT'S company. The sender's own offers, questions, availability and
+# framing are not claims about the recipient at all, and holding a draft because
+# the sender said "I'd be curious" or "a 15-minute call" is the false positive
+# that made the first live run hold 4 of 4 drafts.
+#
+# `verify.py` uses these three sets to decide that question, and the safety of
+# the whole idea rests on how they are combined there: a span is treated as the
+# sender's voice ONLY when it positively carries a first-person marker AND
+# carries no other-party marker AND no cognition verb. Anything else — including
+# every span with no pronoun at all, like "Headcount doubled" — is checked in
+# full. The default is always to check.
+
+#: The sender talking about the sender.
+FIRST_PERSON_MARKERS: frozenset[str] = frozenset(
+    """
+    i i'd i'll i'm i've me mine my myself
+    we we'd we'll we're we've our ours us ourselves
+    """.split()
+)
+
+#: Anyone who is not the sender. Second person is the recipient; third person is
+#: whoever the copy was last talking about, which in cold outreach is nearly
+#: always the recipient's company. Either one makes a span checkable again.
+OTHER_PARTY_MARKERS: frozenset[str] = frozenset(
+    """
+    you you'd you'll you're you've your yours yourself yourselves
+    they they'd they'll they're they've their theirs them themselves
+    """.split()
+)
+
+#: Verbs that introduce a PROPOSITION. "I saw", "we hear", "I think" are first
+#: person, but what follows them is a claim about somebody else — this is the
+#: construction a model would use to smuggle a fabrication into sender voice
+#: ("I saw you scaled to 40 reps", "we think headcount doubled"). A span
+#: containing one of these is never sender voice, whatever pronouns it carries.
+COGNITION_VERBS: frozenset[str] = frozenset(
+    """
+    assume assumed assuming believe believed bet expect expected
+    figure figured find finds found gather gathered guess guessed
+    hear heard imagine imagined know knew known learn learned learnt
+    notice noticed noticing read reading recall recalled reckon
+    remember remembered saw see seeing seen sense sensed spot spotted
+    suspect suspected tell telling told think thinking thought
+    understand understood watch watched
+    """.split()
 )
 
 

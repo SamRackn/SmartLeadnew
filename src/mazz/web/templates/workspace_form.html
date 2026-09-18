@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}{{ "Edit workspace" if workspace else "New workspace" }} — MazzSmartLead Review{% endblock %}
+{% block content %}
+<p><a href="/workspaces">← back to workspaces</a></p>
+<h1>{{ "Edit workspace" if workspace else "New workspace" }}</h1>
+
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+<form
+  method="post"
+  action="{% if workspace %}/workspaces/{{ workspace.id }}/edit{% else %}/workspaces{% endif %}"
+  class="entity-form"
+>
+  <label>Slug
+    <input type="text" name="slug" value="{{ form.slug }}" placeholder="acme-digital" required>
+    <span class="hint">Lowercase letters, digits and hyphens. This is how an import or CLI names the workspace, so renaming the display name never breaks a reference.</span>
+  </label>
+  <label>Name
+    <input type="text" name="name" value="{{ form.name }}" placeholder="Acme Digital" required>
+  </label>
+  <button type="submit">Save</button>
+</form>
+{% endblock %}

@@ -84,6 +84,8 @@ __all__ = [
     "DraftOutcome",
     "Composer",
     "MissingSenderAddress",
+    "PLACEHOLDER_ADDRESS_MARKERS",
+    "placeholder_marker_in",
     "FOOTER_SEPARATOR",
     "MAX_QUOTE_CHARS",
     "MAX_SIGNALS",
@@ -113,7 +115,8 @@ DEFAULT_UNSUBSCRIBE_BASE = "https://app.mazzsmartlead.example"
 
 
 class MissingSenderAddress(RuntimeError):
-    """`SENDER_POSTAL_ADDRESS` is unset, so no compliant email can be rendered.
+    """`SENDER_POSTAL_ADDRESS` is unset or a placeholder, so no compliant email
+    can be rendered.
 
     Loud on purpose. CAN-SPAM requires a valid physical postal address in every
     commercial email; a draft without one is not a slightly worse draft, it is
@@ -121,6 +124,56 @@ class MissingSenderAddress(RuntimeError):
     a human can fix it (one env var) instead of producing a queue of drafts that
     are individually approvable and collectively a violation.
     """
+
+
+#: Markers of an address nobody has actually set. A stand-in value is WORSE than
+#: an empty one and must fail the same way: empty fails loudly and visibly here,
+#: while "PLACEHOLDER - Mazz Ltd, 12 Rue Centrale, 75002 Paris, France" — the
+#: value the first live run put in the footer of all four drafts — renders a
+#: footer that looks compliant to a reviewer, to an auditor skimming for "footer
+#: present", and to any test that asserts one. A fabricated postal address on a
+#: commercial email is a compliance failure wearing the costume of a passing
+#: check.
+#:
+#: Matched case-insensitively as a whole word so a real street can still contain
+#: the letters: "12 Example Road" is refused, "36 Examplethorpe Lane" is not.
+PLACEHOLDER_ADDRESS_MARKERS: tuple[str, ...] = (
+    "placeholder",
+    "changeme",
+    "change me",
+    "todo",
+    "tbd",
+    "fixme",
+    "your address here",
+    "your company address",
+    "street address here",
+    "xxx",
+    "n/a",
+    "example address",
+    "123 main st",
+    "123 main street",
+    "sample address",
+    "dummy",
+    "fake",
+    "unset",
+    "not set",
+    "lorem ipsum",
+)
+
+_PLACEHOLDER_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:"
+    + "|".join(re.escape(marker) for marker in PLACEHOLDER_ADDRESS_MARKERS)
+    + r")(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+
+
+def placeholder_marker_in(address: str) -> str | None:
+    """The placeholder marker in this address, or None. Public so the review
+    app and the auditor can ask the same question this module asks."""
+
+    match = _PLACEHOLDER_RE.search(address or "")
+    return match.group(0) if match else None
 
 
 def unsubscribe_token(lead: Lead | str) -> str:
@@ -158,6 +211,16 @@ def render_footer(lead: Lead) -> str:
             "without one. Set it in .env — see .env.example."
         )
     address = " ".join(address.split())
+    marker = placeholder_marker_in(address)
+    if marker:
+        raise MissingSenderAddress(
+            f"SENDER_POSTAL_ADDRESS looks like a placeholder ({marker!r} in "
+            f"{address!r}), so it is refused exactly as an empty value is. A "
+            "stand-in address is worse than none: it renders a footer that "
+            "passes a glance and a 'footer present' check while the email "
+            "carries a mailing address that is not the sender's. Set a real "
+            "physical address in .env — see .env.example."
+        )
     return f"{address}\nUnsubscribe (one click): {unsubscribe_url(lead)}"
 
 

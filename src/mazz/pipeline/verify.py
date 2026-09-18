@@ -127,12 +127,15 @@ from mazz.models import Draft, Lead, LeadStatus, VerificationStatus
 from mazz.pipeline.draft import FOOTER_SEPARATOR, render_footer, split_body
 from mazz.pipeline.lexicon import (
     ABBREVIATIONS,
+    COGNITION_VERBS,
     COMMON_ENGLISH,
+    FIRST_PERSON_MARKERS,
     KIND_VOCABULARY,
     MAGNITUDES,
     MONTHS,
     NUMBER_WORDS,
-    RELATIVE_DATE_PHRASES,
+    OTHER_PARTY_MARKERS,
+    PAST_RELATIVE_PHRASES,
     is_common,
     stem,
 )
@@ -149,6 +152,7 @@ log = logging.getLogger(__name__)
 __all__ = [
     "SAFE_VOCABULARY",
     "Grounding",
+    "sender_voice_spans",
     "Judge",
     "JudgeUnavailable",
     "JudgeVerdict",
@@ -350,6 +354,119 @@ def _content_stream(text: str) -> list[str]:
 
 
 # --------------------------------------------------------------------------
+# Speaker: whose sentence is this?
+# --------------------------------------------------------------------------
+#
+# A claim that requires evidence is an assertion about the RECIPIENT'S company.
+# The sender's own offers, questions, availability and framing are not claims
+# about the recipient, and the entailment judge in this module has said so in
+# its prompt since it was written: "Opinions, offers and questions from the
+# sender about the sender's own business are not claims about the recipient.
+# Ignore them." The deterministic layer did not know that, and the first live
+# `compose_claude` run held 4 of 4 drafts, most of them on the sender's own
+# prose: `entity "I'm"`, `number '15'` from "a 15-minute call", `word 'curious'`
+# from "I'd be curious".
+#
+# So spans are classified, and the classification is deliberately hard to earn:
+#
+#   * A span is the sender's voice only if it POSITIVELY carries a first-person
+#     marker. A span with no pronoun at all — "Headcount doubled." — is checked
+#     in full, which is what keeps the labelled fabrication cases failing.
+#   * Any second- or third-person marker disqualifies it. "I saw you scaled to
+#     40 reps" is about the recipient, and every claim in it is checked.
+#   * Any cognition or reporting verb disqualifies it, because what follows one
+#     is a proposition about somebody else. "We think headcount doubled" has no
+#     "you" in it and is still not sender voice.
+#   * Naming the recipient's company or the recipient disqualifies it.
+#
+# Sentence first, then clauses within a sentence that is not wholly the
+# sender's. Splitting can only ever SHRINK an exempt span (a clause carries
+# fewer pronouns than its sentence), so the finer pass is the conservative one.
+#
+# What the exemption covers is also narrow: numbers, dates and ordinary prose.
+# Quotes, proper nouns and job titles stay checked everywhere, in every span,
+# because those are the claim types that create the legal exposure — a
+# fabricated name or title does not become safe by being said in first person.
+
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
+
+#: Clause boundaries. Coordinators and complementizers, because the proposition
+#: after one ("I'd be curious HOW you're handling it") is a different speaker's
+#: business from the clause before it.
+_CLAUSE_SPLIT = re.compile(
+    r"[;:]\s+"
+    r"|\s+[—–]\s+"
+    r"|,\s+(?=(?:and|but|so|or|yet|since|because|while|although|though|whereas|"
+    r"which|where|when|who|if|unless)\b)"
+    r"|\s+(?=(?:and|but|so|or|yet|since|because|while|although|though|whereas|"
+    r"if|unless|how|what|whether|which|where|when|why|who|whom)\b)",
+    re.IGNORECASE,
+)
+# "that" is deliberately NOT a boundary. It is a determiner ("on exactly that
+# handoff") far more often than a complementizer, and splitting there cut the
+# sender's own clause in half. The complementizer case is the one that matters
+# for safety — "I think that headcount doubled" — and it is already closed from
+# the other side: "think" is a cognition verb, so that span is never sender
+# voice with or without the split.
+
+
+def _segments(text: str, pattern: re.Pattern[str], start: int, end: int) -> list[tuple[int, int]]:
+    """(start, end) of each piece of ``text[start:end]`` between separators."""
+
+    out: list[tuple[int, int]] = []
+    cursor = start
+    for match in pattern.finditer(text, start, end):
+        if match.start() > cursor:
+            out.append((cursor, match.start()))
+        cursor = max(match.end(), match.start())
+    if cursor < end:
+        out.append((cursor, end))
+    return out
+
+
+def _span_words(text: str, start: int, end: int) -> set[str]:
+    return {
+        match.group(0).lower().replace("’", "'")
+        for match in _WORD_RE.finditer(text, start, end)
+    }
+
+
+def _is_sender_voice(words: set[str], prospect_terms: frozenset[str]) -> bool:
+    """Does this span talk about the sender, and nobody else?"""
+
+    if not words & FIRST_PERSON_MARKERS:
+        return False
+    if words & OTHER_PARTY_MARKERS:
+        return False
+    if words & COGNITION_VERBS:
+        return False
+    if prospect_terms and any(stem(w) in prospect_terms for w in words):
+        return False
+    return True
+
+
+def sender_voice_spans(
+    text: str, prospect_terms: frozenset[str] = frozenset()
+) -> tuple[tuple[int, int], ...]:
+    """Spans of ``text`` that assert nothing about the recipient.
+
+    Public because it is the part of this control that is easiest to get wrong
+    and so the part that most needs to be testable on its own.
+    """
+
+    text = text or ""
+    spans: list[tuple[int, int]] = []
+    for s_start, s_end in _segments(text, _SENTENCE_SPLIT, 0, len(text)):
+        if _is_sender_voice(_span_words(text, s_start, s_end), prospect_terms):
+            spans.append((s_start, s_end))
+            continue
+        for c_start, c_end in _segments(text, _CLAUSE_SPLIT, s_start, s_end):
+            if _is_sender_voice(_span_words(text, c_start, c_end), prospect_terms):
+                spans.append((c_start, c_end))
+    return tuple(spans)
+
+
+# --------------------------------------------------------------------------
 # Grounding
 # --------------------------------------------------------------------------
 
@@ -374,8 +491,31 @@ class Grounding:
     dates: frozenset[tuple[int | None, int, int | None]] = frozenset()
     #: Vocabulary licensed by the KINDS of the cited facts, stemmed.
     kind_words: frozenset[str] = frozenset()
+    #: Stems that NAME the recipient or the recipient's company. A span that
+    #: uses one is about them, however much first person surrounds it.
+    prospect_terms: frozenset[str] = frozenset()
     #: The raw snippets shown to the entailment judge, when one is enabled.
     evidence: tuple[str, ...] = ()
+
+
+def _prospect_terms(lead: Lead) -> frozenset[str]:
+    """Stems that name the recipient or their company.
+
+    Used only to DISQUALIFY a span from the sender-voice exemption, never to
+    support a claim, so a generous reading of what counts as naming them is the
+    safe direction here: the more of the copy that is treated as being about
+    them, the more of it is checked.
+    """
+
+    terms: set[str] = set()
+    for value in (lead.full_name, lead.company_name, lead.company_domain, lead.website):
+        for piece in _SPLIT_RE.split(value or ""):
+            if len(piece) < 3 or is_common(piece):
+                continue
+            key = stem(piece)
+            if key:
+                terms.add(key)
+    return frozenset(terms)
 
 
 def _lead_identity_text(lead: Lead) -> str:
@@ -518,6 +658,7 @@ def build_grounding(
         stream=tuple(_content_stream(joined)),
         dates=frozenset(dates),
         kind_words=frozenset(w for w in kind_words if w),
+        prospect_terms=_prospect_terms(lead),
         evidence=tuple(evidence),
     )
 
@@ -545,6 +686,80 @@ class UntraceableClaim:
         return f"{self.kind} {self.token!r} in {self.where} (…{self.context}…)"
 
 
+#: How long a meeting the sender is proposing. "a 20-minute call" is an offer,
+#: not a measurement of the recipient's business, and it was two of the four
+#: holds on the first live run. Kept deliberately tight: the duration must be
+#: bound to a meeting noun, so "40 minutes a day of routing" — a claim about
+#: their operation — is not covered and still needs evidence.
+_MEETING_NOUNS = (
+    r"(?:call|calls|chat|chats|conversation|conversations|meeting|meetings|"
+    r"demo|intro|introduction|session|sync|zoom|coffee)"
+)
+_DURATION_WORDS = r"(?:minute|minutes|min|mins|hour|hours|hr|hrs)"
+_MEETING_OFFER_RE = re.compile(
+    r"\b(?:\d{1,3}|"
+    + "|".join(sorted(NUMBER_WORDS, key=len, reverse=True))
+    + r")\s*[-–]?\s*"
+    + _DURATION_WORDS
+    + r"\s+"
+    + _MEETING_NOUNS
+    + r"\b"
+    r"|\b" + _MEETING_NOUNS + r"\s+(?:of\s+|for\s+)(?:\d{1,3}|"
+    + "|".join(sorted(NUMBER_WORDS, key=len, reverse=True))
+    + r")\s*[-–]?\s*"
+    + _DURATION_WORDS + r"\b",
+    re.IGNORECASE,
+)
+
+
+#: "a week or two", "a day or two" — an idiom for "approximately", not a count
+#: of anything the recipient has. It reads as a number to the extractor ("two"),
+#: and on the live run it only escaped because one cited req happened to say
+#: "(2 openings)": the same sentence over different evidence would have held the
+#: draft. Bound to time units so "a rep or two" is not covered.
+_VAGUE_INTERVAL_RE = re.compile(
+    r"\b(?:a|another|the\s+next)?\s*"
+    r"(?:minute|hour|day|week|month|quarter|year)s?\s+or\s+(?:two|three)\b",
+    re.IGNORECASE,
+)
+
+
+def _meeting_offer_spans(text: str) -> tuple[tuple[int, int], ...]:
+    """Spans where a quantity is the sender's scheduling, not a measurement."""
+
+    text = text or ""
+    return tuple(
+        (match.start(), match.end())
+        for pattern in (_MEETING_OFFER_RE, _VAGUE_INTERVAL_RE)
+        for match in pattern.finditer(text)
+    )
+
+
+#: Derivational endings, stripped ONE WAY: from the draft's word, to look for
+#: the evidence's word. `stem()` deliberately refuses to do this (over-stemming
+#: collides two different words, and a collision there is a false negative), so
+#: it is done here instead, where it cannot collide anything: the result is not
+#: a comparison key, it is a lookup into evidence that is either present or not.
+#:
+#: "the escalation path" over a req that says "escalate integration problems" is
+#: the copy restating cited evidence in a different part of speech — the exact
+#: false positive W1 set out to remove, and one the first live run still
+#: produced. The reverse — inventing support that is not in the evidence — is
+#: impossible, because the base still has to BE in the evidence to match.
+_DERIVATIONAL_SUFFIXES = ("ation", "ition", "ion", "ment", "ance", "ence")
+
+
+def _derivational_bases(word: str) -> set[str]:
+    lowered = word.lower().strip("-'’")
+    bases: set[str] = set()
+    for suffix in _DERIVATIONAL_SUFFIXES:
+        if lowered.endswith(suffix) and len(lowered) - len(suffix) >= 4:
+            trunk = lowered[: -len(suffix)]
+            bases.add(trunk)
+            bases.add(trunk + "e")
+    return bases
+
+
 def _context_for(text: str, start: int, end: int, width: int = 44) -> str:
     left = max(start - width, 0)
     right = min(end + width, len(text))
@@ -560,6 +775,8 @@ class _Scanner:
         self.g = grounding
         self.claims: list[UntraceableClaim] = []
         self._consumed: list[tuple[int, int]] = []
+        self._sender = sender_voice_spans(self.text, grounding.prospect_terms)
+        self._offers = _meeting_offer_spans(self.text)
 
     # -- bookkeeping ----------------------------------------------------
     def consume(self, start: int, end: int) -> None:
@@ -567,6 +784,18 @@ class _Scanner:
 
     def is_consumed(self, start: int, end: int) -> bool:
         return any(s <= start and end <= e for s, e in self._consumed)
+
+    def in_sender_voice(self, start: int, end: int) -> bool:
+        """Is this span the sender talking about the sender?
+
+        Only numbers, dates and prose consult this. Quotes, proper nouns and
+        job titles are checked in every span regardless.
+        """
+
+        return any(s <= start and end <= e for s, e in self._sender)
+
+    def in_meeting_offer(self, start: int, end: int) -> bool:
+        return any(s <= start and end <= e for s, e in self._offers)
 
     def fail(self, token: str, kind: str, start: int, end: int) -> None:
         self.claims.append(
@@ -589,6 +818,8 @@ class _Scanner:
             return True
         expansion = ABBREVIATIONS.get(word.lower().strip("-'’"))
         if expansion and all(stem(p) in self.g.words for p in expansion):
+            return True
+        if any(stem(base) in self.g.words for base in _derivational_bases(word)):
             return True
         if "-" in word:
             # A hyphenated compound is supported when every part is either
@@ -651,6 +882,8 @@ class _Scanner:
             if self.is_consumed(start, end):
                 continue
             self.consume(start, end)
+            if self.in_sender_voice(start, end):
+                continue
             if not self.supports_date(parsed):
                 self.fail(display, "date", start, end)
 
@@ -658,15 +891,21 @@ class _Scanner:
             if self.is_consumed(match.start(), match.end()):
                 continue
             self.consume(match.start(), match.end())
+            if self.in_sender_voice(match.start(), match.end()):
+                continue
             if _normalize_text(match.group(0)) not in self.g.text:
                 self.fail(match.group(0), "date", match.start(), match.end())
 
         lowered = self.text.lower()
-        for phrase in RELATIVE_DATE_PHRASES:
+        # Past and current periods only. A forward or present deictic ("next
+        # week", "today") dates no event — see `lexicon.FORWARD_RELATIVE_PHRASES`.
+        for phrase in PAST_RELATIVE_PHRASES:
             for match in re.finditer(r"\b" + re.escape(phrase) + r"\b", lowered):
                 if self.is_consumed(match.start(), match.end()):
                     continue
                 self.consume(match.start(), match.end())
+                if self.in_sender_voice(match.start(), match.end()):
+                    continue
                 if phrase not in self.g.text:
                     self.fail(
                         self.text[match.start() : match.end()],
@@ -676,12 +915,22 @@ class _Scanner:
                     )
 
     def scan_numbers(self) -> None:
-        """Digits and spelled cardinals. `COMMON_ENGLISH` does not reach here."""
+        """Digits and spelled cardinals. `COMMON_ENGLISH` does not reach here.
+
+        There is still no allow-list of numbers, and there never will be: what
+        is exempt is a SPAN, not a value. A quantity asserted about the
+        recipient is checked whatever it is; a quantity in the sender's own
+        sentence ("I spend most of my time…") or in the length of a meeting the
+        sender is proposing ("a 20-minute call") is not a claim about the
+        recipient's business at all.
+        """
 
         for start, end, canonical in _iter_numbers(self.text):
             if self.is_consumed(start, end):
                 continue
             self.consume(start, end)
+            if self._number_is_not_a_claim(start, end):
+                continue
             if canonical not in self.g.numbers:
                 self.fail(self.text[start:end].strip(), "number", start, end)
 
@@ -689,8 +938,13 @@ class _Scanner:
             if self.is_consumed(start, end):
                 continue
             self.consume(start, end)
+            if self._number_is_not_a_claim(start, end):
+                continue
             if canonical not in self.g.numbers:
                 self.fail(self.text[start:end].strip(), "number", start, end)
+
+    def _number_is_not_a_claim(self, start: int, end: int) -> bool:
+        return self.in_sender_voice(start, end) or self.in_meeting_offer(start, end)
 
     def scan_roles(self) -> None:
         """A job title asserted in the copy must be a title somebody posted.
@@ -701,23 +955,51 @@ class _Scanner:
         """
 
         for match in _ROLE_TRIGGERS.finditer(self.text):
-            self._check_title(match.end())
+            # "hiring a Revenue Operations Manager": the title FOLLOWS the
+            # trigger, so read forwards from it.
+            self._check_title(match.end(), anchor="leading")
         for match in _ROLE_POSSESSIVE.finditer(self.text):
             title = match.group("title") or ""
             if title.strip():
-                self._check_title(match.start("title"), raw=title)
+                # "your Revenue Operations Manager posting": the title is what
+                # sits against the head noun, so read BACKWARDS from it.
+                self._check_title(match.start("title"), raw=title, anchor="trailing")
 
-    def _check_title(self, start: int, raw: str | None = None) -> None:
+    def _check_title(
+        self, start: int, raw: str | None = None, *, anchor: str = "leading"
+    ) -> None:
+        """Judge one candidate job title.
+
+        ``anchor`` says which end of the captured span the title is attached to,
+        and getting it wrong invents job titles out of ordinary prose. It did:
+        "standing up that layer before the new hire lands" matched the
+        possessive pattern as `that … hire`, and reading forwards from `that`
+        reported `role 'layer'` — a common noun held as a fabricated job title
+        on the first live run. The title in that construction is whatever sits
+        immediately before "hire", which is "new" — ordinary English, no claim,
+        nothing to check. Reading backwards costs nothing on a real one: "your
+        Head of Revenue Operations opening" still yields the whole title.
+        """
+
         if raw is None:
+            base = _skip_space(self.text, start)
             raw, _ = self._take_phrase(start)
-        words = [m.group(0) for m in _WORD_RE.finditer(raw)]
-        trimmed: list[str] = []
-        for word in words:
-            if word.lower() in _PHRASE_BOUNDARY:
+        else:
+            base = start
+
+        words = [(m.group(0), m.start(), m.end()) for m in _WORD_RE.finditer(raw)]
+        kept: list[tuple[str, int, int]] = []
+        for word in reversed(words) if anchor == "trailing" else words:
+            if word[0].lower() in _PHRASE_BOUNDARY:
                 break
-            trimmed.append(word)
+            kept.append(word)
+        if anchor == "trailing":
+            kept.reverse()
+        if not kept:
+            return
+
         stems: list[str] = []
-        for word in trimmed:
+        for word, _, _ in kept:
             if is_common(word):
                 continue
             # One-way expansion, as everywhere else: "your RevOps req" is the
@@ -730,13 +1012,14 @@ class _Scanner:
                     stems.append(key)
         if not stems:
             return
-        phrase = " ".join(trimmed).strip()
-        span_end = min(start + len(phrase), len(self.text))
+
+        span_start = base + kept[0][1]
+        span_end = min(base + kept[-1][2], len(self.text))
+        phrase = " ".join(word for word, _, _ in kept).strip()
+        self.consume(span_start, span_end)
         if self.supports_phrase(stems):
-            self.consume(start, span_end)
             return
-        self.consume(start, span_end)
-        self.fail(phrase, "role", start, span_end)
+        self.fail(phrase, "role", span_start, span_end)
 
     def _take_phrase(self, start: int, limit: int = 6) -> tuple[str, int]:
         pos = _skip_space(self.text, start)
@@ -758,6 +1041,15 @@ class _Scanner:
         for match in _WORD_RE.finditer(self.text):
             token = match.group(0)
             if self.is_consumed(match.start(), match.end()):
+                continue
+            # Ordinary English is not a proper noun, whatever its capitalisation
+            # or its apostrophes. "I'm", "I'd" and "I'll" were reported as
+            # untraceable ENTITIES on the first live run — the sender's own
+            # contractions read as somebody's name — because this pass tested
+            # shape before it tested vocabulary. A common word cannot name a
+            # company, and one that reaches `scan_terms` instead is waved
+            # through there anyway, so this skips nothing that was ever caught.
+            if is_common(token):
                 continue
             if not self._looks_like_entity(token, match.start()):
                 continue
@@ -789,13 +1081,21 @@ class _Scanner:
         return pos < 0 or self.text[pos] in ".!?:;\n"
 
     def scan_terms(self) -> None:
-        """Whatever is left: ordinary English passes, specifics must be evidence."""
+        """Whatever is left: ordinary English passes, specifics must be evidence.
+
+        Skipped inside the sender's own spans. A word there describes the
+        sender's practice, offer or question — "I work with support teams on
+        exactly that handoff" — and requiring the recipient's research to
+        contain the sender's vocabulary is not a test of anything.
+        """
 
         for match in _WORD_RE.finditer(self.text):
             token = match.group(0)
             if self.is_consumed(match.start(), match.end()):
                 continue
             if is_common(token):
+                continue
+            if self.in_sender_voice(match.start(), match.end()):
                 continue
             if self.supports_word(token):
                 continue

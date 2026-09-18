@@ -111,3 +111,44 @@ button.reject { background: #b3261e; color: #fff; border-color: #b3261e; }
 .muted { color: #888; }
 .empty { color: #666; font-style: italic; }
 .rationale { font-style: italic; color: #444; }
+
+.topbar-nav { display: flex; gap: 1rem; }
+.topbar-nav a { color: #cfcfcf; text-decoration: none; }
+.topbar-nav a:hover { color: #fff; text-decoration: underline; }
+
+.workspace-block { margin-bottom: 2rem; padding-bottom: 1.5rem; border-bottom: 1px solid #ddd; }
+.workspace-block:last-child { border-bottom: none; }
+
+.config-preview {
+  display: inline-block;
+  max-width: 420px;
+  overflow-x: auto;
+  white-space: nowrap;
+  font-size: 0.8rem;
+  background: #f0f0f0;
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+}
+
+.entity-form { background: #fff; border: 1px solid #ddd; border-radius: 4px; padding: 1rem; max-width: 640px; }
+.entity-form label { display: block; margin-bottom: 1rem; font-weight: 600; }
+.entity-form input, .entity-form textarea {
+  width: 100%;
+  padding: 0.4rem;
+  margin-top: 0.3rem;
+  font-weight: normal;
+  font-family: inherit;
+  border: 1px solid #bbb;
+  border-radius: 4px;
+}
+.entity-form textarea { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; }
+.entity-form .hint { display: block; font-weight: normal; color: #666; font-size: 0.8rem; margin-top: 0.3rem; }
+
+.danger-zone {
+  margin-top: 2rem;
+  max-width: 640px;
+  border: 1px solid #b3261e;
+  border-radius: 4px;
+  padding: 1rem;
+  background: #fff6f6;
+}

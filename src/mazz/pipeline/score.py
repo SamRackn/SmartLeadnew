@@ -99,11 +99,18 @@ class SignalTier(str, Enum):
     """Recently dated blog / changelog / press."""
 
     WEAK = "weak"
-    """Funding news, homepage boilerplate, off-target reqs, unknown kinds."""
+    """Funding news, homepage boilerplate, reqs outside the campaign's
+    vocabulary, unknown kinds. WEAK can never qualify, however fresh."""
 
 
 class RoleFit(str, Enum):
-    """Whether a job posting is a role the client's product touches."""
+    """Whether a job posting is a role the client's product touches.
+
+    Note what these mean and do not mean. ``classify_role_fit`` reports which
+    vocabulary a req matched; it does NOT decide the tier. ``UNCLASSIFIED``
+    means only "matched neither list", and what that is *worth* depends on
+    whose vocabulary was in force -- see ``ScoringConfig.treats_unclassified_as_off_target``.
+    """
 
     SUPPORTED = "supported"
     """Revenue/GTM/customer-facing: exactly what the product replaces or supports."""
@@ -112,7 +119,8 @@ class RoleFit(str, Enum):
     """A backend engineer req is hiring, but it is not OUR reason to call."""
 
     UNCLASSIFIED = "unclassified"
-    """Recognisably a req, role unclear. Still a hiring signal, scored lower."""
+    """Recognisably a req, matched neither vocabulary. Never the top tier when
+    the campaign named its own vocabulary."""
 
 
 # Terms that mark a req as a role the client's B2B SaaS revenue product either
@@ -235,6 +243,64 @@ class ScoringConfig:
 
     supported_role_terms: frozenset[str] = SUPPORTED_ROLE_TERMS
     off_target_role_terms: frozenset[str] = OFF_TARGET_ROLE_TERMS
+
+    #: What a req that matches NEITHER vocabulary is worth. See
+    #: `treats_unclassified_as_off_target` below for the whole argument; the
+    #: short version is that ``None`` (the default) derives the answer from
+    #: whether this config names its own supported vocabulary, and setting it
+    #: explicitly overrides that derivation in either direction.
+    unclassified_is_off_target: bool | None = None
+
+    @property
+    def vocabulary_is_customised(self) -> bool:
+        """Did whoever configured this campaign state their own ICP vocabulary?
+
+        Compared against the shipped constant rather than tracked as a flag, so
+        it cannot drift out of sync with the field it describes: a campaign that
+        stores the shipped list verbatim has not customised anything, and is
+        treated as not having customised anything.
+        """
+
+        return self.supported_role_terms != SUPPORTED_ROLE_TERMS
+
+    @property
+    def treats_unclassified_as_off_target(self) -> bool:
+        """Does a req outside the vocabulary fall out of contention entirely?
+
+        ``UNCLASSIFIED`` quietly changed meaning when the config became
+        per-campaign. Under ONE global vocabulary it meant *"we do not recognise
+        this role"* — a rare, genuinely ambiguous req — and 55.0 at STRONG was
+        defensible: we could not name the role, but hiring is present-tense pain
+        and somebody at that company is under it right now.
+
+        Under a per-campaign vocabulary it means *"not in THIS client's
+        vocabulary"*, which is an enormously broader and far less interesting
+        set: every req at every company that is not the handful of roles this
+        engagement is about. Keeping 55.0/STRONG there means an operator who
+        writes a tight vocabulary for a new agency-client still gets very nearly
+        the same leads, at a slightly lower score — a config that reads as
+        applied and barely moves a verdict, which is the precise failure this
+        module refuses everywhere else.
+
+        So: when a campaign names its own vocabulary, that naming is itself the
+        evidence. The operator has said which roles mean "reach out"; a req that
+        is none of them is off-target for this engagement, scored at the
+        off-target weight and WEAK — where tier, not arithmetic, keeps it out of
+        a draft. The reviewer still sees it, labelled as outside the vocabulary
+        rather than as unrecognised, because those are different findings.
+
+        When the shipped vocabulary is in force (which is every lead with
+        ``campaign_id IS NULL``, and every campaign that did not narrow it) this
+        is False and the 55.0/STRONG reading is unchanged, byte for byte.
+
+        A client who genuinely wants any hiring signal at all can say so with
+        ``unclassified_is_off_target: false`` alongside their vocabulary. That
+        is a decision worth writing down rather than inheriting by accident.
+        """
+
+        if self.unclassified_is_off_target is not None:
+            return self.unclassified_is_off_target
+        return self.vocabulary_is_customised
 
     def __post_init__(self) -> None:
         if self.funding >= self.threshold:
@@ -490,6 +556,17 @@ def score_fact(
         elif role_fit is RoleFit.OFF_TARGET:
             base, tier = config.job_posting_off_target, SignalTier.WEAK
             why = f"job posting, but off-target for this pitch ({matched!r})"
+        elif config.treats_unclassified_as_off_target:
+            # This campaign named its own vocabulary, so "matched none of it" is
+            # the operator's own verdict, not our ignorance. WEAK is what makes a
+            # narrowed vocabulary actually narrow — the tier gates it structurally,
+            # the same way funding is gated, so no weight anybody stores can let it
+            # back in.
+            base, tier = config.job_posting_off_target, SignalTier.WEAK
+            why = (
+                "job posting, but no role in this campaign's vocabulary of "
+                f"{len(config.supported_role_terms)} — outside this client's ICP"
+            )
         else:
             base, tier = config.job_posting_unclassified, SignalTier.STRONG
             why = "job posting, role unclassified but hiring is present-tense pain"
@@ -730,11 +807,49 @@ def scoring_config_from_json(stored: Mapping[str, Any]) -> ScoringConfig:
             "partly ignored — a typo'd knob would read as set and do nothing."
         )
 
+    _refuse_dead_unclassified_weight(stored)
+
+    flag = stored.get("unclassified_is_off_target", None)
+    if flag is not None and not isinstance(flag, bool):
+        # JSON's "false" is truthy in Python, and this flag decides whether a
+        # whole class of reqs can reach a draft. Refuse rather than guess.
+        raise ValueError(
+            "campaigns.scoring_config['unclassified_is_off_target'] must be true, "
+            f"false or absent, got {flag!r}"
+        )
+
     kwargs: dict[str, Any] = {name: getattr(DEFAULT_SCORING, name) for name in valid}
     kwargs.update(stored)
     for key in _FROZENSET_FIELDS:
         kwargs[key] = _coerce_role_terms(key, kwargs[key])
     return ScoringConfig(**kwargs)
+
+
+def _refuse_dead_unclassified_weight(stored: Mapping[str, Any]) -> None:
+    """Refuse a config where ``job_posting_unclassified`` would do nothing.
+
+    Naming a vocabulary makes an unmatched req off-target
+    (``ScoringConfig.treats_unclassified_as_off_target``), which means the
+    unclassified WEIGHT stops being consulted. A row that sets both is stating
+    two incompatible things, and the one that loses would be a knob that reads
+    as applied and is ignored — the same failure as a typo'd key, and refused
+    the same way. The fix is one line either direction, and the error says so.
+    """
+
+    if "job_posting_unclassified" not in stored:
+        return
+    if "supported_role_terms" not in stored:
+        return
+    if "unclassified_is_off_target" in stored:
+        return
+    raise ValueError(
+        "campaigns.scoring_config sets both 'supported_role_terms' and "
+        "'job_posting_unclassified', which contradict: naming a vocabulary makes "
+        "a req outside it off-target, so the unclassified weight is never read. "
+        "Say which you mean with 'unclassified_is_off_target': true to keep the "
+        "narrowing (and drop the dead weight), false to score any req this "
+        "vocabulary does not match at 'job_posting_unclassified' as before."
+    )
 
 
 def _coerce_role_terms(key: str, value: Any) -> frozenset[str]:

@@ -402,6 +402,62 @@ def parse_feed_dates(feed_xml: str) -> dict[str, str]:
 # --------------------------------------------------------------------------
 
 _JOB_HREF_HINTS = ("job", "position", "opening", "req", "vacan", "opportunit")
+
+# Extensions a real, browsable job requisition page never has. A path
+# *segment* whose stem happens to start with a hint but which is actually a
+# feed/data/asset file (basecamp's own careers page linked its RSS feed as
+# "grab the RSS feed" -> /feed/jobs.xml) is not a job posting -- it is a
+# non-HTML resource that merely has "jobs" in its filename. Kept as a
+# denylist of known non-page extensions, rather than an allowlist of page
+# extensions, because enumerating every real page extension a company might
+# use (.html, .php, .aspx, or nothing at all) is open-ended; the set of
+# "this is definitely not a page a person reads a job req on" formats is not.
+_NON_PAGE_HREF_EXTENSIONS = {
+    "xml", "json", "csv", "tsv", "rss", "atom", "rdf",
+    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+    "zip", "rar", "7z", "gz", "tar",
+    "ics", "txt",
+    "jpg", "jpeg", "png", "gif", "svg", "webp", "ico",
+    "css", "js", "map",
+    "mp3", "mp4", "wav", "avi", "mov",
+    "woff", "woff2", "ttf", "eot",
+}
+
+
+def _path_segment_matches_job_hint(path: str) -> bool:
+    """Whole-path-segment version of the old ``any(hint in path for hint in
+    _JOB_HREF_HINTS)`` substring check.
+
+    The substring form matched a hint ANYWHERE in the path string, including
+    mid-word and spanning segment/hyphen boundaries -- so
+    ".../find-their-next-job/" (Zapier's "Next Play Program" blog post, not a
+    posting) matched on "job" exactly as readily as a real "/jobs/12345"
+    would. A hint is only real corroboration if it actually NAMES the
+    segment: the segment, split on "/", must *start with* the hint (so
+    "jobs", "jobs-list", "job-1234" all still match; "find-their-next-job"
+    does not, because "job" is buried at the end behind other words, not the
+    segment's own name).
+
+    A segment is skipped entirely -- ineligible regardless of its stem -- if
+    it carries a known non-page file extension (see
+    `_NON_PAGE_HREF_EXTENSIONS`): a job requisition is always a page a human
+    reads, never a feed/document/asset file.
+    """
+    for segment in path.split("/"):
+        if not segment:
+            continue
+        stem = segment
+        if "." in segment:
+            stem, _, ext = segment.rpartition(".")
+            if ext in _NON_PAGE_HREF_EXTENSIONS:
+                continue
+            if not stem:
+                stem = segment
+        if any(stem.startswith(hint) for hint in _JOB_HREF_HINTS):
+            return True
+    return False
+
+
 _JOB_TITLE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9 /,&'\-()]{2,90}$")
 _JOB_PAGE_STOPWORDS = _NAV_TEXT_STOPWORDS | {
     "benefits", "culture", "our values", "values", "faq", "faqs", "diversity",
@@ -510,8 +566,12 @@ def extract_job_items(html: str, page_url: str) -> list[dict]:
                             assertion, not an inference.
       * ``ats_host``     -- the whole page is a recognised ATS/job-board host;
                              every anchor there really is a listing.
-      * ``href_keyword`` -- the href itself contains a job-ish path segment
-                             ("job", "position", "req"...).
+      * ``href_keyword`` -- a WHOLE path segment of the href starts with a
+                             job-ish hint ("job", "position", "req"...) --
+                             not merely a substring anywhere in the path.
+                             ("/jobs/12345" matches; ".../find-their-
+                             next-job/" and "/feed/jobs.xml" do not -- see
+                             `_path_segment_matches_job_hint`.)
       * ``title_signal`` -- the only shape evidence is the sub-path pattern,
                              but the anchor text contains a real job-title noun
                              ("Manager", "Engineer", "Specialist"...) -- a
@@ -558,7 +618,7 @@ def extract_job_items(html: str, page_url: str) -> list[dict]:
             # -- a filter control on the listing page, not a distinct req. A
             # real posting almost always has its own path or id.
             continue
-        href_keyword_hit = any(hint in href_path for hint in _JOB_HREF_HINTS)
+        href_keyword_hit = _path_segment_matches_job_hint(href_path)
         looks_job_shaped = href_keyword_hit or (
             bool(page_path) and href_path.startswith(page_path + "/")
         )
@@ -578,7 +638,7 @@ def extract_job_items(html: str, page_url: str) -> list[dict]:
         relative_path = (
             href_path[len(page_path) :] if page_path and href_path.startswith(page_path) else href_path
         )
-        href_keyword_corroborates = any(hint in relative_path for hint in _JOB_HREF_HINTS)
+        href_keyword_corroborates = _path_segment_matches_job_hint(relative_path)
         if link.href in structured_urls:
             method, confidence = "json_ld", "high"
         elif on_ats:

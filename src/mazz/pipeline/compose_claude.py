@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -433,7 +434,52 @@ def parse_message(message: "Message") -> DraftContent:
         raise ComposerTruncated(
             f"no text block in response (stop_reason={message.stop_reason!r})"
         )
-    return DraftContent.model_validate_json(text)
+    content = DraftContent.model_validate_json(text)
+    return content.model_copy(
+        update={
+            "subject": _decode_stray_escapes(content.subject, "subject"),
+            "body_text": _decode_stray_escapes(content.body_text, "body_text"),
+        }
+    )
+
+
+#: A `\uXXXX` escape that survived JSON decoding, i.e. one the model wrote with
+#: the backslash itself escaped. Deliberately narrow: it matches the literal
+#: six characters, not any backslash.
+_STRAY_ESCAPE_RE = re.compile(r"\\u([0-9a-fA-F]{4})")
+
+
+def _decode_stray_escapes(text: str, field: str) -> str:
+    """Repair a double-encoded character before it becomes an email.
+
+    Observed on the first live run: one draft of four came back with the six
+    literal characters `\\u2014` where an em dash belonged, mid-sentence — the
+    model escaped its own escape, and structured output validated it happily
+    because a string containing a backslash is a perfectly good string. The
+    other three drafts in the same batch carried proper em dashes, so this is
+    model inconsistency, not a schema or a client bug.
+
+    It has to be fixed HERE rather than in the verifier, and the reason is worth
+    stating: the copy was broken regardless of what verification said about it.
+    `\\u2014` is unsendable text that a reviewer might well approve past. That it
+    also produced a nonsense `number '2014'` flag — the digits inside the escape
+    read as a year — is the smaller half of the problem.
+
+    Logged at WARNING every time it fires. A silent repair would hide a change
+    in the model's behaviour, and this function should be able to go away.
+    """
+
+    if "\\u" not in text:
+        return text
+    repaired = _STRAY_ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)), text)
+    if repaired != text:
+        log.warning(
+            "composer returned double-encoded escapes in %s; decoded %d of them "
+            "(the model escaped its own backslash)",
+            field,
+            len(_STRAY_ESCAPE_RE.findall(text)),
+        )
+    return repaired
 
 
 # --------------------------------------------------------------------------

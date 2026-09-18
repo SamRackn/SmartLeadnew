@@ -972,6 +972,167 @@
       ],
       "subject": "Revenue Operations Manager",
       "body": "Dana, I saw you are hiring a Revenue Operations Manager to untangle lead routing and rebuild reporting."
+    },
+    {
+      "id": "adv-first-person-fabricated-headcount",
+      "expect": "fail",
+      "category": "sender_voice",
+      "why": "The headline adversarial case for speaker-awareness. First-person framing around a claim about THEM. The sentence says 'I saw', but what it asserts is the recipient's headcount, and 40 is in no fact. Second person anywhere in the span makes the whole span checkable.",
+      "lead": "tom",
+      "cite": [
+        "helio_support",
+        "helio_blog"
+      ],
+      "subject": "Your support team",
+      "body": "Tom, I saw you scaled to 40 support reps this year. I work with teams at exactly that size.",
+      "expect_claim": {
+        "kind": "number",
+        "token": "40"
+      }
+    },
+    {
+      "id": "adv-cognition-verb-hides-a-claim",
+      "expect": "fail",
+      "category": "sender_voice",
+      "why": "No second person, no company name, first person present: on pronouns alone this reads as the sender talking about the sender. It is not. 'We think' introduces a proposition about the recipient, which is why a cognition verb disqualifies a span from the sender-voice exemption no matter what pronouns surround it.",
+      "lead": "tom",
+      "cite": [
+        "helio_blog"
+      ],
+      "subject": "Notes from the offsite",
+      "body": "Tom, thanks for the offsite write-up. We think headcount doubled last quarter, and that is usually when a clinic question starts getting lost.",
+      "expect_claim": {
+        "kind": "word",
+        "token": "headcount"
+      }
+    },
+    {
+      "id": "adv-reported-number-without-second-person",
+      "expect": "fail",
+      "category": "sender_voice",
+      "why": "The subtle version of the same smuggle: drop 'you' entirely and let 'the support team' do the referring. Only the reporting verb stands between this and an exempt span, and it holds. A fabricated 40 is a fabricated 40 in any grammatical person.",
+      "lead": "tom",
+      "cite": [
+        "helio_support",
+        "helio_blog"
+      ],
+      "subject": "Support triage",
+      "body": "Tom, I noticed the support team just passed 40 people. Happy to share what that usually breaks first.",
+      "expect_claim": {
+        "kind": "number",
+        "token": "40"
+      }
+    },
+    {
+      "id": "adv-first-person-fabricated-role",
+      "expect": "fail",
+      "category": "sender_voice",
+      "why": "A job title is a claim about the recipient's org chart wherever it appears, so job titles are NOT exempted by speaker at all. Northwind posted a Revenue Operations Manager; a Head of Revenue Operations search is a different company's story, and putting it in the sender's own sentence does not change that.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Revenue operations",
+      "body": "Dana, I spend most of my week with companies hiring a Head of Revenue Operations, and I wanted to reach out while it is live.",
+      "expect_claim": {
+        "kind": "role",
+        "token": "Head of Revenue Operations"
+      }
+    },
+    {
+      "id": "adv-first-person-fabricated-entity",
+      "expect": "fail",
+      "category": "sender_voice",
+      "why": "Proper nouns are not exempted by speaker either. A named third party in the sender's own sentence is still a name in a cold email that traces to nothing, and 'if it is right by accident' is not a standard this control works to.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Routing work",
+      "body": "Dana, I can share what we built with Brightpath Freight when they untangled lead routing.",
+      "expect_claim": {
+        "kind": "entity",
+        "token": "Brightpath"
+      }
+    },
+    {
+      "id": "adv-duration-without-a-meeting",
+      "expect": "fail",
+      "category": "sender_voice",
+      "why": "The meeting-length exemption is bound to a meeting noun on purpose. '40 minutes a day' measures the recipient's operation rather than proposing a call, so it is a quantity claim and nothing retrieved supports it.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Lead routing",
+      "body": "Dana, I know your team loses 40 minutes a day to routing leads by hand. The posting describes untangling exactly that.",
+      "expect_claim": {
+        "kind": "number",
+        "token": "40"
+      }
+    },
+    {
+      "id": "ok-live-sender-offer-duration",
+      "expect": "pass",
+      "category": "known_false_positive",
+      "why": "Live compose_claude output, adjudicated clean by an operator and held anyway: `number '20'` from 'a 20-minute call'. How long a meeting the sender proposes is not a measurement of the recipient's business.",
+      "lead": "tom",
+      "cite": [
+        "helio_support",
+        "helio_blog"
+      ],
+      "subject": "Your offsite notes on how a clinic question travels",
+      "body": "Tom, I read your post on the notes from your offsite, where you spent two days mapping how a clinic question actually travels through the company.\n\nI also saw you're hiring a Customer Support Specialist in Atlanta to answer inbound clinic questions by phone and email, triage scheduling issues, and escalate integration problems.\n\nWould you be open to a 20-minute call in the next couple of weeks?"
+    },
+    {
+      "id": "ok-live-sender-voice-prose",
+      "expect": "pass",
+      "category": "known_false_positive",
+      "why": "Live output, held on `word 'handoff'` and `word 'curious'` and `entity \"I'd\"`. Every one of them is the sender describing the sender's own practice, offer or question. Requiring the recipient's research to contain the sender's vocabulary tests nothing.",
+      "lead": "tom",
+      "cite": [
+        "helio_support",
+        "helio_blog"
+      ],
+      "subject": "Support escalation",
+      "body": "Tom, I also saw you're hiring a Customer Support Specialist in Atlanta to answer inbound clinic questions by phone and email.\n\nI work with support teams on exactly that handoff, and I'd be curious what your mapping turned up."
+    },
+    {
+      "id": "ok-live-present-deictic-and-generalities",
+      "expect": "pass",
+      "category": "known_false_positive",
+      "why": "Live output, held on `date 'today'`, `word 'friction'` and `word 'varies'`. 'How you're handling it today' dates no event — it means 'at present' — and the rest is ordinary English that asserts nothing measurable about anybody.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Your Revenue Operations Manager opening",
+      "body": "Dana, your Revenue Operations Manager posting describes untangling lead routing and rebuilding reporting the sales team maintains by hand in spreadsheets.\n\nI'd be curious how you're handling it today and where the friction actually sits, since that varies a lot between teams."
+    },
+    {
+      "id": "ok-live-possessive-is-not-a-job-title",
+      "expect": "pass",
+      "category": "known_false_positive",
+      "why": "Live output, held on `role 'layer'`: 'that layer before the new hire lands' matched the possessive title pattern as `that ... hire`, and a common noun was reported as a fabricated job title. Also held on `number 'six'` and `word 'cleanup'`, both inside the sender's own sentence.",
+      "lead": "dana",
+      "cite": [
+        "nw_revops"
+      ],
+      "subject": "Your Revenue Operations Manager opening",
+      "body": "Dana, your Revenue Operations Manager posting reads like the problem written down: untangle lead routing, rebuild reporting the sales team currently maintains by hand in spreadsheets.\n\nI spend most of my time with teams standing up that layer before the new hire lands, so the role isn't six months of cleanup on day one.\n\nWorth a short call in the next week or two?"
+    },
+    {
+      "id": "ok-derivational-restatement-of-evidence",
+      "expect": "pass",
+      "category": "known_false_positive",
+      "why": "The cited req says 'escalate integration problems'; the copy says 'the escalation path'. Held on `word 'escalation'` — a part-of-speech change reported as a fabrication, which is the false positive claim-level verification exists to remove.",
+      "lead": "tom",
+      "cite": [
+        "helio_support",
+        "helio_blog"
+      ],
+      "subject": "Escalating integration problems",
+      "body": "Tom, your Customer Support Specialist posting covers triaging scheduling issues and escalating integration problems.\n\nThe escalation path for integration problems is normally where that map gets messy."
     }
   ]
 }

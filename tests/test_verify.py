@@ -39,6 +39,7 @@ from pathlib import Path
 import pytest
 
 from mazz.models import Draft, Lead, LeadStatus, VerificationStatus
+from mazz.pipeline.lexicon import stem
 from mazz.pipeline.verify import (
     JudgeUnavailable,
     JudgeVerdict,
@@ -46,8 +47,10 @@ from mazz.pipeline.verify import (
     apply_verification,
     build_grounding,
     default_judge,
+    extract_claims,
     is_approvable,
     latest_draft,
+    sender_voice_spans,
     verify_content,
     verify_draft,
 )
@@ -389,6 +392,258 @@ def test_an_unrecognised_judge_setting_raises_rather_than_disabling_the_check(mo
     reload_settings()
     with pytest.raises(ValueError):
         default_judge()
+
+
+# --------------------------------------------------------------------------
+# WHO IS THE SENTENCE ABOUT? (the W2 speaker model)
+# --------------------------------------------------------------------------
+#
+# The first live `compose_claude` run held 4 of 4 drafts and an operator read
+# every one against its evidence: not one flagged token was a fabrication. Most
+# of the holds were the SENDER'S own prose being checked as if it were a claim
+# about the recipient — `entity "I'm"`, `number '15'` from "a 15-minute call",
+# `word 'curious'` from "I'd be curious".
+#
+# These tests pin both directions. The exemption has to work, and — far more
+# importantly — it must not become a way to smuggle a claim about the recipient
+# past the control by putting "I" in front of it.
+
+
+def test_a_sender_voice_sentence_is_recognised():
+    spans = sender_voice_spans("I work with support teams on exactly that handoff.")
+    assert spans, "first person, nobody else named: this is the sender talking"
+
+
+@pytest.mark.parametrize(
+    "text, why",
+    [
+        ("I saw you scaled to 40 reps.", "second person"),
+        ("I think Northwind doubled headcount.", "names their company"),
+        ("We think headcount doubled.", "cognition verb introduces a proposition"),
+        ("I noticed the support team just passed 40 people.", "reporting verb"),
+        ("I hear they are hiring.", "third person"),
+        ("Headcount doubled last quarter.", "no first person at all"),
+    ],
+)
+def test_these_are_never_sender_voice(text, why):
+    """The safety half. Every one of these carries a claim about somebody else."""
+
+    prospect = frozenset({stem("northwind"), stem("logistics")})
+    assert sender_voice_spans(text, prospect) == (), why
+
+
+def test_a_first_person_fabrication_about_the_prospect_is_still_caught(lead):
+    """The headline adversarial case. 'I saw' does not launder '40 reps'."""
+
+    result = check(
+        lead,
+        "Your team",
+        "Dana — I saw you scaled to 40 reps this year, and I work with teams at that size.",
+        [JOB_FACT.id],
+    )
+
+    assert result.status is VerificationStatus.FAILED
+    assert any(c.kind == "number" and c.token == "40" for c in result.untraceable)
+
+
+def test_a_cognition_verb_cannot_hide_a_claim_in_first_person(lead):
+    """No 'you', no company name, first person throughout — and still checked,
+    because what follows "we think" is a proposition about somebody else."""
+
+    result = check(
+        lead,
+        "Notes",
+        "Dana — we think headcount doubled, and I work with teams in that spot.",
+        [JOB_FACT.id],
+    )
+
+    assert result.status is VerificationStatus.FAILED
+    assert any(c.token.lower() == "headcount" for c in result.untraceable)
+
+
+def test_names_and_titles_are_checked_in_the_senders_own_sentences(lead):
+    """The exemption covers numbers, dates and prose. It does NOT cover the
+    claim types that carry the legal exposure."""
+
+    named = check(
+        lead,
+        "Routing",
+        "Dana — I can share what we built with Brightpath Freight last year.",
+        [JOB_FACT.id],
+    )
+    assert named.status is VerificationStatus.FAILED
+    assert any(c.kind == "entity" for c in named.untraceable)
+
+    titled = check(
+        lead,
+        "Revenue operations",
+        "Dana — I spend my week with companies hiring a Head of Revenue Operations.",
+        [JOB_FACT.id],
+    )
+    assert titled.status is VerificationStatus.FAILED
+    assert any(c.kind == "role" for c in titled.untraceable)
+
+
+def test_the_senders_own_offer_is_not_a_claim_about_the_recipient(lead):
+    """What the live run held four drafts for."""
+
+    result = check(
+        lead,
+        "Revenue Operations Manager",
+        "Dana — I saw the Revenue Operations Manager opening.\n\n"
+        "I'm happy to do a 15-minute call and share what I'm seeing elsewhere. "
+        "I'd be curious how you're handling it today.",
+        [JOB_FACT.id],
+    )
+
+    assert result.passed, result.notes
+
+
+def test_a_duration_only_counts_when_a_meeting_is_being_proposed(lead):
+    """'a 20-minute call' is an offer; '40 minutes a day' measures THEM."""
+
+    offered = check(
+        lead,
+        "Revenue Operations Manager",
+        "Dana — I saw the Revenue Operations Manager opening. Would you be open "
+        "to a 20-minute call?",
+        [JOB_FACT.id],
+    )
+    assert offered.passed, offered.notes
+
+    measured = check(
+        lead,
+        "Revenue Operations Manager",
+        "Dana — I know your team loses 40 minutes a day to routing leads by hand.",
+        [JOB_FACT.id],
+    )
+    assert measured.status is VerificationStatus.FAILED
+    assert any(c.kind == "number" and c.token.startswith("40") for c in measured.untraceable)
+
+
+# --------------------------------------------------------------------------
+# Dates, titles and word forms
+# --------------------------------------------------------------------------
+
+
+def test_a_forward_or_present_deictic_is_not_a_dated_claim(lead):
+    result = check(
+        lead,
+        "Revenue Operations Manager",
+        "Dana — the Revenue Operations Manager opening is live. Worth a short "
+        "call in the next week or two?",
+        [JOB_FACT.id],
+    )
+    assert result.passed, result.notes
+
+
+def test_a_past_period_is_still_a_dated_claim(lead):
+    """The other half of the same change: 'last quarter' dates an event."""
+
+    result = check(
+        lead,
+        "Revenue Operations Manager",
+        "Dana — you posted the Revenue Operations Manager role last quarter.",
+        [JOB_FACT.id],
+    )
+    assert result.status is VerificationStatus.FAILED
+    assert any(c.kind == "date" and "last quarter" in c.token.lower() for c in result.untraceable)
+
+
+def test_a_common_noun_before_hire_is_not_a_job_title(lead):
+    """`role 'layer'` on the live run: "that layer before the new hire lands"
+    matched the possessive pattern as `that … hire`, and the words after the
+    determiner were read as a title. The title is what sits against the noun."""
+
+    result = check(
+        lead,
+        "Revenue Operations Manager",
+        "Dana — I saw the Revenue Operations Manager opening. I spend most of my "
+        "time with teams standing up that layer before the new hire lands.",
+        [JOB_FACT.id],
+    )
+    assert result.passed, result.notes
+
+
+def test_a_real_invented_title_in_the_same_construction_still_fails(lead):
+    """…and reading backwards must not cost the catch it was there for."""
+
+    result = check(
+        lead,
+        "Revenue operations",
+        "Dana — your Head of Revenue Operations opening caught my eye.",
+        [JOB_FACT.id],
+    )
+    assert result.status is VerificationStatus.FAILED
+    assert any(c.kind == "role" for c in result.untraceable)
+
+
+def test_a_part_of_speech_change_is_restatement_not_fabrication(lead):
+    """The req says "escalate integration problems"; the copy says "the
+    escalation path". One-way: the base still has to be in the evidence."""
+
+    supported = fact("Answer inbound clinic questions and escalate integration problems.")
+    result = check(
+        lead,
+        "Escalating integration problems",
+        "Dana — the escalation path for integration problems is where it gets messy.",
+        [supported.id],
+        facts=(supported,),
+    )
+    assert result.passed, result.notes
+
+
+def test_derivational_folding_cannot_invent_support_that_is_absent(lead):
+    """If the evidence contains no form of the word, no amount of suffix
+    stripping rescues it."""
+
+    result = check(
+        lead,
+        "Migration",
+        "Dana — your CRM migration is the hard part.",
+        [JOB_FACT.id],
+    )
+    assert result.status is VerificationStatus.FAILED
+
+
+def test_the_senders_contractions_are_not_proper_nouns(lead):
+    """`entity "I'm"` — the sender's own contraction read as somebody's name."""
+
+    grounding = build_grounding(lead, [JOB_FACT.id], [JOB_FACT])
+    claims = extract_claims("I'm glad I'll see you; I'd like that.", "body", grounding)
+    assert [c for c in claims if c.kind == "entity"] == []
+
+
+# --------------------------------------------------------------------------
+# The compliance footer, and the address in it
+# --------------------------------------------------------------------------
+
+
+def test_a_placeholder_sender_address_fails_the_draft_closed(lead, monkeypatch):
+    """A fabricated CAN-SPAM address must fail the way an empty one does.
+
+    The live run rendered `PLACEHOLDER - Mazz Ltd, 12 Rue Centrale, 75002 Paris,
+    France` into all four footers. That looks compliant to a reviewer and to any
+    check that asserts "footer present", which is exactly what makes it worse
+    than a missing address rather than better.
+    """
+
+    body = render_body("Dana — I saw the Revenue Operations Manager opening.", lead)
+    monkeypatch.setenv(
+        "SENDER_POSTAL_ADDRESS", "PLACEHOLDER - Mazz Ltd, 12 Rue Centrale, 75002 Paris, France"
+    )
+    reload_settings()
+
+    result = verify_content(
+        lead=lead,
+        subject="Revenue Operations Manager",
+        body=body,
+        signals_used=[JOB_FACT.id],
+        available_facts=[JOB_FACT],
+    )
+
+    assert result.status is VerificationStatus.FAILED
+    assert any("footer" in p.lower() for p in result.problems), result.problems
 
 
 # --------------------------------------------------------------------------

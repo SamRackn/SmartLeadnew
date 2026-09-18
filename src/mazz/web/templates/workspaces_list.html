@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Workspaces — MazzSmartLead Review{% endblock %}
+{% block content %}
+<h1>Workspaces</h1>
+<p class="hint">
+  A workspace is an agency-client. A campaign inside it carries that engagement's
+  ICP vocabulary — its <code>segment</code> and its <code>scoring_config</code> —
+  and decides which leads clear the threshold for a draft. A lead with no matching
+  campaign scores against the shipped defaults; that is a steady state, not an error.
+</p>
+<p><a href="/workspaces/new">+ new workspace</a></p>
+
+{% if not workspaces %}
+  <p class="empty">No workspaces yet. Every lead is scoring against the shipped defaults.</p>
+{% else %}
+  {% for workspace in workspaces %}
+  <section class="workspace-block">
+    <h2>{{ workspace.name }} <span class="muted">({{ workspace.slug }})</span></h2>
+    <p>
+      <a href="/workspaces/{{ workspace.id }}/edit">edit workspace</a>
+      &middot;
+      <a href="/workspaces/{{ workspace.id }}/campaigns/new">+ new campaign</a>
+    </p>
+
+    {% if not workspace.campaigns %}
+      <p class="empty">No campaigns in this workspace yet.</p>
+    {% else %}
+    <table class="campaign-table">
+      <thead>
+        <tr>
+          <th>Campaign</th>
+          <th>Segment</th>
+          <th>Scoring config</th>
+          <th>Leads routed</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for campaign in workspace.campaigns %}
+        <tr>
+          <td>{{ campaign.name }}</td>
+          <td>{% if campaign.segment %}<code>{{ campaign.segment }}</code>{% else %}<span class="muted">unrouted</span>{% endif %}</td>
+          <td>
+            {% if campaign.scoring_config %}
+              <code class="config-preview">{{ campaign.scoring_config | tojson }}</code>
+            {% else %}
+              <span class="muted">shipped defaults ({})</span>
+            {% endif %}
+          </td>
+          <td>{{ lead_counts.get(campaign.id, 0) }}</td>
+          <td><a href="/campaigns/{{ campaign.id }}/edit">edit →</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </section>
+  {% endfor %}
+{% endif %}
+{% endblock %}

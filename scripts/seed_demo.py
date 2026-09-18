@@ -32,15 +32,16 @@ from sqlalchemy import select  # noqa: E402
 
 from mazz.config import reload_settings  # noqa: E402
 from mazz.ingest.csv_import import import_csv_file  # noqa: E402
-from mazz.models import Draft, Job, Lead, ResearchCache  # noqa: E402
+from mazz.models import Campaign, Draft, Job, Lead, LeadStatus, ResearchCache, Workspace  # noqa: E402
 from mazz.pipeline.queue import DEFAULT_HANDLERS, run_worker  # noqa: E402
 from mazz.pipeline.draft import render_body  # noqa: E402
-from mazz.pipeline.score import facts_for_lead  # noqa: E402
+from mazz.pipeline.score import facts_for_lead, score_lead  # noqa: E402
 from mazz.pipeline.verify import (  # noqa: E402
     apply_verification,
     is_approvable,
     verify_content,
 )
+from mazz.schemas import Fact, FactKind  # noqa: E402
 
 reload_settings()
 
@@ -184,7 +185,102 @@ def main() -> int:
         print("  no outbox file — nothing was pushed, because nothing was approved.")
         print("  Approval is a human action in the review app. There is no auto-send.")
 
+    rule("10. WORKSPACES + CAMPAIGNS (per-engagement scoring)")
+    print("  Same idea as the review app's /workspaces screen, done here so a")
+    print("  developer gets a working workspace + campaign without hand-written SQL.")
+    print("  The demonstration: ONE cached req, scored under two ICPs.")
+    print("  `score.py` ships a B2B-SaaS vocabulary where a Recruiter req is")
+    print("  off-target; an agency reselling recruiting has the opposite ICP.\n")
+    with h.db_session() as s:
+        workspace = Workspace(
+            slug="clientrise-staffing-demo",
+            name="ClientRise — Staffing Agency Demo",
+        )
+        s.add(workspace)
+        s.flush()
+
+        campaign = Campaign(
+            workspace_id=workspace.id,
+            name="Staffing Agency Outbound",
+            segment="staffing-agencies",
+            # A PARTIAL override: only the vocabulary changes, every other
+            # ScoringConfig weight stays at the shipped default.
+            scoring_config={"supported_role_terms": ["recruiter", "talent partner"]},
+        )
+        s.add(campaign)
+        s.flush()
+
+        demo_domain = "example-staffing-demo.example"
+        # No `published_at`: this req is scraped, not dated, which is the common
+        # case for a careers page. `retrieved_at` is when WE looked and is never
+        # read as a publication date, so the undated discount applies to BOTH
+        # leads below (0.55, `ScoringConfig.undated_multiplier`) — it is not the
+        # thing under demonstration, it is just the recency term both sides pay.
+        req = Fact.build(
+            kind=FactKind.JOB_POSTING.value,
+            content="Hiring a Recruiter to place candidates with our agency clients.",
+            source_url=f"https://{demo_domain}/careers/recruiter",
+            retrieved_at=h.utcnow(),
+        )
+        s.add(
+            ResearchCache(
+                company_domain=demo_domain,
+                company_name="Example Staffing Co",
+                facts=[req.model_dump(mode="json")],
+                fetched_at=h.utcnow(),
+            )
+        )
+
+        unrouted = Lead(
+            full_name="Casey Unrouted",
+            email="casey.unrouted@example-staffing-demo.example",
+            company_name="Example Staffing Co",
+            company_domain=demo_domain,
+            industry_primary="Staffing & Recruiting",
+            industry_specific="Staffing Agencies",
+            status=LeadStatus.RESEARCHING,
+        )
+        routed = Lead(
+            full_name="Jordan Routed",
+            email="jordan.routed@example-staffing-demo.example",
+            company_name="Example Staffing Co",
+            company_domain=demo_domain,
+            industry_primary="Staffing & Recruiting",
+            industry_specific="Staffing Agencies",
+            status=LeadStatus.RESEARCHING,
+            campaign_id=campaign.id,
+        )
+        s.add_all([unrouted, routed])
+        s.flush()
+
+        unrouted_result = score_lead(s, unrouted)
+        routed_result = score_lead(s, routed)
+
+        print(f"  workspace : {workspace.slug!r} ({workspace.name})")
+        print(f"  campaign  : {campaign.name!r}  segment={campaign.segment!r}")
+        print(f"  scoring_config override: {campaign.scoring_config}\n")
+        print(f"  same cached fact, same company ({demo_domain}):")
+        print(
+            f"    unrouted lead (shipped SaaS vocabulary) : "
+            f"has_angle={unrouted_result.has_angle}  "
+            f"top_score={unrouted_result.top.score if unrouted_result.top else '—'}  "
+            f"(expect no_angle, Recruiter is off_target upstream)"
+        )
+        print(
+            f"    routed lead   (agency vocabulary)       : "
+            f"has_angle={routed_result.has_angle}  "
+            f"top_score={routed_result.top.score if routed_result.top else '—'}  "
+            f"(expect a STRONG angle: 75.0 supported-req weight x 0.55 undated = 41.25)"
+        )
+        print(
+            "\n  The vocabulary is the whole difference. Same fact, same 40.0 bar,"
+            "\n  same 0.55 undated discount on both sides: 20.0 x 0.55 = 11.0 "
+            "off-target\n  for the SaaS ICP, 75.0 x 0.55 = 41.25 STRONG for the "
+            "agency's."
+        )
+
     print("\nDone. Review app: .venv/bin/uvicorn mazz.web.app:app --reload\n")
+    print("Manage workspaces/campaigns without SQL at: /workspaces\n")
     return 0
 
 

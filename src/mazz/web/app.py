@@ -18,6 +18,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from mazz.config import get_settings
 from mazz.web.auth import AuthRequired
 from mazz.web.routes import auth as auth_routes
+from mazz.web.routes import campaigns as campaigns_routes
 from mazz.web.routes import leads as leads_routes
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -58,6 +59,7 @@ def create_app() -> FastAPI:
 
     app.include_router(auth_routes.router)
     app.include_router(leads_routes.router)
+    app.include_router(campaigns_routes.router)
 
     return app
 

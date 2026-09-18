@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}{{ "Edit campaign" if campaign else "New campaign" }} — MazzSmartLead Review{% endblock %}
+{% block content %}
+<p><a href="/workspaces">← back to workspaces</a></p>
+<h1>{{ "Edit campaign" if campaign else "New campaign" }} <span class="muted">— {{ workspace.name }}</span></h1>
+
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+<form
+  method="post"
+  action="{% if campaign %}/campaigns/{{ campaign.id }}/edit{% else %}/workspaces/{{ workspace.id }}/campaigns{% endif %}"
+  class="entity-form"
+>
+  <label>Name
+    <input type="text" name="name" value="{{ form.name }}" placeholder="Q4 Outbound" required>
+  </label>
+  <label>Segment
+    <input type="text" name="segment" value="{{ form.segment }}" placeholder="e.g. Third-Party Logistics">
+    <span class="hint">
+      Free text, matched against the lead's Specific Industry first, then its Primary
+      Industry, slug-normalised on both sides ("Third-Party Logistics" and
+      "third-party-logistics" match). Leave blank and this campaign is never
+      auto-routed — leads can still be pointed at it directly.
+    </span>
+  </label>
+  <label>Scoring config (JSON)
+    <textarea name="scoring_config" rows="12" spellcheck="false">{{ form.scoring_config }}</textarea>
+    <span class="hint">
+      A PARTIAL override of the shipped <code>ScoringConfig</code> — <code>{}</code> means
+      "shipped defaults, unchanged". Keys must be real <code>ScoringConfig</code> field
+      names (an unknown key is refused, not ignored); the value must be a JSON object, not
+      a list or a scalar; and a config where <code>funding</code> would score at or above
+      <code>threshold</code> is refused outright — funding news alone must never be able to
+      clear the bar. <code>supported_role_terms</code> / <code>off_target_role_terms</code>
+      must be JSON arrays of strings — a bare string like <code>"paid media"</code> is
+      refused rather than silently read as a set of its characters — and whatever you type
+      is matched lower-cased against scraped content, regardless of how you capitalise it
+      here. This is validated against the exact loader the scoring worker uses before it is
+      allowed to save; if it is rejected here, it would have been rejected there, only later
+      and less visibly.
+    </span>
+  </label>
+  <button type="submit">Save</button>
+</form>
+
+{% if campaign %}
+<section class="danger-zone">
+  <h2>Retire this campaign</h2>
+  <p>
+    {% if lead_count %}
+      <strong>{{ lead_count }}</strong> lead(s) are currently routed to this campaign.
+      Deleting it will <strong>not</strong> delete them, their drafts, or any queued job —
+      <code>leads.campaign_id</code> is set to <code>NULL</code> and they revert to the
+      shipped scoring defaults, exactly as an unrouted lead scores today.
+    {% else %}
+      No leads are currently routed to this campaign. Deleting it affects nobody.
+    {% endif %}
+  </p>
+  <form
+    method="post"
+    action="/campaigns/{{ campaign.id }}/delete"
+    onsubmit="return confirm('Delete campaign \'{{ campaign.name }}\'? {{ lead_count }} lead(s) will revert to the shipped scoring defaults. This cannot be undone.');"
+  >
+    <button type="submit" class="reject">Delete campaign</button>
+  </form>
+</section>
+{% endif %}
+{% endblock %}
