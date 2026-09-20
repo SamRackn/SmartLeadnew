@@ -251,16 +251,32 @@ year years
 #: out of the date-claim set (see `FORWARD_RELATIVE_PHRASES`), so they now reach
 #: the word check, and a bare present or future deictic asserts nothing.
 _ORDINARY_PROSE = """
-compare compared compares comparing curious
+cleanup compare compared compares comparing curious
 describe described describes describing
 elsewhere exercise exercises
 friction
+handoff handoffs
 normally
-rarer
+ramp ramped ramping ramps rarer
+sequence sequenced sequences sequencing setup setups
 surface surfaced surfaces surfacing
 today tomorrow tonight typically
 vary varied varies varying
 """
+# `cleanup`, `handoff`, `ramp`, `sequence`, `setup` name how work is organised,
+# not a fact about the recipient. Each one held a real draft in the first live
+# run -- "the first SDRs ramping", "you'd feel that sequencing", "that exact
+# setup", "six months of cleanup" -- and each passes all three admission tests:
+# it fits a letter to any company, a recipient reads it and shrugs, and it is
+# not the kind of word we would cite a source for. We cite a source for "2 SDR
+# openings"; "ramping" is the sender's characterisation of it.
+#
+# `dashboard` was deliberately NOT admitted alongside them. It held a draft in
+# the same run ("things a dashboard won't"), and in that generic construction it
+# really was a false positive -- but the admission policy above already excludes
+# `tool` and `platform`, and a named piece of software the recipient runs is the
+# same register. Failing closed on a borderline word costs a held draft; opening
+# it costs a category of unverifiable claim.
 
 #: Courtesies, greetings and the fixed scaffolding our own composers emit. These
 #: are sender-side: none of them says anything about the recipient.
