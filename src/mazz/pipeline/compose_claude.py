@@ -601,10 +601,16 @@ def assert_cacheable_prefix(client: "Anthropic" | None = None) -> int:
 
     client = client or get_client()
     model = _model()
+    # `output_config` is included deliberately. The cached prefix is
+    # tools -> system, and the structured-output schema is serialized into it
+    # ahead of the system block: measured on claude-opus-5, the prefix is 1441
+    # tokens without it and 1946 with it. Counting without it undercounts the
+    # thing being checked by the whole size of the schema.
     counted = client.messages.count_tokens(
         model=model,
         system=[{"type": "text", "text": SYSTEM_PROMPT}],
         messages=[{"role": "user", "content": "x"}],
+        output_config=_output_config(),
     )
     minimum = MIN_CACHEABLE_PREFIX_TOKENS.get(model)
     if minimum is None:
@@ -641,20 +647,36 @@ def prewarm_cache(client: "Anthropic" | None = None) -> Usage:
     Two constraints the API imposes here, both of which shape this code:
       * `max_tokens=0` is rejected INSIDE a batch request, so the prewarm is a
         separate ordinary call.
-      * `max_tokens=0` is also rejected alongside `output_config.format`, so
-        this request omits the output config. Only `system` (and `tools`) are
-        part of the cached prefix, so the entry it writes is the one the batch
-        reads — but that is precisely the kind of assumption that rots
-        silently, which is why `draft_batch` asserts a nonzero
-        `cache_read_input_tokens` on the results.
+      * `max_tokens=0` is rejected alongside `output_config.format`, so this
+        uses `max_tokens=1` and carries the output config anyway. The one
+        output token is worth far more than it costs, because the config is
+        NOT outside the cached prefix.
+
+    That last point was wrong here until it was measured, and the error was
+    expensive in the quiet way this module keeps warning about. The cached
+    prefix is `tools` -> `system`, and the structured-output schema is
+    serialized into it ahead of the system block. On claude-opus-5 the prefix
+    is 1441 tokens without the config and 1946 with it. A prewarm that omitted
+    the config therefore wrote an entry at a prefix NO batch request ever
+    sends: the prewarm paid the 2x write premium for an entry nothing read,
+    and the batch's first request then paid its own write premium anyway —
+    exactly the cost this function exists to avoid, with prewarming made
+    strictly worse than not prewarming.
+
+    `draft_batch`'s nonzero-`cache_read_input_tokens` assertion cannot catch
+    it: the batch self-heals, because request 1 writes the real prefix and
+    requests 2..N read it. Cache reads look healthy while the prewarm is
+    silently orphaned. Verified by the fix: a `max_tokens=1` prewarm writes
+    1941 tokens and an identical follow-up call reads 1941.
     """
 
     client = client or get_client()
     message = client.messages.create(
         model=_model(),
-        max_tokens=0,
+        max_tokens=1,
         system=_system_blocks(),
         messages=[{"role": "user", "content": "warmup"}],
+        output_config=_output_config(),
     )
     usage = usage_of(message)
     log.info(

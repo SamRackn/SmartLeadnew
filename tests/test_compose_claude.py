@@ -511,11 +511,27 @@ def test_the_prewarm_runs_before_the_batch_is_submitted(session):
 
     assert len(client.creates) == 1, "exactly one prewarm call"
     warm = client.creates[0]
-    assert warm["max_tokens"] == 0
+    assert warm["max_tokens"] == 1
     assert warm["system"] == cc._system_blocks(), "must warm the prefix the batch reads"
-    # max_tokens=0 is rejected alongside structured output, so the prewarm
-    # omits it — and output_config is not part of the cached prefix anyway.
-    assert "output_config" not in warm
+
+    # The prewarm MUST carry the output config, because the cached prefix is
+    # tools -> system and the structured-output schema is serialized into it
+    # ahead of the system block. Measured on claude-opus-5: 1441 tokens
+    # without it, 1946 with. A prewarm that omitted it wrote an entry at a
+    # prefix no batch request sends -- it paid the 2x write premium for an
+    # entry nothing read, and the batch's first request paid its own write
+    # premium anyway, making prewarming worse than not prewarming.
+    #
+    # This is asserted rather than commented because the batch SELF-HEALS and
+    # hides it: request 1 writes the real prefix, requests 2..N read it, so
+    # `cache_read_input_tokens` stays nonzero and the existing assertion on it
+    # passes while the prewarm is silently orphaned. Nothing else catches this.
+    assert warm["output_config"] == cc._output_config(), (
+        "prewarm must send the same prefix the batch sends, schema included"
+    )
+    batched = plan.requests[0]["params"]
+    assert warm["system"] == batched["system"]
+    assert warm["output_config"] == batched["output_config"]
 
 
 def test_an_in_flight_batch_refreshes_its_jobs_lock(session):
