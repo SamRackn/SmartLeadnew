@@ -6,7 +6,9 @@ thing to clone feature-for-feature**.
 
 The system decides whether there is a real reason to contact someone, writes copy
 grounded only in facts it actually retrieved, proves every claim traces to a
-source, and puts it in front of a human before anything moves.
+source, puts it in front of a human before anything moves, and then sends it
+from the client's own Google Workspace mailboxes — rotated, capped and paced.
+Smartlead is no longer in the path (2026-09-21, `docs/DECISIONS.md`).
 
 See `CLAUDE.md` for the governing brief, `docs/DECISIONS.md` for decisions and the
 evidence behind them.
@@ -15,9 +17,11 @@ evidence behind them.
 
 Cost is the stated primary objective — not feature parity, not eliminating
 subscriptions for their own sake. Measured (see `docs/GAP-ANALYSIS.md`), AI
-research and personalization is **57–70% of total cost at every scale**, while the
-Smartlead subscription is 20% falling to 6%. That sets the work order: AI cost
-engineering leads, and "keep paying the third party" is a valid answer.
+research and personalization is **57–70% of total cost at every scale**. The
+Smartlead subscription was 20% falling to 6% and is now zero — removing it made
+AI a larger share of what remains, not a smaller problem. That sets the work
+order: AI cost engineering leads, and "keep paying the third party" is still a
+valid answer for anything else.
 
 Cost per usable lead today: ~$0.19 at 1k/mo, ~$0.11 at 10k, ~$0.064 at 100k.
 Those remain projections until real leads run through the drafting path.
@@ -25,7 +29,7 @@ Those remain projections until real leads run through the drafting path.
 ## Pipeline
 
 ```
-ingest → enrich → score → draft → verify → human review → send
+ingest → enrich → qualify → draft → verify → human review → send
 ```
 
 A lead arrives already complete — name, company, site, title, email, headcount,
@@ -38,12 +42,24 @@ Compliance controls. They fail closed and are not softened for throughput.
 
 1. **Suppression is checked before a lead enters the queue** — email and domain,
    subdomains included. A read error rejects the lead rather than admitting it.
-2. **Weak signals mean no email.** Funding-only leads land `no_angle` with no draft
-   written. No fallback to generic filler — that is the exact failure the client is
-   paying to escape.
+2. **An unconfirmed premise means no email.** The copy calls the recipient
+   something ("We help *law firms* …"), and that word has to be earned from the
+   prospect's own homepage, services or contact page. A lead whose vertical
+   `pipeline.qualify` cannot confirm lands `no_angle` with no draft written, as does
+   one its own site disqualifies. There is no fallback to generic filler and no
+   writing the sentence with the noun left vague — that is the exact failure the
+   client is paying to escape. `DEFAULT_QUALIFICATION` ships with an EMPTY vertical
+   vocabulary, so an unconfigured campaign writes to nobody rather than to everybody.
+   One documented exception, opt-in per campaign and off by default:
+   `campaigns.generic_vertical_fallback` sends "We help *businesses like yours* …"
+   when no vertical is set. The phrase asserts nothing about the recipient, so it
+   waives the vertical gate and nothing else — intake evidence and disqualifiers
+   still apply.
 3. **Unverifiable claims are blocked, not flagged.** A claim that does not trace to
-   a cited fact id or the lead's notes fails verification, holds the lead, and is
-   refused server-side at the approve route.
+   a cited fact id, a `proof_points` row, or the lead's notes fails verification,
+   holds the lead, and is refused server-side at the approve route. Numbers have
+   exactly one door into the copy: a `proof_points` row, which requires a named
+   client. A digit in `campaigns.offer_line` is refused.
 4. **No auto-send.** Every email is human-approved individually.
 5. **Delete-by-person is complete** — leads, drafts, jobs, and person-scoped facts
    pruned from the shared company cache.
@@ -71,7 +87,7 @@ orchestrates; each owns a file set and stays in its lane.
 | `db-architect` | schema, models, migrations |
 | `pipeline-engineer` | ingest, queue, enrichment, privacy |
 | `drafting-engineer` | scoring, drafting, verification |
-| `integrations-engineer` | research adapters, provenance, Smartlead client |
+| `integrations-engineer` | research adapters, provenance, the email sender |
 | `review-app-engineer` | FastAPI + HTMX review app |
 | `compliance-auditor` | read-only gate; reports, never fixes |
 
@@ -92,6 +108,20 @@ cp .env.example .env          # fill SESSION_SECRET, REVIEW_PASSWORD_HASH, SENDE
 
 `psql` is keg-only; it lives at `/usr/local/opt/postgresql@17/bin/psql`.
 
+Add the client's mailboxes at `/mailboxes` once the app is up. Sending stays
+stubbed (`EMAIL_SENDER=stub`, the default) until you install the Google extra
+and switch it on deliberately:
+
+```bash
+.venv/bin/pip install -e ".[google]"   # google-api-python-client, google-auth
+# then, only when you mean it:
+EMAIL_SENDER=google GMAIL_SA_DEFAULT=/path/to/service-account.json
+```
+
+The service account needs domain-wide delegation for `gmail.send` on each
+burner domain's Workspace. `mailboxes.credential_ref` names which key to use;
+no key is ever stored in the database.
+
 Run the app: `.venv/bin/uvicorn mazz.web.app:app --reload`
 Run the tests: `.venv/bin/pytest`
 
@@ -109,15 +139,20 @@ not consent to spend.
 ## Current state
 
 **Built:** lead import/management · suppression & unsubscribe · domain-keyed
-research caching · own company research engine (40% standalone signal coverage) ·
-Batch API + prompt caching on the drafting path.
+research caching · own company research engine (qualification pages: homepage,
+services, contact — 2 fetches/domain, no AI) · mailbox management (roster, daily
+caps, spacing, rotation, health) · owned sending (Gmail API, one human-approved
+message at a time) · performance tracking (`/dashboard` reports cost per usable
+lead, hold rate, cache effectiveness and queue health).
 
-**Partial:** scheduling/pacing (queue primitive only) · AI personalization
-(`compose_claude` built, not switched on) · company research (live adapter built).
+**Partial:** scheduling/pacing (per-mailbox caps and spacing enforced at send; no
+send-window or time-of-day shaping) · company research (live adapter built; paid
+provider arm under evaluation) · email 1 (fixed template, zero AI; a per-campaign
+body template is the next step).
 
-**Missing:** mailbox management · multi-step campaigns · lead distribution ·
-activity-based stop/continue · unified inbox · reply classification · performance
-tracking · APIs/webhooks · multi-client workspaces.
+**Missing:** multi-step campaigns · lead distribution · activity-based
+stop/continue · unified inbox · reply classification · APIs/webhooks ·
+multi-client workspaces.
 
 ## Work order
 

@@ -31,29 +31,34 @@ Mapped against the directive's 15 required capabilities:
 | 1 | Import and manage leads | **Built** | `ingest/csv_import.py`, `validate.py`, `leads` |
 | 9 | Suppression / unsubscribe lists | **Built** | `suppression_list`, checked pre-queue, fails closed; HMAC unsubscribe token in footer |
 | 13 | Cached, reusable research | **Built** | `research_cache` keyed by company domain — proven: 2 colleagues → 1 row, 1 provider call |
-| 5 | Schedule and pace emails | *Partial* | `jobs` queue has `run_after`, backoff, `FOR UPDATE SKIP LOCKED`. The primitive exists; pacing policy does not |
-| 11 | AI personalization | *Partial* | `Composer` seam + deterministic template. Claude swap is one function body |
-| 12 | Research companies/prospects | *Partial* | Adapter interfaces + fixtures. No live fetching yet |
-| 2 | Connect/manage mailboxes | **Missing** | — |
+| 2 | Connect/manage mailboxes | **Built** (2026-09-21) | `mailboxes` roster, `/mailboxes`, rotation by health and cap headroom, `credential_ref` names a secret it never stores |
+| 10 | Performance tracking | **Built** (2026-09-21) | `/dashboard` — cost per usable lead, hold rate, cache effectiveness, queue health |
+| 5 | Schedule and pace emails | *Partial* | Per-mailbox daily caps and min spacing enforced at send, with deferral that does not spend a retry. No send-window or time-of-day shaping |
+| 11 | AI personalization | *Partial* | Email 1 is now a fixed template with zero AI, by design. The Claude path is retained for the reply/deep-research tier |
+| 12 | Research companies/prospects | *Partial* | Live adapter built — 2 qualification fetches per domain, cached. Paid provider arm still unfunded |
+| 4 | Distribute leads across campaigns/mailboxes | *Partial* | `SystemRoutingPolicy` assigns a campaign at ingest; `select_mailbox` rotates at send. No segment-level distribution rules |
 | 3 | Multi-step campaigns | **Missing** | One draft per lead; no sequence model |
-| 4 | Distribute leads across campaigns/mailboxes | **Missing** | Single configured default campaign |
 | 6 | Continue/stop on lead activity | **Missing** | No reply ingestion |
 | 7 | Unified inbox | **Missing** | — |
 | 8 | Reply classification | **Missing** | — |
-| 10 | Performance tracking | **Missing** | — |
 | 14 | APIs / webhooks | **Missing** | — |
-| 15 | Multi-client / workspaces | **Missing** | Single-user session auth |
+| 15 | Multi-client / workspaces | **Missing** | Single-user session auth; `workspaces` groups config, not access |
 
-**3 built, 3 partial, 9 missing.** Roughly a quarter of the directive's scope.
+**5 built, 4 partial, 6 missing** as of 2026-09-21 — was 3 / 3 / 9 when this document
+was written.
 
-This is not underperformance — it is scope. `CLAUDE.md`, the spec the team has been
-building to, states plainly: *"He is NOT replacing his sending infrastructure — he
-keeps Smartlead as the sending rail,"* and lists *"no warmup infrastructure, no
-multi-tenant SaaS, no mailbox management"* as explicit non-goals. The nine missing
-capabilities are almost exactly that excluded list.
+**The conflict this section used to describe is resolved.** It read: *"`CLAUDE.md` and
+this directive are in direct conflict and one of them has to change. Nothing has been
+deleted pending your call."* `CLAUDE.md` is the one that changed. It had stated the
+client was NOT replacing his sending infrastructure and listed mailbox management as an
+explicit non-goal; as of 2026-09-21 sending is ours, the Smartlead client is deleted
+rather than flagged off, and the excluded list shrank to warmup and mailbox provisioning
+alone. See `docs/DECISIONS.md`.
 
-**`CLAUDE.md` and this directive are in direct conflict and one of them has to
-change.** Nothing has been deleted pending your call.
+The cost reasoning below is preserved as written, but **the numbers predate the
+cutover** and are no longer the current split — the Smartlead line is now zero, the
+cold path spends no tokens at all, and owning the rail adds operational cost that has
+not been measured. Re-measure before quoting a figure.
 
 What the team built is the half Smartlead is *weakest* at — grounded research,
 verified claims, compliance that fails closed. That work stands regardless of which

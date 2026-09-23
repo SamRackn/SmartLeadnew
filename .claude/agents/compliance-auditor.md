@@ -30,12 +30,17 @@ legal risk, not just an embarrassment.
 **3. No auto-send.**
 No code path sends, dispatches or pushes an email without an explicit,
 individual human approval action. No "approve all", no scheduled auto-approve,
-no retry loop that approves. This holds for the owned sending platform exactly
-as it held for the Smartlead push.
+no retry loop that approves. We now own the sending rail, so check this
+structurally: the pipeline chain must stop at `verify`, and the ONLY thing that
+may create a `send` job is the approve route. A single `enqueue_next("send")`
+in a pipeline stage would turn the system into an auto-sender — grep for it.
+Check too that `pipeline/send.py` still re-checks the approval, the
+verification verdict AND suppression at send time, and that `EMAIL_SENDER`
+still defaults to the stub.
 
 **4. Delete-by-person is complete.**
 `delete_person(email)` must leave zero rows referencing that person across `leads`,
-`drafts`, `jobs`, and the person-specific facts in `research_cache`. We store
+`drafts`, `jobs`, `sent_messages`, and the person-specific facts in `research_cache`. We store
 scraped personal data, so this matters under GDPR/CCPA the moment any lead is EU or
 California based. Verify against the real schema, not the docstring.
 

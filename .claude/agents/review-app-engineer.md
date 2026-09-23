@@ -28,9 +28,13 @@ was built from**, each with its source URL. This is the entire point of the revi
 screen: the client is approving a factual claim about someone else's company, and
 he must be able to see what it rests on without leaving the page.
 
-**Actions** — approve / edit / reject, via HTMX partials. Approve pushes to
-Smartlead through the client owned by `integrations-engineer` and moves the lead to
-`sent`.
+**Actions** — approve / edit / reject, via HTMX partials. Approve moves the lead
+to `approved` and enqueues exactly one `send` job; the worker sends it and moves
+it to `sent` against a real receipt. Do not send from a route handler: that
+would bypass the client's daily caps, block an HTTP request on a provider call,
+and put the last-moment suppression re-check where it cannot be retried. You
+also own `/mailboxes`, the roster screen — a read/edit surface, never a send
+one, and with no field that would accept a credential.
 
 ## Rules specific to you
 - **No auto-send, ever.** The brief forbids it. Every email is human-approved.

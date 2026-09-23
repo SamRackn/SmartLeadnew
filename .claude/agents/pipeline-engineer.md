@@ -70,5 +70,5 @@ failure you cannot attribute to your own change, re-run it isolated before
 spending time on it.
 
 Report honestly — paste real test output, never claim green without running it.
-Stay in your lane: you do not write scoring, drafting, verification, Smartlead, or
+Stay in your lane: you do not write scoring, drafting, verification, the email sender, or
 web code. Tests never touch the network or spend an API credit: `tests/conftest.py` has a session-wide autouse fixture pinning every provider to stub and blanking credentials. Do not weaken it. `CLAUDE.md` governs.

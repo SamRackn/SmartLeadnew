@@ -10,7 +10,7 @@ The end-to-end proof. Runnable any time; it is how we demonstrate the pipe works
 4. Run the queue worker until the queue drains.
 5. Print, per stage: leads by status, `research_cache` rows by domain, drafts with
    their `verification_status` and cited fact ids, and the contents of
-   `smartlead_outbox.jsonl`.
+   `sent_outbox.jsonl`.
 
 Call out each of these explicitly, since they are the behaviors that matter:
 - the suppressed lead was **rejected at ingest** and has no `jobs` row

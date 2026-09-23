@@ -147,24 +147,41 @@ Owner: `integrations-engineer`.
 
 ---
 
-## W5 — Live Smartlead push
+## W5 — Owned sending ✅ DONE (2026-09-21)
 
-`StubSmartleadClient` writes to `smartlead_outbox.jsonl`; `LiveSmartleadClient`
-currently raises `NotImplementedError`. Fill it in behind the same interface.
+**Superseded before it was built.** This workstream assumed a live Smartlead
+push. Sam decided instead that the client sends his own email, and that the
+Smartlead client goes away rather than staying behind a flag —
+`docs/DECISIONS.md` has the reasoning and the before/after.
 
-Preserved as-is: the client exposes no send/deliver/launch verb, and a test scans
-every public method to keep it that way. `LeadPushSettings` hard-refuses
-`ignore_global_block_list` and `ignore_unsubscribe_list`, and a refused push never
-reaches the outbox.
+What shipped in its place:
 
-**Open client question — needs Sam to ask the client:** one drafting queue feeding
-several campaigns, or one campaign per mailbox/segment? Phase 1 deliberately ships a
-single configured default and no routing machinery, because building a router before
-knowing the answer means building the wrong one. The answer changes the data model
-slightly (a campaign reference on the lead or on the segment), so get it before
-writing the router.
+- `mailboxes` and `sent_messages` (migration `9377c345f195`). No credential is
+  stored: `credential_ref` NAMES one, resolved from the environment at send.
+- `integrations/email_sender.py` — `EmailSender` seam, `StubEmailSender`
+  (writes real MIME to `sent_outbox.jsonl`, no network) and `GmailSender`
+  (service account + domain-wide delegation, `gmail.send` only).
+- `pipeline/mailbox.py` — selection at SEND time, not ingest: pinned campaign
+  mailboxes first, then daily-cap headroom, spacing, health and rotation.
+- `pipeline/send.py` — re-checks the approval, the verification verdict and
+  suppression at the moment of sending; records a `sent_messages` row against a
+  real receipt; disables a mailbox whose credential is dead.
+- `queue.JobDeferred` — a third job outcome. A send waiting on a cap is not a
+  failure and must not spend one of its five attempts.
+- `/mailboxes` — roster screen: add, edit, pause, resume, remove, and today's
+  usage against each cap.
 
-Owner: `integrations-engineer`.
+**The campaign-structure question is answered by construction.** The pin lives
+on `mailboxes.campaign_id`: NULL means the general rotation, set means one
+campaign per mailbox. Both topologies work with no migration, so the client can
+answer late or change his mind.
+
+**Still open on this workstream:** sequences and follow-ups, the unified inbox,
+reply classification (the `provider_thread_id` hook is recorded and unused), and
+send-window / time-of-day shaping. Per-mailbox caps and spacing are enforced;
+"only send 9am–5pm in the prospect's timezone" is not.
+
+Owner: `integrations-engineer` (adapter), `pipeline-engineer` (send step).
 
 ---
 
@@ -191,21 +208,30 @@ Owner: `pipeline-engineer`.
 
 ```
 W1 verifier precision  ─────────►  W2 Claude drafting  ──┐
-W3 LinkedIn spike ──► decision ──► W4 live research  ────┼──►  W5 live Smartlead
+W3 LinkedIn spike ──► decision ──► W4 live research  ────┼──►  W5 owned sending ✅
                                                           │
                                    W6 operations ─────────┘
 ```
 
-W1 gates W2. W3's decision gates W4. W5 needs the campaign-structure answer.
-W6 runs alongside and must land before the first real send.
+W1 gates W2. W3's decision gates W4. W5 shipped ahead of that sequence because
+the client's sending rail changed. W6 runs alongside and **must land before the
+first real send** — that gate now matters more, not less: with Smartlead gone,
+nothing outside this system is watching the sending.
 
-## Two decisions needed from you
+## Decisions
 
-1. **Bright Data vs ScrapIn** — after the W3 spike, or sooner if you already have a
-   commercial preference.
-2. **Smartlead campaign structure** — a question for the client, not for us.
+1. ~~**Bright Data vs ScrapIn**~~ — settled 2026-09-15: neither.
+2. ~~**Smartlead campaign structure**~~ — moot. The pin lives on
+   `mailboxes.campaign_id`, so both topologies work without a migration.
 
 ## Explicitly still out of scope
 
-Auto-send (the brief forbids it and nothing in Phase 2 changes that), multi-tenant,
-mailbox management, warmup, deliverability. Smartlead owns all of it.
+Auto-send (the brief forbids it and nothing here changes that — the pipeline
+chain stops at `verify` and only a human click creates a `send` job),
+multi-tenant, mailbox PROVISIONING, warmup.
+
+**Deliverability is no longer out of scope — it is now our liability.** We do
+not build warmup (five mailboxes cannot warm each other) and we do not
+provision domains, but SPF/DKIM/DMARC per burner domain, complaint-rate
+monitoring and sensible caps are now the client's standing obligation and
+partly ours to surface.

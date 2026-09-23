@@ -14,14 +14,14 @@ are independent and may run in parallel; everything else depends on the schema.
    derivation, suppression check before enqueue.
 3. **Stages** → `pipeline-engineer` (queue, enrich) and `drafting-engineer`
    (score, draft, verify), all fixture-backed.
-4. **Smartlead stub** → `integrations-engineer`: real method shapes, payloads
-   recorded to `smartlead_outbox.jsonl`.
+4. **Sender stub** → `integrations-engineer`: the `EmailSender` seam, with the
+   real MIME recorded to `sent_outbox.jsonl` and nothing on the wire.
 5. **Review app** → `review-app-engineer`: login, lead table, draft beside its
    source snippets, approve/edit/reject.
 6. **Privacy** → `pipeline-engineer`: `delete_person(email)`.
 
 Then run `/audit`, fix what it finds, and run `/seed` to demonstrate the full path.
 
-Do not start Phase 2 work — no live scraping, no Claude API calls, no real
-Smartlead credentials. If a step is blocked, finish every other step and say
+Do not start Phase 2 work — no live scraping, no Claude API calls, and
+`EMAIL_SENDER` stays `stub`, so no real mail. If a step is blocked, finish every other step and say
 plainly which one you left and why.
