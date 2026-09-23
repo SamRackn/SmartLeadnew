@@ -47,6 +47,7 @@ from mazz.web.app import app
 from mazz.web.auth import hash_password
 
 import mazz.web.routes.leads as leads_routes
+import mazz.web.routes.review as review_routes
 
 TEST_PASSWORD = "correct-horse-battery-staple"
 NOW = datetime(2026, 9, 14, tzinfo=timezone.utc)
@@ -1088,7 +1089,12 @@ def test_campaign_screens_never_expose_a_send_or_approve_action(
         resp = logged_in_client.get(path)
         assert resp.status_code == 200
         assert "approve" not in resp.text.lower()
-        assert "/leads/" not in resp.text
+        # No PER-LEAD path. "/leads/" alone is too crude now that the nav
+        # links to /leads/import, which is an upload form, not dispatch --
+        # and by this test's own reasoning below, a substring check that
+        # trips on something innocuous proves nothing. What must not appear
+        # is a link to a specific lead, which is where approve and send live.
+        assert not re.search(r"/leads/\d+", resp.text)
         # The actual guardrail: no form or link on this screen posts to, or
         # links to, a send/approve action. A brand-name substring check
         # ("smartlead" not in the page) is not this guardrail -- it trips on
@@ -1965,3 +1971,190 @@ def test_ticking_the_generic_vertical_box_allows_a_blank_vertical(
     session.refresh(campaign)
     assert campaign.generic_vertical_fallback is True
     assert campaign.vertical is None
+
+
+# ==========================================================================
+# /review — the two-pane draft-review screen
+# ==========================================================================
+
+
+def test_review_page_serves_and_preselects_the_first_row(
+    logged_in_client: TestClient, session
+):
+    lead, draft = make_passed_lead(session)
+
+    resp = logged_in_client.get("/review")
+    assert resp.status_code == 200
+    assert lead.full_name in resp.text
+    # Nothing selected explicitly -> the first row's draft is shown.
+    assert draft.subject in resp.text
+
+
+def test_review_list_matches_name_email_and_company(
+    logged_in_client: TestClient, session
+):
+    """Search matches on name, email OR company, case-insensitively."""
+
+    h.make_lead(
+        session,
+        full_name="Zendaya Okonkwo",
+        email="zendaya@acme.example",
+        company_name="Acme Corp",
+        company_domain="acme.example",
+    )
+    h.make_lead(
+        session,
+        full_name="Marcus Oyelaran",
+        email="findme.by.email@beta.example",
+        company_name="Beta LLC",
+        company_domain="beta.example",
+    )
+    h.make_lead(
+        session,
+        full_name="Priya Chaudhry",
+        email="priya@gamma.example",
+        company_name="FindableCo",
+        company_domain="gamma.example",
+    )
+    session.commit()
+
+    by_name = logged_in_client.get("/review/list?q=zendaya")
+    assert "Zendaya Okonkwo" in by_name.text
+    assert "Marcus Oyelaran" not in by_name.text
+    assert "Priya Chaudhry" not in by_name.text
+
+    by_email = logged_in_client.get("/review/list?q=findme.by.email")
+    assert "Marcus Oyelaran" in by_email.text
+    assert "Zendaya Okonkwo" not in by_email.text
+
+    by_company = logged_in_client.get("/review/list?q=findableco")
+    assert "Priya Chaudhry" in by_company.text
+    assert "Zendaya Okonkwo" not in by_company.text
+    assert "Marcus Oyelaran" not in by_company.text
+
+
+def test_review_list_honours_a_limit_and_shows_the_total(
+    logged_in_client: TestClient, session, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(review_routes, "LIST_LIMIT", 2)
+
+    for i in range(5):
+        h.make_lead(
+            session,
+            full_name=f"Limit Test {i}",
+            email=f"limit{i}@northwind-logistics.com",
+            company_domain=h.SHARED_DOMAIN,
+        )
+    session.commit()
+
+    resp = logged_in_client.get("/review/list")
+    assert resp.status_code == 200
+    assert resp.text.count("review-row ") == 2
+    assert "2 shown of 5" in resp.text
+
+
+def test_selecting_a_lead_renders_its_draft(logged_in_client: TestClient, session):
+    lead, draft = make_passed_lead(session)
+    other_lead, other_draft = make_held_lead(session)
+
+    resp = logged_in_client.get(f"/review/{lead.id}/panel")
+    assert resp.status_code == 200
+    assert draft.subject in resp.text
+    assert JOB_FACT.source_url in resp.text
+
+    # And selecting via the full-page ?lead_id= param shows the same lead,
+    # not whichever row happens to sort first.
+    page = logged_in_client.get(f"/review?lead_id={other_lead.id}")
+    assert page.status_code == 200
+    assert other_draft.subject in page.text
+    assert other_lead.full_name in page.text
+
+
+def test_held_draft_panel_shows_reason_and_no_enabled_approve_button(
+    logged_in_client: TestClient, session
+):
+    lead, draft = make_held_lead(session)
+
+    resp = logged_in_client.get(f"/review/{lead.id}/panel")
+    assert resp.status_code == 200
+    assert "HELD" in resp.text
+    assert "cites no facts" in draft.verification_notes
+    assert "cites no facts at all" in resp.text
+
+    # The disabled control, not the real one: no enabled submit button whose
+    # form posts to /approve.
+    assert '<button type="button" class="approve" disabled' in resp.text
+    assert (
+        f'<form hx-post="/leads/{lead.id}/approve"' not in resp.text
+    ), "an approvable form must not be rendered for a held draft"
+
+
+def test_editing_in_an_unverifiable_statistic_holds_and_approve_still_refuses(
+    logged_in_client: TestClient, session
+):
+    """The load-bearing test for the review screen: an operator typing an
+    unverifiable number must see why it is blocked, AND the approve route
+    must refuse it regardless of what the UI shows.
+    """
+
+    lead, draft = make_passed_lead(session)
+    assert draft.verification_status is VerificationStatus.PASSED
+
+    resp = logged_in_client.post(
+        f"/leads/{lead.id}/edit",
+        data={
+            "subject": "Quick note",
+            "body_text": "Hey — we got them 200 new cases last quarter.",
+        },
+        headers={"HX-Target": "review-panel"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert "HELD" in resp.text
+    assert "200" in resp.text  # the fabricated number, named in the reason
+    assert '<button type="button" class="approve" disabled' in resp.text
+
+    refreshed = session.get(Lead, lead.id)
+    session.refresh(refreshed)
+    assert refreshed.status is LeadStatus.HELD
+
+    approve_resp = logged_in_client.post(
+        f"/leads/{lead.id}/approve", headers={"HX-Target": "review-panel"}
+    )
+    assert approve_resp.status_code == 409
+    assert "not approvable" in approve_resp.text.lower()
+    assert 'class="error-banner"' in approve_resp.text
+    assert send_jobs_for(session, lead.id) == []
+
+
+def test_approve_refusal_renders_a_visible_banner_not_a_blank_swap(
+    logged_in_client: TestClient, session
+):
+    """htmx 1.9 does not swap a non-2xx response -- the refusal has to come
+    back as renderable HTML (still carrying the refusal status code), or the
+    operator clicks Approve and sees nothing at all.
+    """
+
+    lead, draft = make_held_lead(session)
+
+    resp = logged_in_client.post(
+        f"/leads/{lead.id}/approve", headers={"HX-Target": "review-panel"}
+    )
+    assert resp.status_code == 409
+    assert 'class="error-banner"' in resp.text
+    assert "not approvable" in resp.text.lower()
+    # The response is a full HTML panel, not a bare `{"detail": ...}` body.
+    assert "<section" in resp.text or "<form" in resp.text
+
+
+def test_no_angle_held_and_ready_all_reachable_from_review_default_view(
+    logged_in_client: TestClient, session
+):
+    held_lead, _ = make_held_lead(session)
+    no_angle_lead = make_no_angle_lead(session)
+    passed_lead, _ = make_passed_lead(session)
+
+    resp = logged_in_client.get("/review")
+    assert resp.status_code == 200
+    assert held_lead.full_name in resp.text
+    assert no_angle_lead.full_name in resp.text
+    assert passed_lead.full_name in resp.text

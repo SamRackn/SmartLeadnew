@@ -338,3 +338,335 @@ button.reject { background: var(--danger-fg); color: var(--ink-inverse); border-
   margin-right: 0.4rem;
   vertical-align: baseline;
 }
+
+/* A refused action (approve/edit) still has to render SOMETHING -- htmx does
+   not swap a non-2xx response, so the route returns the panel itself with
+   this banner rather than a bare exception the operator never sees. */
+.error-banner {
+  background: var(--danger-bg);
+  color: var(--danger-fg-strong);
+  border: 1px solid var(--danger-fg);
+  border-radius: var(--radius);
+  padding: 0.6rem 0.9rem;
+  margin: 0 0 1rem;
+  font-weight: 600;
+}
+
+/* --------------------------------------------------------------------- */
+/* /review -- the two-pane draft-review screen                            */
+/* --------------------------------------------------------------------- */
+
+.review-shell {
+  display: grid;
+  grid-template-columns: minmax(260px, 30%) minmax(0, 70%);
+  gap: var(--space-5);
+  align-items: start;
+  height: calc(100vh - 6rem);
+}
+
+.review-list-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.review-search-input {
+  width: 100%;
+  padding: 0.5rem 0.7rem;
+  margin-bottom: var(--space-3);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  font-size: 0.95rem;
+}
+
+#review-list-dynamic {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+}
+
+.review-count {
+  padding: var(--space-2) var(--space-3) 0;
+  margin: 0;
+  font-size: 0.8rem;
+}
+
+.review-rows {
+  list-style: none;
+  margin: 0;
+  padding: var(--space-2);
+}
+
+.review-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.review-row:hover { background: var(--surface-sunken); }
+.review-row.selected { background: var(--info-bg); }
+
+.review-row-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.review-row-name { font-weight: 600; }
+.review-row-email {
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.avatar {
+  flex: 0 0 auto;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--ink-inverse);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.review-detail-pane {
+  height: 100%;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  padding: var(--space-5);
+}
+
+.review-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+.review-panel-header h2 { margin: 0 0 0.25rem; }
+
+.email-preview summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-weight: 600;
+  list-style: none;
+}
+.email-preview summary::-webkit-details-marker { display: none; }
+.email-preview-body {
+  margin-top: var(--space-3);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+}
+.email-preview-body dt {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin-top: var(--space-2);
+}
+.email-preview-body dd { margin: 0.15rem 0 0; }
+.email-preview-body pre {
+  white-space: pre-wrap;
+  font-family: inherit;
+  margin: 0;
+}
+
+.review-compose-form label {
+  display: block;
+  margin-bottom: var(--space-3);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.review-compose-form input,
+.review-compose-form textarea {
+  width: 100%;
+  padding: 0.5rem;
+  margin-top: 0.3rem;
+  font-weight: normal;
+  font-family: inherit;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+}
+.review-compose-form input:disabled { background: var(--surface-sunken); color: var(--ink-muted); }
+
+.verification-line { margin: var(--space-3) 0; }
+
+.review-actions { margin-top: var(--space-4); }
+.review-action-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-3);
+}
+.review-action-row form { margin: 0; }
+.reject-form { display: flex; gap: var(--space-2); align-items: center; }
+.reject-form input {
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+}
+button.approve:disabled {
+  background: var(--surface-muted);
+  color: var(--ink-disabled);
+  border-color: var(--border);
+  cursor: not-allowed;
+}
+.approve-disabled-hint { margin-top: var(--space-2); }
+
+/* ==========================================================================
+   Dashboard KPI row
+   Four headline numbers above the panels. They duplicate figures that appear
+   below on purpose: the questions asked most often should not need scrolling.
+   ========================================================================== */
+
+.kpi-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
+}
+
+.kpi {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-4);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.kpi-label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-faint);
+}
+
+.kpi-value {
+  font-size: 1.75rem;
+  font-weight: 600;
+  line-height: 1.1;
+  color: var(--ink);
+  /* Tabular figures so the four tiles do not jitter as values change. */
+  font-variant-numeric: tabular-nums;
+}
+
+.kpi-value.undefined {
+  color: var(--ink-disabled);
+  font-weight: 400;
+}
+
+.kpi-note {
+  font-size: 0.8125rem;
+  color: var(--ink-hint);
+}
+
+/* ==========================================================================
+   Import page
+   ========================================================================== */
+
+.import-form input[type="file"] {
+  display: block;
+  margin-top: var(--space-2);
+  padding: var(--space-3);
+  width: 100%;
+  background: var(--surface-sunken);
+  border: 1px dashed var(--border-soft);
+  border-radius: var(--radius);
+}
+
+.import-form .hint {
+  color: var(--ink-hint);
+  font-size: 0.875rem;
+  margin: var(--space-2) 0 var(--space-4);
+}
+
+.import-tally {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-5);
+  list-style: none;
+  padding: 0;
+  margin: 0 0 var(--space-4);
+}
+
+.import-tally li {
+  display: flex;
+  flex-direction: column;
+  color: var(--ink-muted);
+  font-size: 0.8125rem;
+}
+
+.import-tally .count {
+  font-size: 1.375rem;
+  font-weight: 600;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.import-report h3 {
+  margin-top: var(--space-5);
+}
+
+/* Banners: a result the operator must not miss, in the flow of the page. */
+.banner {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius);
+  margin: var(--space-4) 0;
+}
+
+.banner.danger {
+  background: var(--danger-bg);
+  color: var(--danger-fg-strong);
+}
+
+.banner.info {
+  background: var(--info-bg);
+  color: var(--info-fg);
+}
+
+.banner.warn {
+  background: var(--surface-highlight);
+  color: var(--ink-quiet);
+}
+
+/* The outbox's "queued"/"blocked" reason, kept quiet next to its chip. */
+.block-reason {
+  display: block;
+  font-size: 0.8125rem;
+}
+
+.outbox-table tr.blocked td {
+  opacity: 0.72;
+}
+
+.row-action form {
+  margin: 0;
+}
+
+.lede {
+  color: var(--ink-quiet);
+  max-width: 62ch;
+}
+
+.note {
+  color: var(--ink-hint);
+  font-size: 0.875rem;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: var(--space-3);
+}

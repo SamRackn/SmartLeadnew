@@ -7,6 +7,137 @@
   everything else here is where that cost is coming from.
 </p>
 
+{# Headline numbers. Each one is also explained by a panel below; these exist
+   so the four questions asked most often do not need scrolling. Every value
+   that can be undefined prints an em dash, never an optimistic zero. #}
+<section class="kpi-row">
+  {# Gated on the same flag as the cost panel below. With no measured spend
+     at all there is no cost question to answer, and a tile reading "—" would
+     imply we tried to compute one and failed. #}
+  {% if show_cost_panel %}
+  <div class="kpi">
+    <span class="kpi-label">Cost per usable lead</span>
+    {% if cost_per_usable_lead is none %}
+      <span class="kpi-value undefined">&mdash;</span>
+      <span class="kpi-note">no drafts have passed verification yet</span>
+    {% else %}
+      <span class="kpi-value">${{ "%.4f"|format(cost_per_usable_lead) }}</span>
+      <span class="kpi-note">{{ usable_leads }} usable of {{ total_leads }} leads</span>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <div class="kpi">
+    <span class="kpi-label">Hold rate</span>
+    {% if hold_rate is none %}
+      <span class="kpi-value undefined">&mdash;</span>
+      <span class="kpi-note">no verified drafts yet</span>
+    {% else %}
+      <span class="kpi-value">{{ "%.0f"|format(hold_rate * 100) }}%</span>
+      <span class="kpi-note">of {{ total_drafts }} draft{{ "" if total_drafts == 1 else "s" }} held for review</span>
+    {% endif %}
+  </div>
+
+  <div class="kpi">
+    <span class="kpi-label">Sent today</span>
+    <span class="kpi-value">{{ sent_today_total }}</span>
+    <span class="kpi-note">
+      {% if daily_capacity > 0 %}
+        {{ remaining_capacity_today }} of {{ daily_capacity }} still available
+      {% else %}
+        no active mailbox
+      {% endif %}
+    </span>
+  </div>
+
+  <div class="kpi">
+    <span class="kpi-label">Awaiting send</span>
+    <span class="kpi-value">{{ approved_waiting }}</span>
+    <span class="kpi-note">
+      {% if approved_waiting == 0 %}
+        nothing approved is waiting
+      {% elif backlog_days is none %}
+        no capacity &mdash; nothing can go out
+      {% else %}
+        about {{ "%.1f"|format(backlog_days) }} day{{ "" if backlog_days <= 1 else "s" }} at current caps
+      {% endif %}
+    </span>
+  </div>
+</section>
+
+{% if show_sending_panel %}
+<section class="dash-panel">
+  <h2>Sending</h2>
+  <p class="muted">
+    Deliverability is ours now, so this is the panel that matters when a domain
+    starts misbehaving. Sent counts come from <code>sent_messages</code> rows —
+    one per email that actually left — never from a counter that a crash could
+    desynchronise.
+  </p>
+
+  <dl class="dash-stats">
+    <dt>Sent today</dt>
+    <dd>{{ sent_today_total }}</dd>
+
+    <dt>Sent all time</dt>
+    <dd>{{ total_sent }}</dd>
+
+    <dt>Mailboxes active</dt>
+    <dd>
+      {{ active_mailboxes }} of {{ total_mailboxes }}
+      {% if total_mailboxes and not active_mailboxes %}
+        <span class="dash-alert">— every mailbox is paused or disabled; nothing can send</span>
+      {% endif %}
+    </dd>
+
+    <dt>Capacity remaining today</dt>
+    {% if daily_capacity > 0 %}
+      <dd>{{ remaining_capacity_today }} of {{ daily_capacity }}</dd>
+    {% else %}
+      <dd class="undefined">no active mailbox — capacity is not a number yet</dd>
+    {% endif %}
+  </dl>
+
+  {% if mailbox_health %}
+  <table class="dash-table">
+    <thead>
+      <tr><th>Mailbox</th><th>Status</th><th>Sent today</th><th>Remaining</th><th>Health</th></tr>
+    </thead>
+    <tbody>
+      {% for row in mailbox_health %}
+      <tr>
+        <td>{{ row.mailbox.email_address }}</td>
+        <td><span class="mailbox-tag mailbox-{{ row.mailbox.status.value }}">{{ row.mailbox.status.value }}</span></td>
+        <td>{{ row.sent_today }} / {{ row.mailbox.daily_cap }}</td>
+        <td>
+          {% if row.mailbox.status.value != "active" %}
+            <span class="muted">—</span>
+          {% elif row.is_capped %}
+            <span class="dash-alert">capped</span>
+          {% else %}
+            {{ row.headroom }}
+          {% endif %}
+        </td>
+        <td>
+          {% if row.mailbox.consecutive_failures %}
+            <span class="dash-alert">{{ row.mailbox.consecutive_failures }} consecutive failure{{ "" if row.mailbox.consecutive_failures == 1 else "s" }}</span>
+          {% else %}
+            <span class="muted">ok</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">
+    No mailboxes configured. Nothing can be sent until one exists —
+    <a href="/mailboxes/new">add one</a>.
+  </p>
+  {% endif %}
+</section>
+{% endif %}
+
 {% if show_cost_panel %}
 <section class="dash-panel">
   <h2>Cost per usable lead</h2>

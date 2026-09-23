@@ -42,14 +42,31 @@ from mazz.models import (
     JobStatus,
     Lead,
     LeadStatus,
+    Mailbox,
+    MailboxStatus,
     ResearchCache,
+    SentMessage,
     VerificationStatus,
 )
+from mazz.pipeline.mailbox import day_window, headroom, sent_today
 from mazz.pipeline.queue import DEFAULT_STALE_AFTER
 from mazz.web.auth import current_user
 from mazz.web.routes.leads import ALL_STATUSES
 
 router = APIRouter()
+
+@dataclass(frozen=True, slots=True)
+class MailboxHealth:
+    """One mailbox's capacity and health, for the sending panel."""
+
+    mailbox: Mailbox
+    sent_today: int
+    headroom: int
+
+    @property
+    def is_capped(self) -> bool:
+        return self.headroom <= 0
+
 
 #: How many recent batches to show. This is a review aid, not an export —
 #: the full history lives in the table, forever, per the model's own docstring.
@@ -331,11 +348,73 @@ async def dashboard(
             for j in failed_rows
         ]
 
+    # ----------------------------------------------------------------
+    # Sending. Absent from this page until we owned the rail, which made
+    # it the one question the client could not answer here: how much has
+    # actually left, from which mailbox, and what is left in the tank.
+    #
+    # sent_today is counted from sent_messages rows, never from a counter
+    # on the mailbox, for the same reason pipeline.mailbox counts it that
+    # way: a crash between sending and bookkeeping must not silently
+    # hand a mailbox extra capacity.
+    # ----------------------------------------------------------------
+    day_start, _day_end = day_window(now)
+
+    total_sent = session.execute(
+        select(func.count(SentMessage.id))
+    ).scalar_one()
+    sent_today_total = session.execute(
+        select(func.count(SentMessage.id)).where(SentMessage.sent_at >= day_start)
+    ).scalar_one()
+
+    mailboxes = (
+        session.execute(select(Mailbox).order_by(Mailbox.email_address)).scalars().all()
+    )
+    mailbox_health = [
+        MailboxHealth(
+            mailbox=mailbox,
+            sent_today=sent_today(session, mailbox, now=now),
+            headroom=headroom(session, mailbox, now=now),
+        )
+        for mailbox in mailboxes
+    ]
+    active_health = [
+        row for row in mailbox_health if row.mailbox.status is MailboxStatus.ACTIVE
+    ]
+
+    #: Capacity that exists TODAY, from mailboxes that can actually serve.
+    #: Paused and disabled mailboxes contribute nothing -- counting them
+    #: would advertise a send rate the roster cannot deliver.
+    remaining_capacity_today = sum(row.headroom for row in active_health)
+    daily_capacity = sum(row.mailbox.daily_cap for row in active_health)
+
+    approved_waiting = status_counts.get(LeadStatus.APPROVED, 0)
+
+    #: Days of backlog at the current roster's pace. None, not zero, when
+    #: there is no capacity: "0 days" reads like "nothing is waiting", and
+    #: an empty or fully paused roster means the opposite.
+    if daily_capacity > 0:
+        backlog_days = approved_waiting / daily_capacity
+    else:
+        backlog_days = None
+
+    show_sending_panel = bool(mailboxes) or total_sent > 0
+
     return templates.TemplateResponse(
         request,
         "dashboard.html",
         {
             "user": user,
+            "show_sending_panel": show_sending_panel,
+            "total_sent": total_sent,
+            "sent_today_total": sent_today_total,
+            "mailbox_health": mailbox_health,
+            "active_mailboxes": len(active_health),
+            "total_mailboxes": len(mailbox_health),
+            "daily_capacity": daily_capacity,
+            "remaining_capacity_today": remaining_capacity_today,
+            "approved_waiting": approved_waiting,
+            "backlog_days": backlog_days,
             "all_statuses": ALL_STATUSES,
             "status_counts": status_counts,
             "total_leads": total_leads,

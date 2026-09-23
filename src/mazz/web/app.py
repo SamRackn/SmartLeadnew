@@ -20,9 +20,11 @@ from mazz.web.auth import AuthRequired
 from mazz.web.routes import auth as auth_routes
 from mazz.web.routes import campaigns as campaigns_routes
 from mazz.web.routes import dashboard as dashboard_routes
+from mazz.web.routes import imports as imports_routes
 from mazz.web.routes import leads as leads_routes
 from mazz.web.routes import mailboxes as mailboxes_routes
 from mazz.web.routes import outbox as outbox_routes
+from mazz.web.routes import review as review_routes
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -61,11 +63,15 @@ def create_app() -> FastAPI:
         return RedirectResponse(url="/leads", status_code=303)
 
     app.include_router(auth_routes.router)
+    # Before leads_routes: /leads/import would otherwise be matched by
+    # /leads/{lead_id} and fail to parse "import" as an integer.
+    app.include_router(imports_routes.router)
     app.include_router(leads_routes.router)
     app.include_router(campaigns_routes.router)
     app.include_router(dashboard_routes.router)
     app.include_router(mailboxes_routes.router)
     app.include_router(outbox_routes.router)
+    app.include_router(review_routes.router)
 
     return app
 

@@ -11,8 +11,10 @@
     <a class="brand" href="/leads">MazzSmartLead Review</a>
     {% if user %}
       <nav class="topbar-nav">
-        <a href="/leads" class="{{ 'active' if request.url.path.startswith('/leads') else '' }}">leads</a>
+        <a href="/review" class="{{ 'active' if request.url.path.startswith('/review') else '' }}">review</a>
+        <a href="/leads" class="{{ 'active' if request.url.path.startswith('/leads') and not request.url.path.startswith('/leads/import') else '' }}">leads</a>
         <a href="/outbox" class="{{ 'active' if request.url.path.startswith('/outbox') else '' }}">outbox</a>
+        <a href="/leads/import" class="{{ 'active' if request.url.path.startswith('/leads/import') else '' }}">import</a>
         <a href="/workspaces" class="{{ 'active' if request.url.path.startswith('/workspaces') else '' }}">workspaces</a>
         <a href="/mailboxes" class="{{ 'active' if request.url.path.startswith('/mailboxes') else '' }}">mailboxes</a>
         <a href="/dashboard" class="{{ 'active' if request.url.path.startswith('/dashboard') else '' }}">dashboard</a>
