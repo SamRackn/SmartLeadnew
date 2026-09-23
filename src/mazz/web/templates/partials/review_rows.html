@@ -1,0 +1,48 @@
+{# The left pane's status facet + row list, rendered by GET /review/list and
+   included once by review.html for the initial page load. Both the search
+   box's keyup and every status-facet click swap this whole fragment, so the
+   active status highlight and the rows themselves can never disagree with
+   each other. #}
+
+{# Carries the current status filter for the search box's `hx-include`, so
+   typing a query after clicking a status facet keeps that facet applied. #}
+<input type="hidden" id="review-status-value" name="status"
+       value="{{ active_status.value if active_status else '' }}">
+
+<nav class="status-filter">
+  <a href="/review{{ '?q=' ~ q if q else '' }}"
+     class="{{ 'active' if active_status is none else '' }}"
+     hx-get="/review/list" hx-target="#review-list-dynamic" hx-swap="innerHTML"
+     hx-include="#review-q" hx-vals='{"status": ""}'>all</a>
+  {% for s in all_statuses %}
+  <a href="/review?status={{ s.value }}{{ '&q=' ~ q if q else '' }}"
+     class="status-tag status-{{ s.value }} {{ 'active' if active_status == s else '' }}"
+     hx-get="/review/list" hx-target="#review-list-dynamic" hx-swap="innerHTML"
+     hx-include="#review-q" hx-vals='{"status": "{{ s.value }}"}'>{{ s.value }}</a>
+  {% endfor %}
+</nav>
+
+<p class="review-count muted">
+  {{ rows|length }} shown{% if total > rows|length %} of {{ total }}{% endif %}
+</p>
+
+{% if not rows %}
+  <p class="empty">No leads match this search.</p>
+{% else %}
+<ul class="review-rows">
+  {% for row in rows %}
+  <li class="review-row {{ 'selected' if row.lead.id == selected_lead_id else '' }}"
+      hx-get="/review/{{ row.lead.id }}/panel"
+      hx-target="#review-panel"
+      hx-swap="innerHTML"
+      hx-push-url="/review?lead_id={{ row.lead.id }}">
+    <span class="avatar" aria-hidden="true">{{ initials(row.lead.full_name) }}</span>
+    <span class="review-row-body">
+      <span class="review-row-name">{{ row.lead.full_name }}</span>
+      <span class="review-row-email muted">{{ row.lead.email }}</span>
+    </span>
+    <span class="status-tag status-{{ row.lead.status.value }}">{{ row.lead.status.value }}</span>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}

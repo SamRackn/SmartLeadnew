@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Review — MazzSmartLead Review{% endblock %}
+{% block main_class %}wide{% endblock %}
+{% block content %}
+<div class="review-shell">
+  <aside class="review-list-pane">
+    <input
+      type="search"
+      id="review-q"
+      name="q"
+      class="review-search-input"
+      value="{{ q }}"
+      placeholder="Search name, email, company"
+      autocomplete="off"
+      hx-get="/review/list"
+      hx-target="#review-list-dynamic"
+      hx-swap="innerHTML"
+      hx-trigger="keyup changed delay:300ms, search"
+      hx-include="#review-status-value"
+    >
+    <div id="review-list-dynamic">
+      {% include "partials/review_rows.html" %}
+    </div>
+  </aside>
+
+  <section class="review-detail-pane" id="review-panel">
+    {% include "partials/review_panel.html" %}
+  </section>
+</div>
+{% endblock %}

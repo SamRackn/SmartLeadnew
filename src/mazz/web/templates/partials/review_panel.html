@@ -1,0 +1,167 @@
+{# The right pane of /review: the draft, shown beside the exact signals and
+   source snippets it was built from, plus approve/edit/reject.
+
+   Rendered as the initial content of `<section id="review-panel">` in
+   review.html, as the HTMX swap target for a left-pane row click
+   (GET /review/{lead_id}/panel), and as the swap target for the
+   approve/reject/edit forms below (their POST routes live in
+   mazz.web.routes.leads and pick this template over partials/draft_panel.html
+   by the `HX-Target: review-panel` header htmx sends -- see
+   `_panel_template_name` there). This file is therefore the single place
+   that owns this screen's actions; it never re-implements what the routes
+   enforce, it only renders their result.
+
+   Deliberately does NOT include the old signal-scoring table
+   (`lead_detail.html`'s `.scoring-view`) -- `pipeline/score.py` is retired
+   off the cold path. The evidence shown here is `cited`: the qualification
+   facts the draft actually rests on. #}
+
+{% if lead is none %}
+  <p class="empty">No leads to review yet.</p>
+{% else %}
+
+  <header class="review-panel-header">
+    <div>
+      <h2>{{ lead.full_name }}</h2>
+      <span class="status-tag status-{{ lead.status.value }}">{{ lead.status.value }}</span>
+      <span class="muted">{{ lead.company_name or "—" }}</span>
+    </div>
+    {% if draft %}
+    <details class="email-preview">
+      <summary>👁 Preview Email</summary>
+      <div class="email-preview-body">
+        <dl>
+          <dt>To</dt><dd>{{ lead.email }}</dd>
+          <dt>Subject</dt><dd>{{ draft.subject }}</dd>
+          <dt>Body (as it will actually be sent, footer included)</dt>
+          <dd><pre>{{ draft.body }}</pre></dd>
+        </dl>
+      </div>
+    </details>
+    {% endif %}
+  </header>
+
+  {% if error %}
+    <div class="error-banner" role="alert">{{ error }}</div>
+  {% endif %}
+
+  {% if draft is none %}
+    <p class="empty">No draft for this lead.
+      {% if lead.status.value == "no_angle" %}
+        No qualifying signal was confirmed on the prospect's own site (or the
+        site disqualified them) — see CLAUDE.md guardrail 2. No draft was
+        written on purpose; there is no fallback to generic filler.
+      {% endif %}
+    </p>
+  {% else %}
+
+    {% if draft.verification_status.value == "failed" %}
+      <div class="held-banner">
+        <strong>HELD — cannot be approved.</strong>
+        <pre class="verification-notes">{{ draft.verification_notes }}</pre>
+      </div>
+    {% endif %}
+
+    <form hx-post="/leads/{{ lead.id }}/edit" hx-target="#review-panel" hx-swap="innerHTML" class="review-compose-form">
+      <label>
+        To
+        <input type="text" value="{{ lead.email }}" disabled>
+      </label>
+      <label>
+        Subject
+        <input type="text" name="subject" value="{{ draft.subject }}">
+      </label>
+      <label>
+        Body
+        <textarea name="body_text" rows="10">{{ editable_body }}</textarea>
+      </label>
+      <p class="muted hint">
+        Shown without the compliance footer — that is appended automatically
+        and appears in Preview Email above.
+      </p>
+      <button type="submit">Save edit &amp; re-verify</button>
+    </form>
+
+    <p class="verification-line">
+      {% if draft.verification_status.value == "passed" %}
+        <span class="verification-tag verification-passed">✓ verified</span>
+      {% elif draft.verification_status.value == "failed" %}
+        <span class="verification-tag verification-failed">✗ failed verification</span>
+      {% else %}
+        <span class="verification-tag verification-pending">pending</span>
+      {% endif %}
+      · {{ cited|length }} fact{{ "s" if cited|length != 1 else "" }} cited
+    </p>
+
+    <section class="evidence-view">
+      <h3>Cited signals &amp; sources</h3>
+      {% if not cited %}
+        <p class="empty">This draft cites no signals.</p>
+      {% else %}
+        <ul class="evidence-list">
+          {% for c in cited %}
+          <li>
+            <span class="fact-kind">{{ c.kind }}</span>
+            <blockquote>{{ c.content or "(fact id not found in current research_cache)" }}</blockquote>
+            {% if c.source_url %}
+              <a href="{{ c.source_url }}" target="_blank" rel="noopener">{{ c.source_url }}</a>
+            {% else %}
+              <span class="muted">no source URL</span>
+            {% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    </section>
+
+    <section class="review-actions">
+      {% if lead.status.value == "sent" %}
+        <p class="sent-banner">
+          <strong>Sent.</strong>
+          {% if send_state.sent %}
+            From <code>{{ send_state.sent.from_address }}</code>
+            on {{ send_state.sent.sent_at.strftime("%Y-%m-%d %H:%M UTC") }}.
+          {% endif %}
+        </p>
+      {% elif lead.status.value == "approved" %}
+        <p class="queued-banner">
+          <strong>Approved — queued to send.</strong>
+          {% if send_state.mailbox %}
+            Next out of <code>{{ send_state.mailbox.email_address }}</code>.
+          {% elif send_state.waiting_until %}
+            Every mailbox is at its daily cap or spacing; this goes out after
+            {{ send_state.waiting_until.strftime("%Y-%m-%d %H:%M UTC") }}.
+          {% endif %}
+          Release it on <a href="/outbox">the outbox</a>.
+        </p>
+      {% else %}
+        <div class="review-action-row">
+          <form hx-post="/leads/{{ lead.id }}/reject" hx-target="#review-panel" hx-swap="innerHTML" class="reject-form">
+            <input type="text" name="reason" placeholder="why this shouldn't go out (optional)">
+            <button type="submit" class="reject">Reject</button>
+          </form>
+
+          {% if can_approve %}
+            <form hx-post="/leads/{{ lead.id }}/approve" hx-target="#review-panel" hx-swap="innerHTML">
+              <button type="submit" class="approve">Approve &rarr;</button>
+            </form>
+          {% else %}
+            <button type="button" class="approve" disabled
+                    title="Approve is disabled: verification_status is &quot;{{ draft.verification_status.value }}&quot;, not &quot;passed&quot; — enforced by the /approve route itself, not just this button.">
+              Approve &rarr;
+            </button>
+          {% endif %}
+        </div>
+        {% if not can_approve %}
+          <p class="muted approve-disabled-hint">
+            Approve is disabled: this draft's verification_status is
+            "{{ draft.verification_status.value }}", not "passed". A held or
+            pending draft can never be sent — enforced by the
+            <code>/approve</code> route itself, not just by hiding this button.
+          </p>
+        {% endif %}
+      {% endif %}
+    </section>
+
+  {% endif %}
+{% endif %}

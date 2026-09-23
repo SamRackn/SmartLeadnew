@@ -4,6 +4,10 @@
    target for approve/reject/edit responses (id="draft-panel" below). #}
 <div id="draft-panel">
 
+  {% if error %}
+    <div class="error-banner" role="alert">{{ error }}</div>
+  {% endif %}
+
   {% if draft is none %}
     <p class="empty">No draft for this lead.
       {% if lead.status.value == "no_angle" %}
@@ -118,7 +122,7 @@
         </label>
         <label>
           Body (without the compliance footer — that is appended automatically)
-          <textarea name="body_text" rows="8">{{ draft.body.split("\n\n-- \n")[0] }}</textarea>
+          <textarea name="body_text" rows="8">{{ editable_body }}</textarea>
         </label>
         <button type="submit">Save edit &amp; re-verify</button>
       </form>

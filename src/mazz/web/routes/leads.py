@@ -48,7 +48,7 @@ from mazz.models import (
     SentMessage,
     VerificationStatus,
 )
-from mazz.pipeline.draft import MissingSenderAddress, render_body
+from mazz.pipeline.draft import MissingSenderAddress, render_body, split_body
 from mazz.pipeline.mailbox import (
     MailboxUnavailable,
     NoMailboxConfigured,
@@ -199,6 +199,12 @@ def _detail_context(
         "can_approve": draft is not None and is_approvable(draft),
         "send_state": _send_state(session, lead),
         "user": user,
+        # The body with the compliance footer stripped, for the edit textarea.
+        # Computed with `split_body()` -- the same helper `render_body()` /
+        # `verify` use -- rather than a hardcoded copy of `FOOTER_SEPARATOR`,
+        # so the textarea can never drift from what actually delimits the
+        # footer. See the module docstring's bug note.
+        "editable_body": split_body(draft.body)[0] if draft is not None else "",
     }
 
 
@@ -257,11 +263,49 @@ async def lead_detail(
     return templates.TemplateResponse(request, "lead_detail.html", context)
 
 
-def _draft_panel_response(request: Request, session: Session, lead_id: int, user: str, *, status_code: int = 200):
+def _panel_template_name(request: Request) -> str:
+    """Which partial renders the draft + actions, for this request.
+
+    Approve/reject/edit are one set of routes shared by two screens: the
+    original single-column `/leads/{id}` page (target `#draft-panel`) and the
+    two-pane `/review` screen (target `#review-panel`). htmx sends the
+    target element's id as the `HX-Target` request header, so the same route
+    can answer with the partial that actually matches what asked for it,
+    without either screen needing its own copy of this business logic.
+    """
+
+    if request.headers.get("HX-Target") == "review-panel":
+        return "partials/review_panel.html"
+    return "partials/draft_panel.html"
+
+
+def _draft_panel_response(
+    request: Request,
+    session: Session,
+    lead_id: int,
+    user: str,
+    *,
+    status_code: int = 200,
+    error: str | None = None,
+):
+    """Render the panel for one lead, optionally carrying a visible error.
+
+    ``error`` is how a refused action is surfaced. htmx 1.9 does not swap a
+    non-2xx response into the DOM, so a route that raised `HTTPException` for
+    an ordinary, expected refusal (already sent, not approvable) rendered
+    NOTHING in the browser -- the operator clicked Approve and saw no
+    feedback at all. Returning the panel itself, with ``status_code`` still
+    set to the refusal code and an error banner explaining why, keeps the
+    refusal visible without weakening it: the status code is still there for
+    anything that inspects the API contract (tests included), and the
+    server-side check that produced it has not moved or softened.
+    """
+
     templates = _templates(request)
     context = _detail_context(request, session, lead_id, user)
+    context["error"] = error
     return templates.TemplateResponse(
-        request, "partials/draft_panel.html", context, status_code=status_code
+        request, _panel_template_name(request), context, status_code=status_code
     )
 
 
@@ -296,9 +340,17 @@ async def approve_lead(
         raise HTTPException(status_code=404, detail="lead not found")
 
     if lead.status == LeadStatus.SENT:
-        raise HTTPException(
+        # Refused, not silently ignored -- but not a bare HTTPException either.
+        # See `_draft_panel_response`'s docstring: htmx will not swap a
+        # non-2xx response, so the refusal has to come back as the panel
+        # itself (still carrying the 409) or the operator sees nothing.
+        return _draft_panel_response(
+            request,
+            session,
+            lead_id,
+            user,
             status_code=409,
-            detail=(
+            error=(
                 f"lead {lead_id} has already been sent. Approving again would "
                 "email the same person the same thing twice."
             ),
@@ -309,9 +361,16 @@ async def approve_lead(
         raise HTTPException(status_code=404, detail="lead has no draft to approve")
 
     if not is_approvable(draft):
-        raise HTTPException(
+        # THE control (see module docstring): a draft that is not PASSED is
+        # refused here, in the route, regardless of what the button looked
+        # like. Visible, not just server-enforced -- see the docstring above.
+        return _draft_panel_response(
+            request,
+            session,
+            lead_id,
+            user,
             status_code=409,
-            detail=(
+            error=(
                 f"draft {draft.id} is not approvable "
                 f"(verification_status={draft.verification_status.value}); "
                 "a failed or pending draft can never be sent. "
@@ -405,7 +464,9 @@ async def edit_draft(
     try:
         body = render_body(body_text, lead)
     except MissingSenderAddress as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from None
+        return _draft_panel_response(
+            request, session, lead_id, user, status_code=400, error=str(exc)
+        )
 
     draft.subject = subject
     draft.body = body
