@@ -177,17 +177,71 @@ control that makes every other guarantee mean something.
 
 ## 6. Demo script
 
-A safe run-through. **Sending is off** (`EMAIL_SENDER=stub`) — real MIME is
-written to a file and nothing touches the network, so nothing can leave by
-accident during the meeting.
+### Before he arrives
+
+```bash
+.venv/bin/alembic upgrade head          # already done, safe to repeat
+.venv/bin/python scripts/seed_client_demo.py
+.venv/bin/uvicorn mazz.web.app:app --reload
+```
+
+The seed is **additive** — it does not reset the database, so the mailbox
+roster survives. It loads the SearchSiteMarketing campaign, eight law-firm
+leads, and runs them through the pipeline.
+
+**Two things to fix or explain before showing the dashboard:**
+
+1. **A leftover demo mailbox, `dana@outreach-northwind.com`, is the only
+   `active` one.** It is fake seed data, and it is currently supplying all the
+   capacity the dashboard reports ("Mailboxes active: 1 of 5", "30 of 30
+   available") while his four real ones sit paused. Either pause it on
+   `/mailboxes` before the meeting, or be ready to explain it.
+2. **"Cost per usable lead" shows nothing, and that is the good news.** The
+   panel is hidden because there is no measured AI spend to divide — email 1
+   is a fixed template costing zero tokens. Worth saying out loud: the metric
+   he was quoted has no numerator on the cold path any more.
+
+### What the seeded data deliberately shows
+
+Not eight happy leads — a demo where everything succeeds shows none of the
+controls he is paying for:
+
+| Leads | Outcome | What it demonstrates |
+|---|---|---|
+| 5 law firms | drafted, verification **passed** | the normal path |
+| Krieger Kim | `no_angle`, **no draft** | site never says what the business is — the vertical gate |
+| Konta Georges | `no_angle`, **no draft** | site says it is not taking new clients |
+| Jason Goldman Law | **refused at ingest** | already on the do-not-contact list |
+
+### The run-through
+
+**Sending is off** (`EMAIL_SENDER=stub`) — real MIME is written to a file and
+nothing touches the network, so nothing can leave by accident.
 
 1. **Import** — drop his spreadsheet on `/leads/import`, show accepted vs rejected per row
 2. **Review** — `/review`, two panes: list left, email right. Search, click through a few
-3. **Show a hold** — edit a body to add "we got them 200 new cases", save, watch it refuse and say why
-4. **Approve** — the same lead, unedited
-5. **Outbox** — `/outbox`, show the roster's remaining capacity, press Send on one message
-6. **Dashboard** — `/dashboard`, cost per usable lead, hold rate, cache effectiveness
-7. **Mailboxes** — `/mailboxes`, his four, paused, and why
+3. **Show a refusal** — open Krieger Kim, `no_angle` with no draft, and explain why that is the product working
+4. **Show a hold** — edit a body to add "we got them 200 new cases", save, watch it refuse and say why
+5. **Approve** — the same lead, unedited. Note that nothing is queued yet
+6. **Outbox** — `/outbox`, roster capacity, press Send on one message
+7. **Dashboard** — `/dashboard`, hold rate, sending, cache effectiveness
+8. **Mailboxes** — `/mailboxes`, his four, paused, and why
+
+### The email it produces
+
+> Hey Louis,
+>
+> Quick question — is Fasulo Braverman currently looking to bring in more clients?
+>
+> We help law firms generate qualified client opportunities through search marketing.
+>
+> Worth sending over a little more info?
+
+Compare to his Smartlead screenshot: same sentence, same shape. The missing
+piece is the proof-point line ("One recent client saw 50+…"), which is absent
+**because the proof point is seeded inactive with placeholder text**. That is
+§1.2 — get the real claim and the real client name, add it on the campaign
+screen, and the sentence appears.
 
 ---
 
