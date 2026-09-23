@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+{% block title %}Import leads{% endblock %}
+
+{% block content %}
+<h1>Import leads</h1>
+<p class="lede">
+  Upload a spreadsheet or CSV of cold-email leads. Every row is reported back —
+  what was created, what was already known, and what was refused and why.
+</p>
+
+{% if error %}
+<div class="banner danger">
+  <strong>Import failed.</strong> {{ error }}
+</div>
+{% endif %}
+
+<section class="dash-panel">
+  <form method="post" action="/leads/import" enctype="multipart/form-data" class="entity-form import-form">
+    <label>
+      Spreadsheet or CSV
+      <input type="file" name="file" required
+             accept=".csv,.xlsx,.xlsm,.xls,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
+    </label>
+    <p class="hint">
+      Accepted: {{ accepted_suffixes | join(", ") }}. The first sheet is used.
+      A title row or blank rows above the headers are skipped automatically.
+    </p>
+    <button type="submit">Import</button>
+  </form>
+</section>
+
+<section class="dash-panel">
+  <h2>What the columns need to be</h2>
+  <p>
+    Only two are required: <strong>a name</strong> and <strong>an email</strong>.
+    Everything else sharpens the research, and nothing breaks without it.
+  </p>
+  <p>
+    <strong>Header spelling does not matter.</strong> <code>Email</code>,
+    <code>Work Email</code>, <code>Email Address</code> and
+    <code>Business Email</code> all mean the same thing, so an export does not
+    need re-heading. Columns we do not recognise are ignored, not rejected.
+  </p>
+  <p class="muted">Recognised fields: {{ lead_columns | join(" · ") }}</p>
+  <p><a href="/leads/import/template.csv">Download a blank template</a></p>
+</section>
+
+{% if report %}
+<section class="dash-panel import-report">
+  <h2>Result{% if filename %} — <span class="muted">{{ filename }}</span>{% endif %}</h2>
+
+  <ul class="import-tally">
+    <li><span class="count">{{ report.created | length }}</span> created</li>
+    <li><span class="count">{{ report.updated | length }}</span> updated</li>
+    <li><span class="count">{{ report.suppressed | length }}</span> suppressed</li>
+    <li><span class="count">{{ report.invalid | length }}</span> invalid</li>
+    <li><span class="count">{{ report.errored | length }}</span> errored</li>
+    <li><span class="count">{{ report.total }}</span> rows total</li>
+  </ul>
+
+  {% if report.job_ids %}
+  <p class="banner info">
+    {{ report.job_ids | length }} research job{{ "" if report.job_ids | length == 1 else "s" }}
+    queued. Nothing is sent by importing — drafts appear on
+    <a href="/review">the review queue</a> once research and verification finish.
+  </p>
+  {% endif %}
+
+  {% if report.unrouted %}
+  <p class="banner warn">
+    {{ report.unrouted | length }} lead{{ "" if report.unrouted | length == 1 else "s" }}
+    could not be matched to a campaign and will use the shipped defaults. If you
+    expected your campaign's settings to apply, they are not applying to these.
+  </p>
+  {% endif %}
+
+  {% if report.suppressed %}
+  <h3>Suppressed — on the do-not-contact list</h3>
+  <p class="muted">Refused before entering the queue. This is the gate working.</p>
+  <table class="lead-table">
+    <thead><tr><th>Row</th><th>Email</th><th>Why</th></tr></thead>
+    <tbody>
+      {% for r in report.suppressed %}
+      <tr><td>{{ r.row_number }}</td><td>{{ r.email or "—" }}</td><td>{{ r.reason }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {% if report.invalid %}
+  <h3>Invalid — the row could not be used</h3>
+  <table class="lead-table">
+    <thead><tr><th>Row</th><th>Email</th><th>Why</th></tr></thead>
+    <tbody>
+      {% for r in report.invalid %}
+      <tr><td>{{ r.row_number }}</td><td>{{ r.email or "—" }}</td><td>{{ r.reason }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {% if report.errored %}
+  <h3>Errored</h3>
+  <table class="lead-table">
+    <thead><tr><th>Row</th><th>Email</th><th>Why</th></tr></thead>
+    <tbody>
+      {% for r in report.errored %}
+      <tr><td>{{ r.row_number }}</td><td>{{ r.email or "—" }}</td><td>{{ r.reason }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {% if report.accepted %}
+  <h3>Accepted</h3>
+  <table class="lead-table">
+    <thead><tr><th>Row</th><th>Email</th><th>Company domain</th><th>State</th></tr></thead>
+    <tbody>
+      {% for o in report.accepted %}
+      <tr>
+        <td>{{ o.row_number }}</td>
+        <td><a href="/review?lead_id={{ o.lead_id }}">{{ o.email }}</a></td>
+        <td>{{ o.company_domain or "—" }}</td>
+        <td>
+          <span class="verification-tag {{ 'passed' if o.created else 'pending' }}">
+            {{ "created" if o.created else "updated" }}
+          </span>
+          {% if not o.routed %}<span class="muted">no campaign</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}
