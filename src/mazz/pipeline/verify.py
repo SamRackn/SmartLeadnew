@@ -145,6 +145,7 @@ from mazz.schemas import Fact
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from sqlalchemy.orm import Session
 
+    from mazz.models import ProofPoint
     from mazz.pipeline.queue import JobContext
 
 log = logging.getLogger(__name__)
@@ -164,6 +165,9 @@ __all__ = [
     "extract_claims",
     "verify_content",
     "verify_draft",
+    "cited_proof_points",
+    "campaign_copy_for",
+    "CampaignCopy",
     "apply_verification",
     "is_approvable",
     "latest_draft",
@@ -569,14 +573,77 @@ def _corpus_tokens(text: str) -> tuple[set[str], set[str]]:
     return words, numbers
 
 
+@dataclass(frozen=True, slots=True)
+class CampaignCopy:
+    """The two sentences email 1 takes from the campaign, and their warrant.
+
+    Email 1 is not free prose, so its claim surface is known exactly rather
+    than inferred from the words. Two pieces of it come from the campaign row
+    instead of from research, and they are verified on opposite principles:
+
+    ``offer_line`` -- "fill empty lanes through search marketing" -- is a
+    statement about the SENDER's own business, written by the client. It makes
+    no assertion about the recipient, so it is admitted as declared sender copy
+    with its provenance recorded. There is nothing for us to check: the client
+    is the authority on what he sells.
+
+    ``vertical`` -- "logistics companies" -- IS an assertion about the
+    recipient, and the only one in the message. It is admitted ONLY when
+    qualification, re-derived here from the cache, still confirms it from the
+    prospect's own pages. That is why this carries the verdict rather than just
+    the word.
+
+    Before this record existed, the vertical noun was passing verification by
+    accident: the sentence containing it read as sender voice ("We help ...")
+    and was skipped wholesale, so the one claim in the email about the
+    recipient's business was the one claim nothing checked. It also broke the
+    other way — a vertical noun overlapping the prospect's own name ("Northwind
+    Logistics", "logistics companies") stopped looking like sender voice and
+    held the draft over ordinary words. Both of those are the same bug: a
+    structural property of the copy being guessed at from its surface.
+    """
+
+    vertical: str
+    offer_line: str
+    qualified: bool
+    rationale: str = ""
+    #: True when `vertical` is the generic phrase ("businesses like yours")
+    #: rather than a claim. Nothing about the checking changes -- the phrase
+    #: still has to be accounted for, and the lead still has to have qualified
+    #: on intake and disqualifiers -- but the reviewer is told plainly that no
+    #: vertical was confirmed, instead of being shown a confirmation that never
+    #: happened.
+    is_generic: bool = False
+
+
 def build_grounding(
     lead: Lead,
     cited_ids: Sequence[str],
     available_facts: Iterable[Fact],
+    proof_points: Iterable["ProofPoint"] = (),
+    campaign_copy: "CampaignCopy | None" = None,
 ) -> Grounding:
-    """Resolve citations into an evidence corpus, failing closed on every gap."""
+    """Resolve citations into an evidence corpus, failing closed on every gap.
+
+    Two citation namespaces, because a draft rests on two kinds of evidence.
+
+    A bare id is a fact in `research_cache`: something retrieved from the
+    PROSPECT's site, resolved by id and re-read here rather than trusted from
+    the draft row.
+
+    A ``proof_point:<id>`` citation is the SENDER's own evidence — the one
+    statistic in the client's copy is about his client, not the recipient's
+    business. It gets a namespace rather than a free pass: an unattributed or
+    retired number fails exactly as an unresolvable fact id does. What makes it
+    traceable is not a public URL (there is none) but a row naming whose result
+    it was and where the underlying report lives, which is what a recipient
+    asking "says who?" is actually owed.
+    """
+
+    from mazz.pipeline.outreach import PROOF_CITATION_PREFIX, proof_citation_id
 
     by_id: dict[str, Fact] = {f.id: f for f in available_facts}
+    proofs_by_citation = {proof_citation_id(p.id): p for p in proof_points}
     words: set[str] = set()
     numbers: set[str] = set()
     resolved: dict[str, str] = {}
@@ -598,6 +665,39 @@ def build_grounding(
         if fact_id in seen:
             continue
         seen.add(fact_id)
+
+        if fact_id.startswith(PROOF_CITATION_PREFIX):
+            proof = proofs_by_citation.get(fact_id)
+            if proof is None:
+                problems.append(
+                    f"cited proof point {fact_id!r} is not an active proof point "
+                    "on this lead's campaign — the sender's own claim resolves "
+                    "to nothing"
+                )
+                continue
+            attribution = (proof.client_name or "").strip()
+            if not attribution:
+                # Unreachable through the UI and the CHECK constraint; kept
+                # because an unattributed statistic is the exact shape of claim
+                # the proof_points table exists to prevent, and a control that
+                # only holds where it is convenient is not a control.
+                problems.append(
+                    f"cited proof point {fact_id!r} names no client, so its "
+                    "claim is unattributable; a draft may not rest on it"
+                )
+                continue
+
+            blob = proof.claim_text or ""
+            pw, pn = _corpus_tokens(blob)
+            words |= pw
+            numbers |= pn
+            segments.append(blob)
+            for _, _, parsed, _ in _iter_dates(blob):
+                dates.add(parsed)
+            resolved[fact_id] = f"proof point <{attribution}>"
+            sources.append(f"proof point {proof.id} (sender's own result, {attribution})")
+            evidence.append(f"[{fact_id} | proof_point | {attribution}] {blob}")
+            continue
 
         fact = by_id.get(fact_id)
         if fact is None:
@@ -638,6 +738,53 @@ def build_grounding(
             dates.add(parsed)
         sources.append(f"lead {lead.id} notes field")
         evidence.append(f"[lead notes] {lead.notes.strip()}")
+
+    if campaign_copy is not None:
+        if not campaign_copy.qualified:
+            # The draft calls this business something the cache no longer
+            # supports. Facts are re-read here, so a cache that changed under a
+            # drafted lead is caught at exactly this point — which is the
+            # whole reason verification re-derives rather than trusting the
+            # draft row.
+            if campaign_copy.is_generic:
+                # No vertical was claimed, so this is never a vertical failure
+                # -- it is intake or a disqualifier, and saying "calls this
+                # company 'businesses like yours'" would send a reviewer
+                # looking for a claim that was never made.
+                problems.append(
+                    "this lead no longer qualifies, so the draft must not be "
+                    f"sent: {campaign_copy.rationale}"
+                )
+            else:
+                problems.append(
+                    "the draft calls this company "
+                    f"{campaign_copy.vertical!r}, and qualification no longer "
+                    f"confirms that from its own pages: {campaign_copy.rationale}"
+                )
+        else:
+            for text_, label in (
+                (campaign_copy.offer_line, "campaign offer line (the sender's own words)"),
+                (
+                    campaign_copy.vertical,
+                    "generic vertical (claims nothing about the recipient)"
+                    if campaign_copy.is_generic
+                    else f"vertical, {campaign_copy.rationale}",
+                ),
+            ):
+                cleaned = (text_ or "").strip()
+                if not cleaned:
+                    continue
+                cw, cn = _corpus_tokens(cleaned)
+                words |= cw
+                # Deliberately NOT `numbers |= cn`. An operator typing a
+                # statistic into the offer line would otherwise have invented a
+                # number with no attribution and no date behind it — that is
+                # what `proof_points` is for, and it is the one field in this
+                # system that may carry a digit into the copy.
+                del cn
+                segments.append(cleaned)
+                sources.append(f"{label}: {cleaned!r}")
+                evidence.append(f"[campaign copy | {label}] {cleaned}")
 
     identity = _lead_identity_text(lead)
     iw, inum = _corpus_tokens(identity)
@@ -1319,6 +1466,8 @@ def verify_content(
     body: str,
     signals_used: Sequence[str],
     available_facts: Iterable[Fact],
+    proof_points: Iterable["ProofPoint"] = (),
+    campaign_copy: "CampaignCopy | None" = None,
     judge: Judge | None = None,
 ) -> VerificationResult:
     """Verify rendered copy against the cache. Pure: no DB writes, no clock.
@@ -1333,7 +1482,9 @@ def verify_content(
     """
 
     facts = list(available_facts)
-    grounding = build_grounding(lead, list(signals_used), facts)
+    grounding = build_grounding(
+        lead, list(signals_used), facts, list(proof_points), campaign_copy
+    )
 
     message, footer = split_body(body or "")
     problems = list(grounding.problems)
@@ -1438,7 +1589,15 @@ def verify_draft(
     available_facts: Iterable[Fact] | None = None,
     judge: Judge | None = None,
 ) -> VerificationResult:
-    """Verify a persisted draft against this lead's cached research."""
+    """Verify a persisted draft against this lead's cached research.
+
+    Both evidence corpora are re-read from the database here, never taken from
+    the draft row: the research facts by id out of `research_cache`, and the
+    cited proof points out of `proof_points`, filtered to the lead's own
+    campaign and to rows that are still active. A statistic the client retired
+    yesterday stops verifying today, which is the point of the `active` flag
+    and the reason this resolution does not happen at draft time.
+    """
 
     facts = list(available_facts) if available_facts is not None else facts_for_lead(session, lead)
     return verify_content(
@@ -1447,8 +1606,84 @@ def verify_draft(
         body=draft.body or "",
         signals_used=list(draft.signals_used or []),
         available_facts=facts,
+        proof_points=cited_proof_points(session, lead, draft.signals_used or []),
+        campaign_copy=campaign_copy_for(session, lead, facts),
         judge=judge,
     )
+
+
+def campaign_copy_for(
+    session: "Session", lead: Lead, facts: Sequence[Fact]
+) -> "CampaignCopy | None":
+    """Re-derive the campaign's copy and its warrant for this lead.
+
+    Returns None for a lead with no campaign, or a campaign with no vertical:
+    there is no offer sentence to account for, so there is nothing to admit and
+    nothing to refuse. A draft that nonetheless contains such a sentence simply
+    fails on its words, which is the correct outcome.
+
+    Qualification is re-run HERE against facts read fresh from the cache, not
+    taken from the drafting step. A research row that changed, or a campaign
+    vocabulary an operator narrowed since the draft was written, both land as a
+    failed verification rather than as a message that silently stopped being
+    true.
+    """
+
+    from mazz.models import Campaign
+    from mazz.pipeline.outreach import effective_vertical, vertical_is_generic
+    from mazz.pipeline.qualify import config_for_campaign, qualify_facts
+
+    if lead.campaign_id is None:
+        return None
+    campaign = session.get(Campaign, lead.campaign_id)
+    if campaign is None:
+        return None
+
+    vertical = effective_vertical(campaign)
+    if not vertical:
+        return None
+
+    # The SAME config the composer's side derives, from the same function. If
+    # these were built separately, a draft could be written believing no
+    # vertical was claimed and checked believing one was.
+    result = qualify_facts(facts, config=config_for_campaign(campaign))
+    return CampaignCopy(
+        vertical=vertical,
+        offer_line=(campaign.offer_line or "").strip(),
+        qualified=result.qualified,
+        rationale=result.rationale,
+        is_generic=vertical_is_generic(campaign),
+    )
+
+
+def cited_proof_points(
+    session: "Session", lead: Lead, signals_used: Sequence[str]
+) -> list["ProofPoint"]:
+    """The active proof points on this lead's campaign that the draft cites.
+
+    Scoped to the campaign on purpose. A citation that resolves to another
+    client's proof point would be one agency-client's copy standing on another
+    one's results, so a cross-campaign id is not found here and fails as
+    unresolvable rather than quietly working.
+    """
+
+    from mazz.models import ProofPoint
+    from mazz.pipeline.outreach import proof_point_id_from_citation
+
+    wanted = {
+        pid
+        for pid in (proof_point_id_from_citation(c) for c in signals_used)
+        if pid is not None
+    }
+    if not wanted or lead.campaign_id is None:
+        return []
+
+    stmt = select(ProofPoint).where(
+        ProofPoint.id.in_(wanted),
+        ProofPoint.campaign_id == lead.campaign_id,
+        ProofPoint.active.is_(True),
+    )
+    return list(session.execute(stmt).scalars())
 
 
 def apply_verification(

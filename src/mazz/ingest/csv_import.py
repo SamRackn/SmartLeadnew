@@ -68,7 +68,7 @@ __all__ = [
 
 
 #: Statuses a re-ingest will NOT drag backwards. Re-uploading a spreadsheet
-#: that still contains someone already approved or already pushed to Smartlead
+#: that still contains someone already approved or already sent
 #: updates his details but must not reset him to 'researching' and generate a
 #: second draft for copy that has already gone out.
 TERMINAL_STATUSES = frozenset({LeadStatus.APPROVED, LeadStatus.SENT})

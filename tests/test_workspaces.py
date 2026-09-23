@@ -172,7 +172,7 @@ def test_campaign_id_is_nullable_so_existing_leads_keep_working(session):
     """Every lead in the database predates campaigns. NULL is a valid steady
     state, not a migration to finish."""
 
-    lead = h.make_lead(session)
+    lead = h.make_lead(session, campaign_id=None)
     assert lead.campaign_id is None
     assert lead.campaign is None
 

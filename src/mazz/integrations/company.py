@@ -54,6 +54,7 @@ from mazz.integrations._brightdata import (
 )
 from mazz.integrations._html import (
     extract_dated_items,
+    extract_headings,
     extract_job_items,
     extract_meta_description,
     extract_sitemap_urls,
@@ -89,6 +90,8 @@ from mazz.integrations.base import (
 
 __all__ = [
     "PAGE_KINDS",
+    "QUALIFICATION_PAGE_KINDS",
+    "EVENT_PAGE_KINDS",
     "PAGE_KIND_TO_FACT_KIND",
     "UNCONFIRMED_JOB_POSTING_KIND",
     "UNCONFIRMED_DATED_CONTENT_KIND",
@@ -105,13 +108,33 @@ __all__ = [
 
 STUB_PROVIDER = "company-stub"
 
-PAGE_KINDS = ("homepage", "careers", "blog", "changelog", "press")
+#: Pages an adapter may emit. The first three are the qualification pages --
+#: where a business says what it is and invites new work -- and they are what
+#: the cold path actually reads (`pipeline.qualify`). The rest belong to the
+#: retired event-research stack and are kept so that cached payloads and
+#: fixtures holding them still parse.
+PAGE_KINDS = ("homepage", "services", "contact", "careers", "blog", "changelog", "press")
+
+#: Pages fetched on the cold path, in the order they are tried. Two secondary
+#: requests per domain, cached by domain, versus the six-to-eight the event
+#: stack made -- and the two are the ones the copy depends on.
+QUALIFICATION_PAGE_KINDS = ("services", "contact")
+
+#: The event pages. Not fetched by default any more: the ICP is small
+#: professional-services firms that publish none of them, so four requests per
+#: domain were buying facts nothing reads. The extractors behind them are still
+#: here and still tested -- pass ``secondary_page_kinds=EVENT_PAGE_KINDS`` to
+#: exercise them -- because deep research on a lead that REPLIED is a different
+#: economic proposition from deep research on a cold list.
+EVENT_PAGE_KINDS = ("careers", "blog", "changelog", "press")
 
 # Careers-page ITEMS are individual reqs, so they map to JOB_POSTING (the
 # highest-value signal downstream), not to CAREERS_PAGE, which describes the page
 # as a whole and carries no reason to reach out on its own.
 PAGE_KIND_TO_FACT_KIND: Mapping[str, str] = {
     "homepage": FactKind.HOMEPAGE.value,
+    "services": FactKind.SERVICES_PAGE.value,
+    "contact": FactKind.CONTACT_PAGE.value,
     "careers": FactKind.JOB_POSTING.value,
     "blog": FactKind.BLOG_POST.value,
     "changelog": FactKind.CHANGELOG.value,
@@ -482,8 +505,19 @@ class LiveCompanyAdapter(CompanyAdapter):
         rate_limit_seconds: float = 1.0,
         request_timeout: float = 10.0,
         apply_link_probe_limit: int = 8,
+        secondary_page_kinds: "Sequence[str]" = QUALIFICATION_PAGE_KINDS,
     ) -> None:
         super().__init__(retry_policy=retry_policy, sleep=sleep)
+        # Which pages beyond the homepage to fetch. Defaults to the
+        # qualification pages -- the only ones the cold path reads. The event
+        # kinds remain reachable for deep research on a lead that replied,
+        # where the economics are completely different.
+        unknown = [k for k in secondary_page_kinds if k not in PAGE_KINDS]
+        if unknown:
+            raise ValueError(
+                f"unknown secondary page kinds {unknown}; expected some of {PAGE_KINDS}"
+            )
+        self._secondary_page_kinds = tuple(secondary_page_kinds)
         # Recall recovery for careers items that are STILL "url_shape_only"
         # after every free/cheap corroboration (JSON-LD, ATS host, href
         # keyword, title vocabulary): fetch the candidate's OWN page and look
@@ -645,7 +679,11 @@ class LiveCompanyAdapter(CompanyAdapter):
         blocked_pages: list[str] = []
         skipped_pages: list[str] = []
         discovered = find_page_links(homepage_html, homepage_url)
-        for kind in ("careers", "blog", "changelog", "press"):
+        # The qualification pages, and by default only those -- see
+        # `QUALIFICATION_PAGE_KINDS` and `EVENT_PAGE_KINDS`. `PAGE_KINDS` still
+        # accepts every kind, so a cached payload or a fixture holding event
+        # pages parses unchanged.
+        for kind in self._secondary_page_kinds:
             page = self._fetch_secondary_page(
                 kind,
                 discovered.get(kind),
@@ -667,10 +705,65 @@ class LiveCompanyAdapter(CompanyAdapter):
         }
 
     def _homepage_items(self, html: str, url: str) -> list[dict[str, Any]]:
-        description = extract_meta_description(html) or extract_title(html)
-        if not description:
-            return []
-        return [{"key": "homepage", "url": url, "text": description, "published_at": None}]
+        """Title, meta description and headings -- each as its own item.
+
+        The meta description alone was enough when the homepage was only
+        context around an event fact. It is not enough to confirm a vertical:
+        plenty of small firms ship a homepage with no meta tag at all, while
+        the `<h1>` says "Attorneys at Law". Each string is a separate item so
+        that a draft cites the exact line that confirmed the vertical rather
+        than a blob of the whole page.
+        """
+
+        items: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        candidates = [
+            ("homepage", extract_meta_description(html)),
+            ("homepage-title", extract_title(html)),
+        ]
+        candidates += [
+            (f"homepage-heading-{i}", text)
+            for i, text in enumerate(extract_headings(html))
+        ]
+        for key, text in candidates:
+            cleaned = (text or "").strip()
+            if not cleaned or cleaned.lower() in seen:
+                continue
+            seen.add(cleaned.lower())
+            items.append({"key": key, "url": url, "text": cleaned, "published_at": None})
+        return items
+
+    def _qualification_items(
+        self, html: str, page_url: str, kind: str
+    ) -> list[dict[str, Any]]:
+        """Items for a services or contact page: its title and its headings.
+
+        No dates, no provenance demotion, no corroboration hop. Those controls
+        exist because a job req and a dated post make a claim about WHEN
+        something happened, and a misread one puts a false event in the cache.
+        A heading on a practice-areas page makes no such claim -- it is the
+        business naming what it does, and the words are carried verbatim into
+        the fact, so a reviewer sees exactly the line we read.
+        """
+
+        items: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        title = (extract_title(html) or "").strip()
+        texts = ([title] if title else []) + extract_headings(html)
+        for index, text in enumerate(texts):
+            cleaned = text.strip()
+            if not cleaned or cleaned.lower() in seen:
+                continue
+            seen.add(cleaned.lower())
+            items.append(
+                {
+                    "key": f"{kind}-{index}",
+                    "url": page_url,
+                    "text": cleaned,
+                    "published_at": None,
+                }
+            )
+        return items
 
     def _fetch_secondary_page(
         self,
@@ -682,7 +775,7 @@ class LiveCompanyAdapter(CompanyAdapter):
         skipped: list[str],
         feed_dates: "Mapping[str, str]",
     ) -> dict[str, Any] | None:
-        """Fetch one of careers/blog/changelog/press. Never raises: a page
+        """Fetch one secondary page. Never raises: a page
         that is blocked, missing, or errors is recorded and skipped -- only
         the homepage itself is load-bearing enough to fail the whole company.
         """
@@ -717,7 +810,9 @@ class LiveCompanyAdapter(CompanyAdapter):
             return None
 
         html = resp.text
-        if kind == "careers":
+        if kind in QUALIFICATION_PAGE_KINDS:
+            items = self._qualification_items(html, page_url, kind)
+        elif kind == "careers":
             items = extract_job_items(html, page_url)
             if not items:
                 ats_link = find_external_ats_link(html, page_url)

@@ -61,7 +61,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from mazz.config import get_settings
 from mazz.integrations.base import setting
-from mazz.models import Draft, Lead, LeadStatus, VerificationStatus
+from mazz.models import Campaign, Draft, Lead, LeadStatus, VerificationStatus
 from mazz.pipeline.score import (
     ScoredFact,
     ScoreResult,
@@ -69,10 +69,13 @@ from mazz.pipeline.score import (
     SignalTier,
     score_lead,
 )
+from mazz.pipeline.outreach import OfferIncomplete
 from mazz.schemas import Fact, FactKind
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from sqlalchemy.orm import Session
+
+    from mazz.pipeline.qualify import QualificationResult
 
     from mazz.pipeline.queue import JobContext
 
@@ -98,6 +101,7 @@ __all__ = [
     "unsubscribe_url",
     "build_request",
     "draft_for_lead",
+    "outreach_for_lead",
     "persist_draft",
     "handle_draft",
 ]
@@ -301,13 +305,21 @@ class DraftOutcome:
 
     ``content is None`` means no angle. That is a successful, meaningful result
     -- not an error and not a retry -- and it maps to `no_angle`.
+
+    Exactly one of ``qualification`` and ``score_result`` is set, and which one
+    says which path produced this outcome. ``qualification`` is the cold path
+    every lead takes; ``score_result`` belongs to the retired event-research
+    stack, kept importable while it is removed. Both are optional here rather
+    than one required field because a caller that needs the verdict should have
+    to say which kind of verdict it means.
     """
 
     lead_status: LeadStatus
-    score_result: ScoreResult
+    score_result: ScoreResult | None = None
     content: DraftContent | None = None
     body: str | None = None
     reason: str = ""
+    qualification: "QualificationResult | None" = None
 
     @property
     def drafted(self) -> bool:
@@ -598,6 +610,79 @@ def persist_draft(session: "Session", lead: Lead, outcome: DraftOutcome) -> Draf
     return draft
 
 
+def outreach_for_lead(
+    session: "Session",
+    lead: Lead,
+    *,
+    qualification: "QualificationResult | None" = None,
+) -> DraftOutcome:
+    """THE COLD PATH. Qualify, then render email 1. Writes nothing.
+
+    No model, no tokens, no network — see `pipeline.outreach` for why the copy
+    the client actually sends does not need one.
+
+    ``qualification=None`` re-derives the verdict from this lead's campaign
+    vocabulary. The `qualify` stage already reached one a moment ago and the
+    result is deterministic over the same cache, so re-deriving is cheap and
+    keeps drafting callable on its own (the review app's redraft button) without
+    a scoring argument that could disagree with what the stage decided.
+
+    An incomplete offer RAISES rather than returning `no_angle`. A campaign with
+    no vertical noun is an unfinished setup, and hiding it inside the number
+    that measures how many leads had nothing to say is how it would stay
+    unfinished.
+    """
+
+    from mazz.pipeline.outreach import (
+        build_outreach_request,
+        compose_outreach,
+        offer_for_campaign,
+    )
+    from mazz.pipeline.qualify import qualify_lead
+
+    result = qualification if qualification is not None else qualify_lead(session, lead)
+
+    if not result.qualified:
+        log.info("lead %s: declining to draft — %s", lead.id, result.rationale)
+        return DraftOutcome(
+            lead_status=LeadStatus.NO_ANGLE,
+            qualification=result,
+            reason=result.rationale,
+        )
+
+    campaign = session.get(Campaign, lead.campaign_id) if lead.campaign_id else None
+    if campaign is None:
+        # Unreachable in practice: a lead with no campaign has no vocabulary,
+        # so `qualify` cannot have qualified it. Refuse loudly anyway rather
+        # than reach for a default offer — there is no such thing.
+        raise OfferIncomplete(
+            f"lead {lead.id} qualified with no campaign attached; there is no "
+            "offer to write and no default that would not be a guess"
+        )
+
+    offer = offer_for_campaign(session, campaign)
+    request = build_outreach_request(lead, offer, result)
+    content = compose_outreach(request)
+
+    # The same check the composer's own structure already guarantees, kept
+    # because it is the contract rather than the implementation: a draft may
+    # cite only the evidence its request carried.
+    offered = set(request.citations())
+    stray = [cid for cid in content.signals_used if cid not in offered]
+    if stray:
+        raise ValueError(
+            f"composer cited ids that were not offered to it: {stray}"
+        )
+
+    return DraftOutcome(
+        lead_status=LeadStatus.RESEARCHING,
+        qualification=result,
+        content=content,
+        body=render_body(content.body_text, lead),
+        reason=result.rationale,
+    )
+
+
 def handle_draft(ctx: "JobContext") -> None:
     """Queue handler for ``jobs.kind == 'draft'``.
 
@@ -605,7 +690,7 @@ def handle_draft(ctx: "JobContext") -> None:
     lead has nothing to verify and is finished.
     """
 
-    outcome = draft_for_lead(ctx.session, ctx.lead)
+    outcome = outreach_for_lead(ctx.session, ctx.lead)
     draft = persist_draft(ctx.session, ctx.lead, outcome)
 
     if draft is None:

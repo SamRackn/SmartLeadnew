@@ -33,7 +33,15 @@ from sqlalchemy import text
 
 import pipeline_helpers as h
 from mazz.ingest.csv_import import import_lead, import_rows
-from mazz.models import Campaign, Job, Lead, LeadStatus, ResearchCache, Workspace
+from mazz.models import (
+    Campaign,
+    Job,
+    Lead,
+    LeadStatus,
+    Mailbox,
+    ResearchCache,
+    Workspace,
+)
 from mazz.pipeline.queue import JobContext, enqueue_job
 from mazz.pipeline.routing import (
     DEFAULT_ROUTING_POLICY,
@@ -333,14 +341,21 @@ def test_a_workspace_scoped_policy_ignores_other_clients_campaigns(session):
 
 
 # ==========================================================================
-# The mailbox slot is present and deliberately empty
+# The mailbox slot stays empty at INGEST, now that mailboxes exist
 # ==========================================================================
 
 
-def test_the_mailbox_arm_is_not_built_ahead(session):
-    """CLAUDE.md's triple is (campaign, segment, mailbox) and the third slot is
-    carried so the work-order-item-4 arm lands without a signature change. It
-    must be empty today, and there must be no table behind it."""
+def test_routing_does_not_pick_a_mailbox_at_ingest(session):
+    """CLAUDE.md's triple is (campaign, segment, mailbox). The mailboxes table
+    now exists, and routing still leaves the third slot empty — on purpose.
+
+    A mailbox choice is a fact about a moment: which accounts are active, what
+    they have already sent today, whose turn it is. Routing runs at ingest and
+    the lead may not clear human review for days, by which time that choice is
+    stale — the mailbox could be capped, warming, or disabled. So the selection
+    lives in `pipeline.mailbox.select_mailbox` and runs at send time, and the
+    relation stays on the MAILBOX row (``mailboxes.campaign_id``), never on the
+    lead or the campaign."""
 
     campaign = make_campaign(session)
     lead = h.make_lead(session, industry_specific="Third-Party Logistics")
@@ -349,12 +364,11 @@ def test_the_mailbox_arm_is_not_built_ahead(session):
     assert decision.campaign_id == campaign.id
     assert decision.mailbox_id is None
 
-    exists = session.execute(
-        text("SELECT to_regclass('public.mailboxes')")
-    ).scalar_one()
-    assert exists is None, "mailboxes is work-order item 4; do not build ahead"
     assert "mailbox_id" not in Lead.__table__.columns
     assert "mailbox_id" not in Campaign.__table__.columns
+    # The pin lives on the mailbox, which is what keeps
+    # one-campaign-per-mailbox reachable without a migration.
+    assert "campaign_id" in Mailbox.__table__.columns
 
 
 # ==========================================================================

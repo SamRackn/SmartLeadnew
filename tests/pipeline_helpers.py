@@ -25,7 +25,16 @@ from sqlalchemy.orm import Session
 from mazz.db import get_sessionmaker
 from mazz.integrations.company import StubCompanyAdapter
 from mazz.integrations.linkedin import StubLinkedInAdapter
-from mazz.models import Draft, Job, Lead, ResearchCache, SuppressionEntry
+from mazz.models import (
+    Campaign,
+    Draft,
+    Job,
+    Lead,
+    ProofPoint,
+    ResearchCache,
+    SuppressionEntry,
+    Workspace,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 SAMPLE_CSV = FIXTURES / "sample_leads.csv"
@@ -56,6 +65,7 @@ _TABLES = (
     "drafts",
     "draft_batches",
     "leads",
+    "proof_points",
     "campaigns",
     "workspaces",
     "research_cache",
@@ -158,8 +168,59 @@ def csv_row(**overrides: Any) -> dict[str, Any]:
     return row
 
 
+#: Vocabulary matching the qualification pages in the northwind fixture. The
+#: cold path cannot draft without one: a campaign with no `vertical_terms`
+#: qualifies nobody, by design (see `pipeline.qualify`).
+LOGISTICS_QUALIFICATION = {
+    "vertical_terms": ["logistics", "freight", "carrier", "shippers", "brokerage"],
+}
+
+
+def make_campaign(session: Session, **kwargs: Any) -> Campaign:
+    """A workspace + campaign complete enough to write email 1.
+
+    Complete means: a vertical noun for the copy, an offer line, a vocabulary
+    that confirms the vertical against the fixture's own pages, and one active
+    proof point. Leave any of those out and the pipeline correctly declines to
+    write, which is a different test.
+    """
+
+    workspace = Workspace(name="ClientRise Demo", slug=f"demo-{utcnow().timestamp()}")
+    session.add(workspace)
+    session.flush()
+
+    defaults: dict[str, Any] = {
+        "workspace_id": workspace.id,
+        "name": "Freight Demand",
+        "segment": "logistics",
+        "vertical": "logistics companies",
+        "offer_line": "fill empty lanes through search marketing",
+        "qualification_config": dict(LOGISTICS_QUALIFICATION),
+    }
+    defaults.update(kwargs)
+    campaign = Campaign(**defaults)
+    session.add(campaign)
+    session.flush()
+    session.add(
+        ProofPoint(
+            campaign_id=campaign.id,
+            claim_text="One recent client filled 30 empty lanes in a single month.",
+            client_name="Cedar Freight Co",
+            occurred_on=utcnow().date(),
+            source_note="TMS export, shared with permission",
+        )
+    )
+    session.flush()
+    return campaign
+
+
 def make_lead(session: Session, **kwargs: Any) -> Lead:
-    """Insert a lead directly, bypassing ingest (for queue/privacy tests)."""
+    """Insert a lead directly, bypassing ingest (for queue/privacy tests).
+
+    Unrouted by default, which is what most tests here want. A lead that has to
+    reach the DRAFTING stage needs a campaign complete enough to write email 1
+    -- pass ``campaign_id=make_campaign(session).id``, or use `make_drafting_lead`.
+    """
 
     defaults: dict[str, Any] = {
         "full_name": "Dana Whitfield",
@@ -174,6 +235,18 @@ def make_lead(session: Session, **kwargs: Any) -> Lead:
     session.add(lead)
     session.flush()
     return lead
+
+
+def make_drafting_lead(session: Session, **kwargs: Any) -> Lead:
+    """A lead that can actually reach `draft`: routed to a complete campaign.
+
+    The cold path declines to write for an unrouted lead, and correctly so --
+    with no campaign there is no vertical noun to put in "We help ___", so
+    there is no email. Tests that want the whole chain need this one.
+    """
+
+    kwargs.setdefault("campaign_id", make_campaign(session).id)
+    return make_lead(session, **kwargs)
 
 
 def make_draft(session: Session, lead: Lead, **kwargs: Any) -> Draft:

@@ -25,6 +25,7 @@ __all__ = [
     "extract_links",
     "extract_title",
     "extract_meta_description",
+    "extract_headings",
     "extract_time_tags",
     "find_page_links",
     "extract_job_items",
@@ -54,8 +55,12 @@ class Link:
         return f"Link(href={self.href!r}, text={self.text!r})"
 
 
+_HEADING_TAGS = frozenset({"h1", "h2", "h3"})
+
+
 class _Collector(HTMLParser):
-    """One pass: anchors (with source offsets), `<title>`, `<meta>`, `<time>`."""
+    """One pass: anchors (with source offsets), `<title>`, `<meta>`, `<time>`,
+    and h1/h2/h3 headings."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -64,7 +69,10 @@ class _Collector(HTMLParser):
         self.meta_description: str | None = None
         self.time_tags: list[tuple[str | None, str, int]] = []  # (datetime, text, pos)
         self.feed_links: list[tuple[str, str]] = []  # (href, type)
+        self.headings: list[str] = []
 
+        self._heading_tag: str | None = None
+        self._heading_parts: list[str] = []
         self._a_href: str | None = None
         self._a_text: list[str] = []
         self._a_start: int = 0
@@ -95,6 +103,9 @@ class _Collector(HTMLParser):
             self._time_dt = d.get("datetime")
             self._time_text = []
             self._time_start = pos
+        elif tag in _HEADING_TAGS:
+            self._heading_tag = tag
+            self._heading_parts = []
         elif tag == "link":
             rel = (d.get("rel") or "").strip().lower()
             type_ = (d.get("type") or "").strip().lower()
@@ -115,6 +126,11 @@ class _Collector(HTMLParser):
             self._in_time = False
             text = " ".join("".join(self._time_text).split())
             self.time_tags.append((self._time_dt, text, self._time_start))
+        elif tag == self._heading_tag:
+            text = " ".join("".join(self._heading_parts).split())
+            if text:
+                self.headings.append(text)
+            self._heading_tag = None
 
     def handle_data(self, data: str) -> None:
         if self._a_href is not None:
@@ -123,6 +139,8 @@ class _Collector(HTMLParser):
             self._title_parts.append(data)
         if self._in_time:
             self._time_text.append(data)
+        if self._heading_tag is not None:
+            self._heading_parts.append(data)
 
     def _offset(self) -> int:
         # CDATA_CONTENT_ELEMENTS aside, getpos() gives (line, col); we only use
@@ -164,6 +182,29 @@ def extract_meta_description(html: str) -> str | None:
     return _parse(html).meta_description
 
 
+def extract_headings(html: str, limit: int = 24) -> list[str]:
+    """h1/h2/h3 text, in document order, de-duplicated.
+
+    This is how a business says what it does. A law firm's practice-areas page
+    is a list of headings ("Criminal Defense", "DWI", "Family Law") and nothing
+    else -- no dates, no structured data, nothing the event-research extractors
+    were built to find. `limit` keeps a badly-built page (every paragraph an
+    <h3>) from filling the cache with a whole site.
+    """
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for heading in _parse(html).headings:
+        key = heading.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(heading)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def extract_time_tags(html: str) -> list[tuple[str | None, str, int]]:
     return _parse(html).time_tags
 
@@ -180,6 +221,24 @@ PAGE_KEYWORDS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
         ("career", "careers", "jobs"),
     ),
     "blog": (("blog",), ("blog",)),
+    # Qualification pages: where a business says what it is and invites work.
+    # Broad on purpose -- "practice areas", "what we do" and "services" are the
+    # same page under three names, and a vertical we cannot confirm costs a
+    # lead we never write to.
+    "services": (
+        ("services", "our services", "practice areas", "practice area",
+         "what we do", "areas of practice", "expertise", "specialties",
+         "solutions", "treatments"),
+        ("services", "practice-areas", "practice_areas", "practiceareas",
+         "what-we-do", "expertise", "specialties", "areas-of-practice"),
+    ),
+    "contact": (
+        ("contact", "contact us", "get in touch", "book a consultation",
+         "free consultation", "request a quote", "make an appointment",
+         "schedule", "new clients", "new patients"),
+        ("contact", "contact-us", "get-in-touch", "consultation", "appointment",
+         "book", "quote"),
+    ),
     "changelog": (
         ("changelog", "release notes", "product updates", "what's new", "updates", "whats new"),
         ("changelog", "release-notes", "releases", "whats-new", "updates"),
@@ -195,6 +254,11 @@ FALLBACK_PATHS: dict[str, tuple[str, ...]] = {
     "blog": ("/blog", "/news/blog"),
     "changelog": ("/changelog", "/release-notes", "/updates"),
     "press": ("/press", "/newsroom", "/news"),
+    "services": (
+        "/services", "/practice-areas", "/our-services", "/what-we-do",
+        "/areas-of-practice", "/expertise",
+    ),
+    "contact": ("/contact", "/contact-us", "/get-in-touch", "/consultation"),
 }
 
 # Third-party ATS hosts a "careers" nav link commonly points straight at. If we

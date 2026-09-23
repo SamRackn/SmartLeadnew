@@ -45,7 +45,7 @@ from mazz.schemas import Fact, FactKind  # noqa: E402
 
 reload_settings()
 
-OUTBOX = ROOT / "smartlead_outbox.jsonl"
+OUTBOX = ROOT / "sent_outbox.jsonl"
 
 
 def rule(title: str) -> None:
@@ -178,12 +178,14 @@ def main() -> int:
         print(f"  drafts written for weak lead:          {len(weak_drafts)}  (expect 0)")
         print(f"  drafts not approvable (held/failed):   {len(held)}  (the tampered one, from 7b)")
 
-    rule("9. SMARTLEAD OUTBOX")
+    rule("9. SENT OUTBOX")
     if OUTBOX.exists():
         print(f"  {OUTBOX.name}: {len(OUTBOX.read_text().splitlines())} line(s)")
     else:
-        print("  no outbox file — nothing was pushed, because nothing was approved.")
-        print("  Approval is a human action in the review app. There is no auto-send.")
+        print("  no outbox file — nothing was sent, because nothing was approved.")
+        print("  Approval is a human action in the review app, one lead at a time.")
+        print("  The pipeline chain stops at `verify`; only that click enqueues a")
+        print("  `send` job. There is no auto-send.")
 
     rule("10. WORKSPACES + CAMPAIGNS (per-engagement scoring)")
     print("  Same idea as the review app's /workspaces screen, done here so a")

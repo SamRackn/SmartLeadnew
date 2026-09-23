@@ -6,7 +6,8 @@ It is claimed now because the hazard it closes is real: `mazz.integrations.base
 `lru_cache`d singleton loaded from the developer's own `.env`. Without this
 fixture, a plain `pytest` run's provider selection depends on whatever a
 developer happens to have in `.env` at that moment -- which is exactly how a
-paid Bright Data / Smartlead / Anthropic call could slip into CI or a laptop
+paid Bright Data / Anthropic call -- or a real email to a stranger -- could
+slip into CI or a laptop
 run and bill someone's account.
 
 This autouse fixture pins every provider-selection setting to its safe
@@ -30,7 +31,7 @@ _SAFE_ENV: dict[str, str] = {
     "LINKEDIN_PROVIDER": "stub",
     "LINKEDIN_API_KEY": "",
     "COMPANY_SCRAPER_PROVIDER": "stub",
-    "SMARTLEAD_API_KEY": "",
+    "EMAIL_SENDER": "stub",
     "ANTHROPIC_API_KEY": "",
     # Not a credential, but the same hazard: `DRAFT_COMPOSER=claude` in a
     # developer's `.env` would route every drafting test through a paid,

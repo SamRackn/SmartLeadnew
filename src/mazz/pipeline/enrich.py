@@ -68,7 +68,7 @@ from mazz.schemas import Fact
 __all__ = [
     "DEFAULT_MAX_AGE",
     "EnrichOutcome",
-    "SCORE_JOB_KIND",
+    "QUALIFY_JOB_KIND",
     "enrich_lead",
     "handle_enrich",
 ]
@@ -84,7 +84,10 @@ DEFAULT_MAX_AGE = timedelta(days=14)
 #: migration. ``handle_enrich`` chains to it only when a handler is registered
 #: (see ``JobContext.enqueue_next``) -- in Phase 1 the scorer may not exist yet,
 #: and queueing work nobody can run only manufactures failed jobs.
-SCORE_JOB_KIND = "score"
+#: The stage enrichment chains to. Renamed from ``score`` with the cutover to
+#: qualification: the question after enrichment is no longer "which of these
+#: facts is the best reason to write" but "does the premise of the copy hold".
+QUALIFY_JOB_KIND = "qualify"
 
 
 def _utcnow() -> datetime:
@@ -384,7 +387,7 @@ def handle_enrich(ctx) -> None:
         )
         return
 
-    ctx.enqueue_next(SCORE_JOB_KIND)
+    ctx.enqueue_next(QUALIFY_JOB_KIND)
 
 
 def _record_cache_error(session_scope, domain: str, exc: BaseException) -> None:

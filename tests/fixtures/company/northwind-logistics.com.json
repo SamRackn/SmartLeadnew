@@ -1,6 +1,6 @@
 {
   "_scenario": "strong_signal",
-  "_why": "Careers page carries a req for a role a B2B SaaS revenue tool directly supports. This is the highest-value signal kind in the brief and must score above threshold.",
+  "_why": "Careers page carries a req for a role a B2B SaaS revenue tool directly supports. This is the highest-value signal kind in the brief and must score above threshold. Also carries services/contact pages: the qualification evidence the cold path reads.",
   "domain": "northwind-logistics.com",
   "retrieved_at": "2026-09-14T09:00:00+00:00",
   "pages": [
@@ -62,6 +62,45 @@
           "url": "https://northwind-logistics.com/blog/building-our-outbound-motion",
           "text": "Why we are finally building an outbound motion. For six years every Northwind customer came inbound. That stopped scaling last quarter, so we are hiring a team to go get the next 300.",
           "published_at": "2026-08-19"
+        }
+      ]
+    },
+    {
+      "kind": "services",
+      "url": "https://northwind-logistics.com/services",
+      "title": "Services - Northwind Logistics",
+      "items": [
+        {
+          "key": "services-0",
+          "text": "Freight brokerage and third-party logistics for mid-market shippers",
+          "url": "https://northwind-logistics.com/services"
+        },
+        {
+          "key": "services-1",
+          "text": "Carrier management",
+          "url": "https://northwind-logistics.com/services"
+        },
+        {
+          "key": "services-2",
+          "text": "Exception handling and lane visibility",
+          "url": "https://northwind-logistics.com/services"
+        }
+      ]
+    },
+    {
+      "kind": "contact",
+      "url": "https://northwind-logistics.com/contact",
+      "title": "Contact Northwind Logistics",
+      "items": [
+        {
+          "key": "contact-0",
+          "text": "Request a quote for your lanes - no obligation",
+          "url": "https://northwind-logistics.com/contact"
+        },
+        {
+          "key": "contact-1",
+          "text": "Get in touch with our team",
+          "url": "https://northwind-logistics.com/contact"
         }
       ]
     }

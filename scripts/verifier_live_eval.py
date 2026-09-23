@@ -89,6 +89,7 @@ from mazz.models import DraftBatch, Lead, ResearchCache
 from mazz.db import get_sessionmaker
 from mazz.pipeline.compose_claude import (
     MAX_TOKENS,
+    _effort,
     NO_ANGLE_SENTINEL,
     SYSTEM_PROMPT,
     ComposerRefused,
@@ -251,23 +252,57 @@ class Estimate:
     expected_usd: float
     worst_case_usd: float
     counted_exactly: bool
+    #: Set when the frozen prefix is BELOW this model's minimum cacheable
+    #: length. Not fatal to a measurement run — it is the thing being measured
+    #: — but it means every request pays the prefix at full input price and the
+    #: estimate below is priced that way. See `_prefix_tokens`.
+    uncacheable: str | None = None
 
     def render(self) -> str:
         how = "counted by the API" if self.counted_exactly else "estimated offline (chars/4)"
-        return (
+        label = "cached prefix" if not self.uncacheable else "UNCACHEABLE prefix"
+        lines = (
             f"  requests to submit       : {self.requests}\n"
-            f"  cached prefix            : {self.prefix_tokens} tokens ({how})\n"
+            f"  {label:<24} : {self.prefix_tokens} tokens ({how})\n"
             f"  per-lead content         : {self.suffix_tokens} tokens total\n"
             f"  assumed output           : {ASSUMED_OUTPUT_TOKENS} tokens/draft\n"
             f"  ESTIMATED COST           : ${self.expected_usd:.4f}\n"
             f"  worst case (all hit {MAX_TOKENS}) : ${self.worst_case_usd:.4f}"
         )
+        if self.uncacheable:
+            lines += f"\n  !! {self.uncacheable}"
+        return lines
 
 
 def _offline_tokens(text: str) -> int:
     """A crude, deliberately pessimistic token count for when there is no key."""
 
     return max(1, len(text) // 4)
+
+
+def _prefix_tokens(client: Any, *, model: str) -> tuple[int, str | None]:
+    """Measured prefix size, plus a reason string if this model cannot cache it.
+
+    `assert_cacheable_prefix` RAISES when the frozen prefix is shorter than the
+    model's `MIN_CACHEABLE_PREFIX_TOKENS`, which is the correct behaviour in the
+    pipeline: a production run that silently never caches is a bill nobody
+    notices. But a SWEEP whose whole question is "does a cheaper model with a
+    higher cache floor still come out ahead" cannot let that raise delete the
+    cell — skipping the model would answer the question by assumption.
+
+    So here the raise is caught, converted to a recorded fact, and the estimate
+    is re-priced with the prefix paid IN FULL on every request and no prewarm.
+    """
+
+    try:
+        return assert_cacheable_prefix(client), None
+    except RuntimeError as exc:
+        counted = client.messages.count_tokens(
+            model=model,
+            system=[{"type": "text", "text": SYSTEM_PROMPT}],
+            messages=[{"role": "user", "content": "x"}],
+        )
+        return counted.input_tokens, str(exc)
 
 
 def estimate_cost(plan: EvalPlan, *, model: str, client: Any | None = None) -> Estimate:
@@ -287,8 +322,9 @@ def estimate_cost(plan: EvalPlan, *, model: str, client: Any | None = None) -> E
 
     prompts = [str(item["params"]["messages"][0]["content"]) for item in plan.requests]
 
+    uncacheable: str | None = None
     if client is not None:
-        prefix_tokens = assert_cacheable_prefix(client)
+        prefix_tokens, uncacheable = _prefix_tokens(client, model=model)
         suffix_tokens = sum(
             client.messages.count_tokens(
                 model=model,
@@ -303,13 +339,23 @@ def estimate_cost(plan: EvalPlan, *, model: str, client: Any | None = None) -> E
         counted = False
 
     n = len(plan.requests)
-    prewarm = price_usd(
-        Usage(cache_creation_input_tokens=prefix_tokens), model=model, batch=False
-    )
+    if uncacheable:
+        # No entry will ever be written, so there is no prewarm to pay for and
+        # nothing to read: the prefix lands in `input_tokens` on every request,
+        # at 1.0x rather than 0.1x.
+        prewarm = 0.0
+        cached_per_run = 0
+        uncached_prefix = prefix_tokens * n
+    else:
+        prewarm = price_usd(
+            Usage(cache_creation_input_tokens=prefix_tokens), model=model, batch=False
+        )
+        cached_per_run = prefix_tokens * n
+        uncached_prefix = 0
     body = price_usd(
         Usage(
-            input_tokens=suffix_tokens,
-            cache_read_input_tokens=prefix_tokens * n,
+            input_tokens=suffix_tokens + uncached_prefix,
+            cache_read_input_tokens=cached_per_run,
             output_tokens=ASSUMED_OUTPUT_TOKENS * n,
         ),
         model=model,
@@ -317,8 +363,8 @@ def estimate_cost(plan: EvalPlan, *, model: str, client: Any | None = None) -> E
     )
     worst = price_usd(
         Usage(
-            input_tokens=suffix_tokens,
-            cache_read_input_tokens=prefix_tokens * n,
+            input_tokens=suffix_tokens + uncached_prefix,
+            cache_read_input_tokens=cached_per_run,
             output_tokens=MAX_TOKENS * n,
         ),
         model=model,
@@ -331,6 +377,7 @@ def estimate_cost(plan: EvalPlan, *, model: str, client: Any | None = None) -> E
         expected_usd=prewarm + body,
         worst_case_usd=prewarm + worst,
         counted_exactly=counted,
+        uncacheable=uncacheable,
     )
 
 
@@ -445,6 +492,17 @@ class EvalReport:
     cost_usd: float = 0.0
     no_angle: int = 0
     cache_failure: str | None = None
+    #: The BATCH's own clock, from the API — created -> ended. Not production
+    #: latency for a synchronous call, and not to be read as such; it is how
+    #: long this measurement waited, which is the only latency a batch has.
+    created_at: datetime | None = None
+    ended_at: datetime | None = None
+
+    @property
+    def wall_clock_seconds(self) -> float | None:
+        if self.created_at is None or self.ended_at is None:
+            return None
+        return (self.ended_at - self.created_at).total_seconds()
 
     @property
     def drafted(self) -> list[CaseOutcome]:
@@ -513,7 +571,13 @@ def _evidence_for(facts: Iterable[Any], cited: Sequence[str]) -> list[dict[str, 
     ]
 
 
-def collect(session, row: DraftBatch, *, client: Any) -> EvalReport | None:
+def collect(
+    session,
+    row: DraftBatch,
+    *,
+    client: Any,
+    expected_uncacheable: str | None = None,
+) -> EvalReport | None:
     """Land a finished batch: verify every draft, price every token.
 
     Returns None while the batch is still processing. Writes nothing but the
@@ -523,6 +587,8 @@ def collect(session, row: DraftBatch, *, client: Any) -> EvalReport | None:
     report = EvalReport(batch_id=row.batch_id, model=row.model)
     batch = client.messages.batches.retrieve(row.batch_id)
     row.status = batch.processing_status
+    report.created_at = getattr(batch, "created_at", None)
+    report.ended_at = getattr(batch, "ended_at", None)
     if batch.processing_status != "ended":
         return None
 
@@ -545,7 +611,9 @@ def collect(session, row: DraftBatch, *, client: Any) -> EvalReport | None:
     row.cost_usd = report.cost_usd
     row.ended_at = datetime.now(timezone.utc)
 
-    report.cache_failure = check_cache_engaged(report)
+    report.cache_failure = check_cache_engaged(
+        report, expected_uncacheable=expected_uncacheable
+    )
     if report.cache_failure:
         row.last_error = report.cache_failure
     session.flush()
@@ -619,7 +687,9 @@ def _land(session, lead: Lead, result: Any, report: EvalReport) -> CaseOutcome:
     return case
 
 
-def check_cache_engaged(report: EvalReport) -> str | None:
+def check_cache_engaged(
+    report: EvalReport, *, expected_uncacheable: str | None = None
+) -> str | None:
     """Did prompt caching actually do anything? Returns a failure line, or None.
 
     The specific thing being caught: a `datetime.now()`, an unsorted
@@ -656,6 +726,17 @@ def check_cache_engaged(report: EvalReport) -> str | None:
             return None
         scope = f"all {len(cases)} requests"
 
+    if expected_uncacheable:
+        # A KNOWN miss, not a mystery one: the prefix is below this model's
+        # minimum cacheable length, so the drift checklist below would send a
+        # reader hunting a bug that is not there.
+        return (
+            f"PROMPT CACHING DID NOT ENGAGE across {scope}, as predicted before "
+            f"submission: {expected_uncacheable} Every request paid the prefix at "
+            "full input price. This is a measured property of the model, not a "
+            "defect in the prefix."
+        )
+
     return (
         f"PROMPT CACHING DID NOT ENGAGE: cache_read_input_tokens == 0 across {scope}. "
         "Every lead paid full price for the system prompt, and the prewarm paid the "
@@ -673,6 +754,12 @@ def check_cache_engaged(report: EvalReport) -> str | None:
 #: Verdict labels a human writes into the adjudication file.
 LEGITIMATE = "legitimate"  # the copy was supported; the verifier was WRONG -> FP
 FABRICATED = "fabricated"  # the model really did invent it; the verifier was RIGHT
+
+
+def _duration(seconds: float | None) -> str:
+    if seconds is None:
+        return "unknown (the API did not report both timestamps)"
+    return f"{seconds / 60:.1f} min ({seconds:.0f}s) — BATCH latency, not sync latency"
 
 
 def render_report(report: EvalReport, *, cap: int, considered: int) -> str:
@@ -701,6 +788,7 @@ def render_report(report: EvalReport, *, cap: int, considered: int) -> str:
         f"  output                   : {report.usage.output_tokens:,} tokens",
         f"  prompt tokens cached     : {report.usage.cache_hit_rate:.0%}",
         f"  TOTAL                    : ${report.cost_usd:.4f}",
+        f"  batch wall clock         : {_duration(report.wall_clock_seconds)}",
         f"  per draft returned       : ${report.cost_usd / max(len(report.drafted), 1):.5f}",
         f"  PER USABLE LEAD          : {report.cost_per_usable_lead_display}",
         "",
@@ -835,6 +923,8 @@ def cmd_submit(args, factory, client_factory) -> int:
             "no_angle_lead_ids": plan.no_angle,
             "submitted_at": datetime.now(timezone.utc).isoformat(),
             "estimated_usd": estimate.expected_usd,
+            "effort": _effort(),
+            "uncacheable": estimate.uncacheable,
         }
         session.commit()
 
@@ -856,7 +946,10 @@ def cmd_collect(args, factory, client_factory) -> int:
         ).scalar_one_or_none()
         if row is None:
             raise SystemExit(f"no draft_batches row for {batch_id}")
-        report = collect(session, row, client=client)
+        report = collect(
+            session, row, client=client,
+            expected_uncacheable=manifest.get("uncacheable"),
+        )
         if report is None:
             session.commit()
             print(f"{batch_id}: still {row.status}")

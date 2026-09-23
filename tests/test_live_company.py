@@ -10,6 +10,13 @@ What has to hold, mechanically, not just by inspection:
   nothing" `no_angle` verdict.
 * careers items become `FactKind.JOB_POSTING`, not `CAREERS_PAGE`.
 * fact ids are stable across a fresh re-parse of the same material.
+
+A note on page sets. The shipped cold path fetches the QUALIFICATION pages
+(homepage, services, contact) and nothing else -- see `make_adapter`. Most of
+this file exercises the EVENT machinery (job postings, ATS hops, dated-content
+provenance, apply-link probes), which is no longer spent on a cold list but is
+still the right tool for researching a lead that replied, so it is still built
+and still tested. Those tests opt into the event page set explicitly.
 """
 
 from __future__ import annotations
@@ -26,7 +33,11 @@ from mazz.integrations.base import (
     ProviderUnavailable,
     RetryPolicy,
 )
-from mazz.integrations.company import LiveCompanyAdapter
+from mazz.integrations.company import (
+    EVENT_PAGE_KINDS,
+    QUALIFICATION_PAGE_KINDS,
+    LiveCompanyAdapter,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "company_html"
 
@@ -74,8 +85,19 @@ class FakeClient:
 
 
 def make_adapter(client: FakeClient, **kwargs) -> LiveCompanyAdapter:
+    """An adapter over a fake HTTP client.
+
+    Defaults to the EVENT page set rather than the shipped one. Everything in
+    this file below the shared-behaviour section -- job-posting extraction, ATS
+    hops, dated-content provenance, apply-link probes -- is the deep-research
+    machinery, which the cold path no longer spends requests on but which still
+    exists for researching a lead that replied. Tests covering the shipped cold
+    path pass ``secondary_page_kinds=QUALIFICATION_PAGE_KINDS`` explicitly.
+    """
+
     kwargs.setdefault("retry_policy", RetryPolicy(attempts=1))
     kwargs.setdefault("rate_limit_seconds", 0.0)
+    kwargs.setdefault("secondary_page_kinds", EVENT_PAGE_KINDS)
     return LiveCompanyAdapter(http_client=client, **kwargs)
 
 
@@ -727,3 +749,131 @@ def test_feed_fetch_is_rate_limited_and_robots_checked():
     # No feed corroboration available -> both items fall back to the
     # (capped-low) proximity-fallback path, same as the no-feed-link case.
     assert not any(f.kind == FactKind.BLOG_POST.value for f in result.facts)
+
+
+# ==========================================================================
+# The shipped cold path: qualification pages, and only those
+# ==========================================================================
+#
+# The default page set is the cost argument made mechanical. A nine-person law
+# firm has no careers page, no changelog and no press feed; fetching for them
+# was four requests per domain buying facts nothing read.
+
+
+LAWFIRM_HOMEPAGE = """
+<html><head><title>DAME Legal | Attorneys at Law</title>
+<meta name="description" content="Criminal defense attorneys serving Nassau County."></head>
+<body>
+  <nav>
+    <a href="/practice-areas">Practice Areas</a>
+    <a href="/contact">Contact Us</a>
+    <a href="/careers">Careers</a>
+    <a href="/blog">Blog</a>
+  </nav>
+  <h1>Attorneys at Law</h1>
+</body></html>
+"""
+
+LAWFIRM_PRACTICE_AREAS = """
+<html><head><title>Practice Areas | DAME Legal</title></head><body>
+  <h1>Practice Areas</h1><h2>Criminal Defense</h2><h2>DWI</h2><h2>Family Law</h2>
+</body></html>
+"""
+
+LAWFIRM_CONTACT = """
+<html><head><title>Contact DAME Legal</title></head><body>
+  <h1>Free Consultation</h1><h2>Contact us today</h2>
+</body></html>
+"""
+
+
+def lawfirm_routes(**overrides) -> dict[str, tuple[int, str]]:
+    routes = {
+        "https://damelegal.example/robots.txt": (200, ROBOTS_ALLOW_ALL),
+        "https://damelegal.example/": (200, LAWFIRM_HOMEPAGE),
+        "https://damelegal.example/practice-areas": (200, LAWFIRM_PRACTICE_AREAS),
+        "https://damelegal.example/contact": (200, LAWFIRM_CONTACT),
+        "https://damelegal.example/careers": (200, ACME_CAREERS),
+        "https://damelegal.example/blog": (200, ACME_BLOG),
+    }
+    routes.update(overrides)
+    return routes
+
+
+def test_the_cold_path_fetches_the_two_pages_the_copy_depends_on():
+    client = FakeClient(lawfirm_routes())
+    adapter = make_adapter(client, secondary_page_kinds=QUALIFICATION_PAGE_KINDS)
+
+    result = adapter.fetch_company("damelegal.example")
+
+    assert result.ok
+    kinds = {f.kind for f in result.facts}
+    assert kinds == {
+        FactKind.HOMEPAGE.value,
+        FactKind.SERVICES_PAGE.value,
+        FactKind.CONTACT_PAGE.value,
+    }
+
+
+def test_the_cold_path_spends_no_request_on_an_event_page():
+    """Even when the site links to both, and both would have parsed."""
+
+    client = FakeClient(lawfirm_routes())
+    adapter = make_adapter(client, secondary_page_kinds=QUALIFICATION_PAGE_KINDS)
+
+    adapter.fetch_company("damelegal.example")
+
+    assert "https://damelegal.example/careers" not in client.calls
+    assert "https://damelegal.example/blog" not in client.calls
+    # robots + homepage + two qualification pages. Nothing else.
+    assert len(client.calls) == 4, client.calls
+
+
+def test_the_headings_a_vertical_is_confirmed_from_are_carried_verbatim():
+    """A reviewer has to be able to see the line we read, not a summary of it."""
+
+    client = FakeClient(lawfirm_routes())
+    adapter = make_adapter(client, secondary_page_kinds=QUALIFICATION_PAGE_KINDS)
+
+    result = adapter.fetch_company("damelegal.example")
+
+    contents = {f.content for f in result.facts}
+    assert "Attorneys at Law" in contents
+    assert "Criminal Defense" in contents
+    assert "Free Consultation" in contents
+
+
+def test_qualification_facts_are_not_dated_and_are_not_demoted():
+    """A heading on a practice-areas page makes no claim about WHEN anything
+    happened, so the provenance machinery that guards dated content and job
+    reqs has nothing to do here and must not fire."""
+
+    client = FakeClient(lawfirm_routes())
+    adapter = make_adapter(client, secondary_page_kinds=QUALIFICATION_PAGE_KINDS)
+
+    result = adapter.fetch_company("damelegal.example")
+
+    for fact in result.facts:
+        assert not fact.content.startswith("[")
+        assert "provenance_note" not in (fact.metadata or {})
+
+
+def test_a_site_with_no_services_or_contact_page_still_yields_its_homepage():
+    """Partial evidence is a normal outcome. Whether it is ENOUGH is
+    `qualify`'s call, not the adapter's."""
+
+    client = FakeClient({
+        "https://damelegal.example/robots.txt": (200, ROBOTS_ALLOW_ALL),
+        "https://damelegal.example/": (200, LAWFIRM_HOMEPAGE),
+    })
+    adapter = make_adapter(client, secondary_page_kinds=QUALIFICATION_PAGE_KINDS)
+
+    result = adapter.fetch_company("damelegal.example")
+
+    assert result.ok
+    assert {f.kind for f in result.facts} == {FactKind.HOMEPAGE.value}
+
+
+def test_an_unknown_secondary_page_kind_is_refused_at_construction():
+    with pytest.raises(ValueError, match="unknown secondary page kinds"):
+        LiveCompanyAdapter(http_client=FakeClient({}), secondary_page_kinds=("pricing",))

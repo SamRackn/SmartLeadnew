@@ -705,47 +705,14 @@ def score_facts(
 # --------------------------------------------------------------------------
 
 
-def facts_for_domain(session: "Session", company_domain: str | None) -> list[Fact]:
-    """Load and parse the cached facts for one domain.
-
-    A row whose JSON does not parse is skipped with a warning rather than
-    crashing the lead: one malformed fact must not take out the others. Nothing
-    is invented to replace it -- fewer facts simply means a weaker angle, which
-    is the honest outcome.
-    """
-
-    if not company_domain:
-        return []
-
-    row = session.execute(
-        select(ResearchCache).where(ResearchCache.company_domain == company_domain)
-    ).scalar_one_or_none()
-    if row is None:
-        return []
-    return parse_facts(row.facts or [], company_domain=company_domain)
-
-
-def parse_facts(raw: Sequence[Any], *, company_domain: str | None = None) -> list[Fact]:
-    """Coerce the JSONB fact list into `Fact` objects, skipping unparseable ones."""
-
-    facts: list[Fact] = []
-    for entry in raw:
-        if isinstance(entry, Fact):
-            facts.append(entry)
-            continue
-        try:
-            facts.append(Fact.model_validate(entry))
-        except Exception as exc:  # pragma: no cover - defensive
-            log.warning(
-                "skipping unparseable cached fact for %s: %s", company_domain, exc
-            )
-    return facts
-
-
-def facts_for_lead(session: "Session", lead: Lead) -> list[Fact]:
-    """Cached facts for this lead's employer. research_cache is domain-keyed."""
-
-    return facts_for_domain(session, lead.company_domain)
+# Cache reading moved to `pipeline.facts` — it was never scoring, and `qualify`
+# and `verify` both need it without importing this module. Re-exported here so
+# existing callers and tests keep working while the event stack is removed.
+from mazz.pipeline.facts import (  # noqa: E402
+    facts_for_domain,
+    facts_for_lead,
+    parse_facts,
+)
 
 
 # --------------------------------------------------------------------------

@@ -287,6 +287,7 @@ call calls cheers congrats congratulations
 deck
 hello hey hi
 follow-up
+info
 intro
 kind kindly
 meeting
@@ -377,6 +378,36 @@ KIND_VOCABULARY: dict[str, frozenset[str]] = {
         """.split()
     ),
     "homepage": frozenset("site website homepage page".split()),
+    # The qualification page kinds. Same rule as every entry above: each word
+    # is a direct restatement of what the KIND means, never of what the page
+    # is worth. `services_page` licenses "practice" and "services" because
+    # that is what the page IS; it does not license "specialist", "leading" or
+    # "busy".
+    "services_page": frozenset(
+        """
+        service services practice practices area areas
+        offer offers offering offerings specialty specialties speciality
+        work
+        """.split()
+    ),
+    # `contact_page` is the one that licenses the client-intake register, and
+    # it is the reason email 1's opening question is checkable at all. A
+    # contact/intake page MEANS "this is where they invite new business", so
+    # "are you looking to bring in more clients" is restatement of a cited
+    # page, not an assertion about their book.
+    #
+    # It licenses the register and nothing beyond it. "clients" yes; "growth",
+    # "busy", "overloaded", "struggling", "pipeline" no — those describe how
+    # the business is DOING, which no contact page says. And it licenses
+    # nothing at all unless a contact_page fact is actually cited, so a draft
+    # that asks the question without the evidence behind it still fails.
+    "contact_page": frozenset(
+        """
+        client clients consultation consultations
+        enquiry enquiries inquiry inquiries
+        contact contacted intake booking book appointment appointments
+        """.split()
+    ),
     "linkedin_profile": frozenset("profile linkedin".split()),
     "lead_notes": frozenset("notes note".split()),
 }
