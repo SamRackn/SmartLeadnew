@@ -1,11 +1,65 @@
 /* Plain, readable CSS for a one-person internal tool. No framework. */
 
+:root {
+  /* --- surfaces -------------------------------------------------------- */
+  --surface: #fafafa;          /* page background */
+  --surface-raised: #fff;      /* cards, panels, inputs, table rows */
+  --surface-sunken: #f0f0f0;   /* table headers, code/preview chips */
+  --surface-muted: #f2f2f2;    /* pending / no-angle / paused status chips */
+  --surface-subtle: #fbfbfb;   /* the offer fieldset background */
+  --surface-danger-subtle: #fff6f6; /* danger-zone panel background */
+  --surface-highlight: #fff3cd;     /* highlighted token inside a preview */
+
+  /* --- ink (text) -------------------------------------------------------- */
+  --ink: #1c1c1c;              /* primary text, topbar background */
+  --ink-inverse: #fff;         /* text/icons on dark or colored surfaces */
+  --ink-inverse-muted: #cfcfcf; /* de-emphasized text on the dark topbar */
+  --ink-muted: #555;           /* secondary text: labels, status text */
+  --ink-hint: #666;            /* help text under a field, empty-state text */
+  --ink-faint: #888;           /* tertiary text: quiet captions, uppercase labels */
+  --ink-quiet: #444;           /* italic rationale / explanatory text */
+  --ink-disabled: #999;        /* retired/struck-through text, a heavier neutral border */
+
+  /* --- borders ----------------------------------------------------------- */
+  --border: #ddd;              /* default card/table border */
+  --border-subtle: #eee;       /* faint separators, inactive chip background */
+  --border-faint: #ccc;        /* quote/blockquote rule */
+  --border-soft: #bbb;         /* form input borders */
+
+  /* --- accent (brand / interactive) -------------------------------------- */
+  --accent: #6d4aff;           /* links, link-styled buttons */
+  --accent-hover: #5636cc;     /* hover/active state for accent elements */
+  --accent-secondary: #4a6fa5; /* preview marker, badges (unrelated to links) */
+
+  /* --- status colors ------------------------------------------------------ */
+  --success-bg: #dff5e1;
+  --success-fg: #1e7a2e;
+  --danger-bg: #fde3e3;
+  --danger-fg: #b3261e;
+  --danger-fg-strong: #7a1a15; /* held-banner text, needs extra contrast */
+  --info-bg: #e0eefc;
+  --info-fg: #0a5cbf;
+
+  /* --- shape --------------------------------------------------------------- */
+  --radius-sm: 3px;
+  --radius: 4px;
+  --radius-lg: 6px;
+
+  /* --- spacing scale --------------------------------------------------------- */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+}
+
 * { box-sizing: border-box; }
 
 body {
   font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
-  color: #1c1c1c;
-  background: #fafafa;
+  color: var(--ink);
+  background: var(--surface);
   margin: 0;
 }
 
@@ -15,136 +69,157 @@ main {
   padding: 1.5rem;
 }
 
+/* Escape hatch for a later full-width, two-pane screen. Opt in per page with
+   `<main class="wide">`; the default above is untouched. */
+main.wide {
+  max-width: none;
+  padding: var(--space-5) var(--space-6);
+}
+
 .topbar {
   display: flex;
   align-items: center;
-  gap: 1rem;
-  padding: 0.75rem 1.5rem;
-  background: #1c1c1c;
-  color: #fff;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  background: var(--ink);
+  color: var(--ink-inverse);
 }
 
-.topbar .brand { color: #fff; font-weight: 600; text-decoration: none; }
+.topbar .brand { color: var(--ink-inverse); font-weight: 600; text-decoration: none; font-size: 1.05rem; }
 .topbar-user { margin-left: auto; opacity: 0.8; }
 .link-button {
-  background: none; border: none; color: #0a5cbf; cursor: pointer; text-decoration: underline;
+  background: none; border: none; color: var(--accent); cursor: pointer; text-decoration: underline;
   font-size: 0.9rem;
 }
 /* The pale variant belongs to the dark topbar only. On a white panel it reads
    as a disabled control, which is how "pause" ended up looking unclickable. */
-.topbar .link-button { color: #cfcfcf; }
+.topbar .link-button { color: var(--ink-inverse-muted); }
+.topbar .link-button:hover { color: var(--ink-inverse); }
 .inline-form { display: inline; }
 
-a { color: #0a5cbf; }
+a { color: var(--accent); }
+a:hover { color: var(--accent-hover); }
 
 table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
-th, td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid #ddd; }
-th { background: #f0f0f0; }
+th, td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); }
+th { background: var(--surface-sunken); }
 
 .status-filter { margin: 1rem 0; display: flex; gap: 0.5rem; flex-wrap: wrap; }
-.status-filter a { padding: 0.25rem 0.6rem; border-radius: 4px; text-decoration: none; background: #eee; }
-.status-filter a.active { background: #1c1c1c; color: #fff; }
+.status-filter a { padding: 0.25rem 0.6rem; border-radius: var(--radius); text-decoration: none; background: var(--border-subtle); }
+.status-filter a.active { background: var(--ink); color: var(--ink-inverse); }
 
 .status-tag, .verification-tag, .job-tag, .mailbox-tag {
   display: inline-block;
   padding: 0.1rem 0.5rem;
-  border-radius: 4px;
+  border-radius: var(--radius);
   font-size: 0.85rem;
   font-weight: 600;
 }
 
-.status-researching, .status-ready { background: #e0eefc; color: #0a5cbf; }
-.status-no_angle { background: #f2f2f2; color: #555; }
-.status-approved, .status-sent { background: #dff5e1; color: #1e7a2e; }
-.status-held { background: #fde3e3; color: #b3261e; }
+.status-researching, .status-ready { background: var(--info-bg); color: var(--info-fg); }
+.status-no_angle { background: var(--surface-muted); color: var(--ink-muted); }
+.status-approved, .status-sent { background: var(--success-bg); color: var(--success-fg); }
+.status-held { background: var(--danger-bg); color: var(--danger-fg); }
 
-.verification-passed { background: #dff5e1; color: #1e7a2e; }
-.verification-failed { background: #fde3e3; color: #b3261e; }
-.verification-pending { background: #f2f2f2; color: #555; }
+.verification-passed { background: var(--success-bg); color: var(--success-fg); }
+.verification-failed { background: var(--danger-bg); color: var(--danger-fg); }
+.verification-pending { background: var(--surface-muted); color: var(--ink-muted); }
 
 /* Job (queue) statuses. Separate from lead statuses on purpose: a lead
    that is `held` and a job that `failed` are different facts. */
-.job-done { background: #dff5e1; color: #1e7a2e; }
-.job-failed { background: #fde3e3; color: #b3261e; }
-.job-running { background: #e0eefc; color: #0a5cbf; }
-.job-pending { background: #f2f2f2; color: #555; }
+.job-done { background: var(--success-bg); color: var(--success-fg); }
+.job-failed { background: var(--danger-bg); color: var(--danger-fg); }
+.job-running { background: var(--info-bg); color: var(--info-fg); }
+.job-pending { background: var(--surface-muted); color: var(--ink-muted); }
 
-.mailbox-active { background: #dff5e1; color: #1e7a2e; }
-.mailbox-paused { background: #f2f2f2; color: #555; }
-.mailbox-disabled { background: #fde3e3; color: #b3261e; }
+.mailbox-active { background: var(--success-bg); color: var(--success-fg); }
+.mailbox-paused { background: var(--surface-muted); color: var(--ink-muted); }
+.mailbox-disabled { background: var(--danger-bg); color: var(--danger-fg); }
 .mailbox-table .muted { display: block; font-size: 0.8rem; }
 .mailbox-actions { white-space: nowrap; }
 .mailbox-actions form { display: inline; }
-.link-button.danger { color: #b3261e; }
+.link-button.danger { color: var(--danger-fg); }
 
 .sent-banner, .queued-banner, .mailbox-problem {
   padding: 0.6rem 0.9rem;
-  border-radius: 4px;
+  border-radius: var(--radius);
   margin: 0 0 1rem;
 }
-.sent-banner { background: #dff5e1; border: 1px solid #1e7a2e; }
-.queued-banner { background: #e0eefc; border: 1px solid #0a5cbf; }
-.mailbox-problem { background: #fde3e3; border: 1px solid #b3261e; }
+.sent-banner { background: var(--success-bg); border: 1px solid var(--success-fg); }
+.queued-banner { background: var(--info-bg); border: 1px solid var(--info-fg); }
+.mailbox-problem { background: var(--danger-bg); border: 1px solid var(--danger-fg); }
 .send-hint { margin-top: 0.4rem; }
 
 .held-banner {
-  background: #fde3e3;
-  border: 1px solid #b3261e;
-  color: #7a1a15;
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-fg);
+  color: var(--danger-fg-strong);
   padding: 0.75rem 1rem;
-  border-radius: 4px;
+  border-radius: var(--radius);
   margin-bottom: 1rem;
 }
 
 .verification-notes, .draft-body {
   white-space: pre-wrap;
-  background: #fff;
-  border: 1px solid #ddd;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
   padding: 0.75rem;
-  border-radius: 4px;
+  border-radius: var(--radius);
 }
 
 .evidence-list { list-style: none; padding: 0; }
 .evidence-list li {
-  background: #fff;
-  border: 1px solid #ddd;
-  border-radius: 4px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   padding: 0.6rem 0.8rem;
   margin-bottom: 0.6rem;
 }
-.fact-kind { font-weight: 600; text-transform: uppercase; font-size: 0.75rem; color: #555; }
-blockquote { margin: 0.3rem 0; padding-left: 0.6rem; border-left: 3px solid #ccc; }
+.fact-kind { font-weight: 600; text-transform: uppercase; font-size: 0.75rem; color: var(--ink-muted); }
+blockquote { margin: 0.3rem 0; padding-left: 0.6rem; border-left: 3px solid var(--border-faint); }
 
-.actions { background: #fff; border: 1px solid #ddd; border-radius: 4px; padding: 1rem; margin-top: 1rem; }
+.actions { background: var(--surface-raised); border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem; margin-top: 1rem; }
 .actions form { margin-bottom: 1rem; }
 .actions label { display: block; margin-bottom: 0.5rem; font-size: 0.9rem; }
 .actions input, .actions textarea { width: 100%; padding: 0.4rem; margin-top: 0.2rem; }
 
-button { padding: 0.5rem 1rem; border-radius: 4px; border: 1px solid #999; background: #fff; cursor: pointer; }
-button.approve { background: #1e7a2e; color: #fff; border-color: #1e7a2e; }
-button.reject { background: #b3261e; color: #fff; border-color: #b3261e; }
+button { padding: 0.5rem 1rem; border-radius: var(--radius); border: 1px solid var(--ink-disabled); background: var(--surface-raised); cursor: pointer; }
+button.approve { background: var(--success-fg); color: var(--ink-inverse); border-color: var(--success-fg); }
+button.reject { background: var(--danger-fg); color: var(--ink-inverse); border-color: var(--danger-fg); }
 
 .login-box {
   max-width: 320px;
   margin: 4rem auto;
-  background: #fff;
-  border: 1px solid #ddd;
-  border-radius: 6px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
   padding: 1.5rem;
 }
 .login-box label { display: block; margin-bottom: 0.75rem; }
 .login-box input { width: 100%; padding: 0.4rem; margin-top: 0.25rem; }
-.error { color: #b3261e; }
+.error { color: var(--danger-fg); }
 
-.muted { color: #888; }
-.empty { color: #666; font-style: italic; }
-.rationale { font-style: italic; color: #444; }
+.muted { color: var(--ink-faint); }
+.empty { color: var(--ink-hint); font-style: italic; }
+.rationale { font-style: italic; color: var(--ink-quiet); }
 
-.topbar-nav { display: flex; gap: 1rem; }
-.topbar-nav a { color: #cfcfcf; text-decoration: none; }
-.topbar-nav a:hover { color: #fff; text-decoration: underline; }
+.topbar-nav { display: flex; align-items: center; gap: var(--space-2); }
+.topbar-nav a {
+  color: var(--ink-inverse-muted);
+  text-decoration: none;
+  padding: 0.35rem 0.7rem;
+  border-radius: var(--radius);
+}
+.topbar-nav a:hover {
+  color: var(--ink-inverse);
+  background: rgba(255, 255, 255, 0.1);
+}
+.topbar-nav a.active {
+  color: var(--ink-inverse);
+  background: var(--accent);
+}
 
-.workspace-block { margin-bottom: 2rem; padding-bottom: 1.5rem; border-bottom: 1px solid #ddd; }
+.workspace-block { margin-bottom: 2rem; padding-bottom: 1.5rem; border-bottom: 1px solid var(--border); }
 .workspace-block:last-child { border-bottom: none; }
 
 .config-preview {
@@ -153,12 +228,12 @@ button.reject { background: #b3261e; color: #fff; border-color: #b3261e; }
   overflow-x: auto;
   white-space: nowrap;
   font-size: 0.8rem;
-  background: #f0f0f0;
+  background: var(--surface-sunken);
   padding: 0.1rem 0.3rem;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
 }
 
-.entity-form { background: #fff; border: 1px solid #ddd; border-radius: 4px; padding: 1rem; max-width: 640px; }
+.entity-form { background: var(--surface-raised); border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem; max-width: 640px; }
 .entity-form label { display: block; margin-bottom: 1rem; font-weight: 600; }
 .entity-form input, .entity-form textarea {
   width: 100%;
@@ -166,36 +241,36 @@ button.reject { background: #b3261e; color: #fff; border-color: #b3261e; }
   margin-top: 0.3rem;
   font-weight: normal;
   font-family: inherit;
-  border: 1px solid #bbb;
-  border-radius: 4px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
 }
 .entity-form textarea { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; }
-.entity-form .hint { display: block; font-weight: normal; color: #666; font-size: 0.8rem; margin-top: 0.3rem; }
+.entity-form .hint { display: block; font-weight: normal; color: var(--ink-hint); font-size: 0.8rem; margin-top: 0.3rem; }
 
 .dash-panel {
-  background: #fff;
-  border: 1px solid #ddd;
-  border-radius: 4px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   padding: 1rem 1.25rem;
   margin-bottom: 1.5rem;
 }
 .dash-panel h2 { margin-top: 0; }
 .dash-table { margin: 0.5rem 0 1rem; }
-.dash-total-row td { font-weight: 600; border-top: 2px solid #999; }
+.dash-total-row td { font-weight: 600; border-top: 2px solid var(--ink-disabled); }
 .dash-stats { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 0.25rem 1rem; margin: 0.5rem 0; }
-.dash-stats dt { color: #555; }
+.dash-stats dt { color: var(--ink-muted); }
 .dash-stats dd { margin: 0; font-weight: 600; }
-.undefined { color: #888; font-style: italic; font-weight: normal; }
-.dash-alert { color: #b3261e; font-weight: 600; }
-.dash-table .error-cell { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.8rem; color: #555; max-width: 32rem; }
+.undefined { color: var(--ink-faint); font-style: italic; font-weight: normal; }
+.dash-alert { color: var(--danger-fg); font-weight: 600; }
+.dash-table .error-cell { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.8rem; color: var(--ink-muted); max-width: 32rem; }
 
 .danger-zone {
   margin-top: 2rem;
   max-width: 640px;
-  border: 1px solid #b3261e;
-  border-radius: 4px;
+  border: 1px solid var(--danger-fg);
+  border-radius: var(--radius);
   padding: 1rem;
-  background: #fff6f6;
+  background: var(--surface-danger-subtle);
 }
 
 /* --- the offer and its proof points ------------------------------------ */
@@ -204,54 +279,54 @@ button.reject { background: #b3261e; color: #fff; border-color: #b3261e; }
    read the sentence his fields actually produce before a stranger does. */
 
 .offer {
-  border: 1px solid #ddd;
-  border-radius: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   padding: 1rem;
   margin-bottom: 1rem;
-  background: #fbfbfb;
+  background: var(--surface-subtle);
 }
 .offer legend { font-weight: 600; padding: 0 0.4rem; }
-.offer > .hint { display: block; color: #666; font-size: 0.8rem; margin-bottom: 0.6rem; }
+.offer > .hint { display: block; color: var(--ink-hint); font-size: 0.8rem; margin-bottom: 0.6rem; }
 
 .preview {
-  background: #fff;
-  border-left: 3px solid #4a6fa5;
+  background: var(--surface-raised);
+  border-left: 3px solid var(--accent-secondary);
   margin: 0 0 1rem;
   padding: 0.8rem 1rem;
   font-size: 0.9rem;
   line-height: 1.5;
 }
-.preview em { color: #888; font-style: normal; }
-.preview strong { background: #fff3cd; font-weight: 600; padding: 0 0.15rem; }
+.preview em { color: var(--ink-faint); font-style: normal; }
+.preview strong { background: var(--surface-highlight); font-weight: 600; padding: 0 0.15rem; }
 
 .proof-points { margin-top: 2rem; }
-.proof-points > .hint { display: block; color: #666; font-size: 0.85rem; margin-bottom: 0.8rem; }
+.proof-points > .hint { display: block; color: var(--ink-hint); font-size: 0.85rem; margin-bottom: 0.8rem; }
 
 .proof-table { border-collapse: collapse; width: 100%; margin-bottom: 1.5rem; font-size: 0.9rem; }
 .proof-table th, .proof-table td {
   text-align: left;
   padding: 0.5rem 0.6rem;
-  border-bottom: 1px solid #eee;
+  border-bottom: 1px solid var(--border-subtle);
   vertical-align: top;
 }
-.proof-table th { font-size: 0.75rem; text-transform: uppercase; color: #888; letter-spacing: 0.04em; }
+.proof-table th { font-size: 0.75rem; text-transform: uppercase; color: var(--ink-faint); letter-spacing: 0.04em; }
 .proof-table form { margin: 0; }
 
 /* Retired claims stay visible rather than disappearing: a draft sent last
    month may still cite one, and "where did that stat go" is a worse question
    than "why is that one struck through". */
-.proof-table tr.retired td { color: #999; text-decoration: line-through; }
+.proof-table tr.retired td { color: var(--ink-disabled); text-decoration: line-through; }
 .proof-table tr.retired td:last-child { text-decoration: none; }
 
 .badge {
   display: inline-block;
-  background: #4a6fa5;
-  color: #fff;
+  background: var(--accent-secondary);
+  color: var(--ink-inverse);
   font-size: 0.7rem;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   padding: 0.1rem 0.4rem;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   margin-left: 0.4rem;
   vertical-align: middle;
 }
