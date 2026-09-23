@@ -18,6 +18,7 @@ from mazz.models import JobStatus, LeadStatus, VerificationStatus
 __all__ = [
     "Fact",
     "FactKind",
+    "QUALIFICATION_KINDS",
     "stable_fact_id",
     "DraftCreate",
     "DraftRead",
@@ -95,19 +96,65 @@ __all__ = [
 class FactKind(str, Enum):
     """Shared vocabulary for ``Fact.kind``.
 
-    Scoring weights live with the drafting agent, not here; the brief's
-    ranking is job posting > recently dated content > funding news.
+    Two generations of kinds live here, and the split is the point.
+
+    QUALIFICATION kinds are the pages where a business describes itself: the
+    homepage, a services/practice-area page, a contact page. They are what
+    `pipeline.qualify` reads to answer "does the premise of this email hold?"
+    -- is this the vertical the campaign sells to, do they take on new clients
+    -- and they are the only kinds the shipped template copy rests on. Two or
+    three fetches per domain, cached, instead of a crawl.
+
+    EVENT kinds answer "what happened at this company recently?" -- the job
+    postings, changelogs and funding rounds the pipeline was originally built
+    around. They are retained because the cache holds them and because a reply
+    is worth deep research, but nothing on the cold path scores them any more:
+    the ICP is small professional-services firms with no careers page, no
+    changelog and no press feed, and a ranking that demands one of those
+    refuses to write to almost every real lead.
     """
 
+    # --- qualification pages --------------------------------------------
+    #
+    # Named for the SOURCE, never for the interpretation. `research_cache` is
+    # keyed by company domain and deliberately shared across workspaces, so a
+    # fact in it must mean the same thing to every campaign that reads it.
+    # "This page says 'Practice Areas'" is shared; "this is a law firm, which
+    # is the vertical MY campaign sells to" is `pipeline.qualify`'s per-campaign
+    # reading of that same text, and is never written back to the cache.
+
+    #: A services / practice-areas / "what we do" page. Where a business says
+    #: what it is in its own words -- the evidence the vertical rests on.
+    SERVICES_PAGE = "services_page"
+    #: A contact / intake page. Where evidence of taking new clients lives:
+    #: an intake form, a "free consultation", a "new clients welcome" line.
+    CONTACT_PAGE = "contact_page"
+
+    # --- event (deep research; not scored on the cold path) -------------
     JOB_POSTING = "job_posting"
     BLOG_POST = "blog_post"
     CHANGELOG = "changelog"
     PRESS = "press"
     FUNDING = "funding"
+
+    # --- context --------------------------------------------------------
     HOMEPAGE = "homepage"
     CAREERS_PAGE = "careers_page"
     LINKEDIN_PROFILE = "linkedin_profile"
     LEAD_NOTES = "lead_notes"
+
+
+#: The kinds `pipeline.qualify` reads. A fact outside this set cannot confirm a
+#: vertical, and so cannot be cited by the shipped template copy. Deliberately
+#: narrow: these are the pages where a business describes ITSELF. A blog post
+#: mentioning a law firm is not evidence that this company is one.
+QUALIFICATION_KINDS: frozenset[str] = frozenset(
+    {
+        FactKind.HOMEPAGE.value,
+        FactKind.SERVICES_PAGE.value,
+        FactKind.CONTACT_PAGE.value,
+    }
+)
 
 
 def stable_fact_id(kind: str, source_url: str | None, content: str) -> str:

@@ -3,19 +3,25 @@
 The tables, per CLAUDE.md's data model:
 
   workspaces        one per agency-client ClientRise runs outbound for
-  campaigns         a workspace's engagement + its scoring configuration
+  campaigns         a workspace's engagement + its offer and qualification rules
+  proof_points      the sender's own evidence: the stats his copy may cite
   leads             the incoming record + pipeline status
   research_cache    scraped facts, keyed by COMPANY DOMAIN (not by person)
   drafts            generated copy + the fact ids it rests on
   suppression_list  never-contact list, read on every ingest
   jobs              table-as-queue (no Redis/Celery at ~25 leads/day)
   draft_batches     one row per Claude Batch API submission + what it cost
+  mailboxes         the client's own sending accounts + their daily caps
+  sent_messages     one row per email WE sent, from which mailbox, when
 
 Cascade semantics (delete-by-person, GDPR/CCPA):
-  drafts.lead_id and jobs.lead_id are ON DELETE CASCADE, so deleting a lead
-  row removes its drafts and queued work in one statement. research_cache is
-  COMPANY-scoped and shared between colleagues, so it is deliberately NOT
-  cascaded — the privacy module prunes individual person-specific facts out of
+  drafts.lead_id, jobs.lead_id and sent_messages.lead_id are ON DELETE
+  CASCADE, so deleting a lead row removes its drafts, queued work and the
+  record of what was sent to him, in one statement. That last one is a
+  deliberate trade: an erasure request outranks our send audit trail
+  (guardrail 5), and the mailbox keeps its own Sent folder regardless.
+  research_cache is COMPANY-scoped and shared between colleagues, so it is
+  deliberately NOT cascaded — the privacy module prunes individual person-specific facts out of
   the JSONB list by fact id / subject_email. See mazz.schemas.Fact.
 
   leads.campaign_id points the other way (child -> parent), so it can neither
@@ -34,10 +40,12 @@ Tenancy boundary:
 from __future__ import annotations
 
 import enum
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     Enum,
     ForeignKey,
@@ -89,6 +97,20 @@ class VerificationStatus(str, enum.Enum):
     FAILED = "failed"
 
 
+class MailboxStatus(str, enum.Enum):
+    """Whether a mailbox may be handed work.
+
+    ``paused`` is the operator's switch (warming up, a bad week, a client
+    asking us to stop). ``disabled`` is the system's: authentication is broken
+    or the provider is refusing us, and no amount of waiting fixes it. Only
+    ``active`` mailboxes are ever selected to send.
+    """
+
+    ACTIVE = "active"
+    PAUSED = "paused"
+    DISABLED = "disabled"
+
+
 class JobStatus(str, enum.Enum):
     PENDING = "pending"
     RUNNING = "running"
@@ -112,6 +134,7 @@ def _pg_enum(python_enum: type[enum.Enum], name: str) -> Enum:
 lead_status_enum = _pg_enum(LeadStatus, "lead_status")
 verification_status_enum = _pg_enum(VerificationStatus, "verification_status")
 job_status_enum = _pg_enum(JobStatus, "job_status")
+mailbox_status_enum = _pg_enum(MailboxStatus, "mailbox_status")
 
 
 def _utcnow_column(**kwargs) -> Mapped[datetime]:
@@ -232,6 +255,52 @@ class Campaign(Base):
         JSONB, nullable=False, default=dict, server_default="{}"
     )
 
+    # --- the offer -----------------------------------------------------
+    #
+    # What this campaign SAYS, as opposed to who it says it to. These three
+    # fields plus `proof_points` are the entire non-lead content of email 1,
+    # and every one of them is written by the client, not by a model.
+
+    #: The vertical noun exactly as the copy uses it, plural: "law firms",
+    #: "dental practices", "HVAC contractors". This is the only personalised
+    #: word in email 1 that is not already on the lead row, which is why
+    #: `pipeline.qualify` must confirm it against the prospect's own site
+    #: before a draft is rendered. A campaign with no vertical cannot draft.
+    vertical: Mapped[str | None] = mapped_column(String(120))
+
+    #: What the sender does for that vertical, as a phrase completing
+    #: "We help <vertical> ___": "generate qualified client opportunities
+    #: through search marketing". Free text, the client's own words.
+    offer_line: Mapped[str | None] = mapped_column(Text)
+
+    #: Partial ``QualificationConfig`` override, same contract as
+    #: ``scoring_config``: ``{}`` means the shipped defaults, and the keys are
+    #: ``QualificationConfig`` field names. This holds the vocabulary that
+    #: decides whether a prospect's site confirms the vertical -- the single
+    #: biggest lever on both coverage and on sending to the wrong business.
+    qualification_config: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+
+    #: Send with a generic vertical ("businesses like yours") when ``vertical``
+    #: is not set, instead of refusing to draft.
+    #:
+    #: OFF by default, and it is opt-in rather than the behaviour of a blank
+    #: field on purpose. A blank ``vertical`` is normally a setup gap, and the
+    #: loud refusal is what gets it filled in; a silent fallback would mean a
+    #: half-finished campaign quietly sending filler that looks like it is
+    #: working. Turning this on is an operator saying "I know, send it anyway"
+    #: -- usually because the offer genuinely is vertical-agnostic.
+    #:
+    #: What it does NOT waive: the prospect still has to show they take on new
+    #: clients (the opening question presupposes it) and a site that
+    #: disqualifies itself still stops the lead. The generic phrase asserts
+    #: nothing about the recipient, so only the vertical gate has nothing left
+    #: to check -- see ``QualificationConfig.vertical_required``.
+    generic_vertical_fallback: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+
     created_at: Mapped[datetime] = _utcnow_column(
         nullable=False, server_default=func.now()
     )
@@ -244,6 +313,11 @@ class Campaign(Base):
         back_populates="campaign",
         passive_deletes=True,
     )
+    proof_points: Mapped[list["ProofPoint"]] = relationship(
+        back_populates="campaign",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
     __table_args__ = (
         UniqueConstraint("workspace_id", "name", name="uq_campaigns_workspace_id_name"),
@@ -251,10 +325,91 @@ class Campaign(Base):
             "jsonb_typeof(scoring_config) = 'object'",
             name="scoring_config_is_object",
         ),
+        CheckConstraint(
+            "jsonb_typeof(qualification_config) = 'object'",
+            name="qualification_config_is_object",
+        ),
     )
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<Campaign {self.id} ws={self.workspace_id} {self.name!r}>"
+
+
+# --------------------------------------------------------------------------
+# proof_points
+# --------------------------------------------------------------------------
+
+
+class ProofPoint(Base):
+    """One piece of the SENDER's own evidence, and the only source of a number.
+
+    The client's email carries exactly one statistic -- "One recent client saw
+    50+ potential clients in a single month" -- and it is a claim about *his*
+    business, not the prospect's. Before this table the only place such a
+    sentence could come from was free text in ``leads.notes``, which meant the
+    strongest claim in the message had the weakest provenance in the system.
+
+    So it gets a row, and the row carries what would be needed to stand behind
+    it if the recipient asked:
+
+      * ``claim_text`` -- the sentence as it will appear in the email, verbatim.
+        The composer copies it; it never paraphrases it, and never recomputes
+        the number. `verify` matches it character for character, which is why
+        this is one text field and not a stat plus a template.
+      * ``client_name`` / ``occurred_on`` / ``source_note`` -- who, when, and
+        where the client can show the underlying report. Not printed in the
+        email; they exist so a claim cannot be entered as an unattributed
+        number, and so a stale one is visible as stale.
+
+    ``active`` retires a claim without deleting the evidence that it was once
+    made -- a stat that was true in 2024 and is now embarrassing should stop
+    being selected, not disappear from the record of what was sent.
+    """
+
+    __tablename__ = "proof_points"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    campaign_id: Mapped[int] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+
+    #: The sentence, verbatim, as the email will carry it.
+    claim_text: Mapped[str] = mapped_column(Text, nullable=False)
+
+    #: Whose result this was. Required: an unattributed statistic is the shape
+    #: of claim this table exists to stop.
+    client_name: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    #: When the result happened. "One recent client" decays; a date is how the
+    #: review UI can say so.
+    occurred_on: Mapped[date | None] = mapped_column(Date)
+
+    #: Where the client can produce the evidence -- a dashboard, a report, a
+    #: signed case study. Free text, never printed.
+    source_note: Mapped[str | None] = mapped_column(Text)
+
+    #: Retired claims stay for the audit trail but are never selected.
+    active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+
+    created_at: Mapped[datetime] = _utcnow_column(
+        nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = _utcnow_column(
+        nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    campaign: Mapped[Campaign] = relationship(back_populates="proof_points")
+
+    __table_args__ = (
+        CheckConstraint("length(btrim(claim_text)) > 0", name="claim_text_not_blank"),
+        CheckConstraint("length(btrim(client_name)) > 0", name="client_name_not_blank"),
+        Index("ix_proof_points_campaign_active", "campaign_id", "active"),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<ProofPoint {self.id} campaign={self.campaign_id} {self.client_name!r}>"
 
 
 # --------------------------------------------------------------------------
@@ -565,6 +720,182 @@ class DraftBatch(Base):
 
 
 # --------------------------------------------------------------------------
+# mailboxes
+# --------------------------------------------------------------------------
+
+
+class Mailbox(Base):
+    """One sending account the client owns, and what it is allowed to do.
+
+    This is the table that replaced Smartlead as the sending rail. We do not
+    provision these and we do not warm them: CLAUDE.md is explicit that mailbox
+    provisioning is commodity and that warmup is a network effect we cannot
+    build with five mailboxes. We buy both. What we own is the orchestration on
+    top -- which mailbox sends the next approved email, how many it may send
+    today, and how long it waits between sends.
+
+    **No secret is stored here.** ``credential_ref`` NAMES a credential that
+    the sender adapter resolves at send time (for Google Workspace, the service
+    account whose domain-wide delegation covers this address). Burner domains
+    usually mean several Workspace tenants, so the reference is per-mailbox
+    rather than one global key -- but the key material stays in the
+    environment, never in a row a reviewer can read off a screen.
+
+    ``daily_cap`` is the deliverability control, and it is deliberately small.
+    Google Workspace itself permits ~2000 recipients/day; cold outreach from a
+    burner domain does not survive anything near that. The default is 30.
+
+    ``campaign_id`` is CLAUDE.md's "one-campaign-per-mailbox must remain
+    possible without a migration": leave it NULL and the mailbox serves every
+    campaign (the default rotation), set it and the mailbox is pinned to one.
+    """
+
+    __tablename__ = "mailboxes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    #: Pin this mailbox to a single campaign. NULL -- the default -- means it
+    #: is in the general rotation. SET NULL on campaign delete: retiring a
+    #: campaign must never delete a mailbox the client is paying for.
+    campaign_id: Mapped[int | None] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="SET NULL"), index=True
+    )
+
+    #: The envelope + header From address. Unique: two rows for one account
+    #: would double its real daily cap while each row believed it was obeying.
+    email_address: Mapped[str] = mapped_column(String(320), nullable=False, unique=True)
+    #: The human name on the From header ("Dana Whitfield").
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    #: Which adapter sends for this mailbox. Free text, like ``jobs.kind`` --
+    #: adding M365 later must not need a migration.
+    provider: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="google"
+    )
+    #: NAMES the credential; never holds it. See the class docstring.
+    credential_ref: Mapped[str] = mapped_column(String(128), nullable=False)
+
+    status: Mapped[MailboxStatus] = mapped_column(
+        mailbox_status_enum,
+        nullable=False,
+        default=MailboxStatus.ACTIVE,
+        server_default=MailboxStatus.ACTIVE.value,
+        index=True,
+    )
+
+    #: Messages per calendar day (UTC). Counted from ``sent_messages``, not
+    #: from a column here, so a crash between send and bookkeeping can never
+    #: lose count and let the mailbox overrun its cap.
+    daily_cap: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=30, server_default="30"
+    )
+    #: Minimum gap between two sends from this mailbox. Deterministic, for the
+    #: same reason the retry backoff is: a test can assert it.
+    min_spacing_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=300, server_default="300"
+    )
+
+    #: Rotation cursor and spacing clock. Written on every successful send.
+    last_sent_at: Mapped[datetime | None] = _utcnow_column()
+
+    #: Health. A send failure increments; a success resets to 0. The selector
+    #: prefers healthy mailboxes, and the operator sees this on /mailboxes.
+    consecutive_failures: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+    notes: Mapped[str | None] = mapped_column(Text)
+
+    created_at: Mapped[datetime] = _utcnow_column(
+        nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = _utcnow_column(
+        nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    campaign: Mapped["Campaign | None"] = relationship()
+    sent_messages: Mapped[list["SentMessage"]] = relationship(
+        back_populates="mailbox",
+        passive_deletes=True,
+    )
+
+    __table_args__ = (
+        CheckConstraint("daily_cap >= 0", name="daily_cap_not_negative"),
+        CheckConstraint(
+            "min_spacing_seconds >= 0", name="min_spacing_seconds_not_negative"
+        ),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<Mailbox {self.id} {self.email_address} {self.status.value}>"
+
+
+# --------------------------------------------------------------------------
+# sent_messages
+# --------------------------------------------------------------------------
+
+
+class SentMessage(Base):
+    """One email that actually left, from which mailbox, when.
+
+    Three jobs, and it is the only row that can do any of them:
+
+    * **Cap enforcement.** ``count(*) WHERE mailbox_id = ? AND sent_at >=
+      today`` is the daily cap. Deriving it from real sends rather than from a
+      counter means a crash mid-send cannot silently reset a mailbox's budget.
+    * **Proof of what we sent.** ``drafts`` holds what was approved; a draft
+      can be edited afterwards. This holds the copy that went out.
+    * **The hook replies will need.** ``provider_thread_id`` /
+      ``rfc_message_id`` are what an inbound reply matches against when the
+      unified inbox lands (CLAUDE.md work-order item 4).
+
+    Cascades with the lead, per guardrail 5 -- see the module docstring.
+    """
+
+    __tablename__ = "sent_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    lead_id: Mapped[int] = mapped_column(
+        ForeignKey("leads.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    draft_id: Mapped[int] = mapped_column(
+        ForeignKey("drafts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    #: SET NULL, not CASCADE: removing a mailbox from the roster must not
+    #: erase the evidence of what it sent while it was on it.
+    mailbox_id: Mapped[int | None] = mapped_column(
+        ForeignKey("mailboxes.id", ondelete="SET NULL"), index=True
+    )
+
+    #: Denormalised so the audit row is readable on its own.
+    from_address: Mapped[str] = mapped_column(String(320), nullable=False)
+    to_address: Mapped[str] = mapped_column(String(320), nullable=False)
+    subject: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+
+    #: The RFC 5322 Message-ID we sent under, and the provider's own ids.
+    rfc_message_id: Mapped[str | None] = mapped_column(String(512))
+    provider_message_id: Mapped[str | None] = mapped_column(String(128))
+    provider_thread_id: Mapped[str | None] = mapped_column(String(128), index=True)
+
+    sent_at: Mapped[datetime] = _utcnow_column(
+        nullable=False, server_default=func.now(), index=True
+    )
+
+    lead: Mapped["Lead"] = relationship()
+    draft: Mapped["Draft"] = relationship()
+    mailbox: Mapped[Mailbox | None] = relationship(back_populates="sent_messages")
+
+    __table_args__ = (
+        Index("ix_sent_messages_mailbox_id_sent_at", "mailbox_id", "sent_at"),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<SentMessage {self.id} lead={self.lead_id} -> {self.to_address}>"
+
+
+# --------------------------------------------------------------------------
 # jobs
 # --------------------------------------------------------------------------
 
@@ -635,7 +966,10 @@ __all__ = [
     "JobStatus",
     "Lead",
     "LeadStatus",
+    "Mailbox",
+    "MailboxStatus",
     "ResearchCache",
+    "SentMessage",
     "SuppressionEntry",
     "VerificationStatus",
     "Workspace",
