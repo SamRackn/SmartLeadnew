@@ -33,15 +33,14 @@ from mazz.integrations.linkedin import (
     canonical_profile_url,
     get_linkedin_adapter,
 )
-from mazz.integrations.smartlead import (
-    CampaignNotFound,
-    LeadPushSettings,
-    PushResult,
-    SmartleadCampaign,
-    SmartleadClient,
-    SmartleadLead,
-    StubSmartleadClient,
-    get_smartlead_client,
+from mazz.integrations.email_sender import (
+    EmailSender,
+    GmailSender,
+    OutgoingMessage,
+    SendReceipt,
+    SenderNotConfigured,
+    StubEmailSender,
+    get_email_sender,
 )
 
 __all__ = [
@@ -67,12 +66,11 @@ __all__ = [
     "InvalidDomain",
     "normalize_domain",
     "get_company_adapter",
-    "SmartleadClient",
-    "StubSmartleadClient",
-    "SmartleadLead",
-    "SmartleadCampaign",
-    "LeadPushSettings",
-    "PushResult",
-    "CampaignNotFound",
-    "get_smartlead_client",
+    "EmailSender",
+    "StubEmailSender",
+    "GmailSender",
+    "OutgoingMessage",
+    "SendReceipt",
+    "SenderNotConfigured",
+    "get_email_sender",
 ]

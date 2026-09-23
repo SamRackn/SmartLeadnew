@@ -1,7 +1,7 @@
 [project]
 name = "mazz"
 version = "0.1.0"
-description = "Research and personalization layer feeding Smartlead"
+description = "Owned outbound platform: research, personalization and sending"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi",
@@ -21,6 +21,10 @@ dev = ["pytest", "httpx"]
 # must keep importing and testing with nothing installed, which is also what
 # keeps the lazy imports in `compose_claude` honest.
 ai = ["anthropic"]
+# Live sending as the client's own Google Workspace mailboxes. Optional for the
+# same reason `ai` is: the stub sender must keep importing and testing with
+# nothing installed, which is what keeps GmailSender's lazy imports honest.
+google = ["google-api-python-client", "google-auth"]
 
 [build-system]
 requires = ["setuptools>=68"]

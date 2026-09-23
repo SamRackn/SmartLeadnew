@@ -51,6 +51,7 @@ from mazz.models import Job, JobStatus, Lead, LeadStatus
 __all__ = [
     "DEFAULT_HANDLERS",
     "JobContext",
+    "JobDeferred",
     "JobHandler",
     "PermanentJobError",
     "RetrySettings",
@@ -58,6 +59,7 @@ __all__ = [
     "WorkerStats",
     "claim_job",
     "complete_job",
+    "defer_job",
     "enqueue_job",
     "fail_job",
     "process_next",
@@ -119,6 +121,24 @@ class PermanentJobError(Exception):
 
 class UnknownJobKind(PermanentJobError):
     """No handler registered for ``jobs.kind``."""
+
+
+class JobDeferred(Exception):
+    """Not now, but not a failure either. Re-arm for ``retry_at``.
+
+    Pacing needs a third outcome. A send waiting on a mailbox's daily cap has
+    not gone wrong -- nothing is broken, the message simply must not leave for
+    another six hours -- so treating it as a failure would spend one of the
+    job's five attempts, and five capped days would kill work that was always
+    going to succeed. ``attempts`` is therefore NOT incremented here.
+
+    Use it only for conditions that resolve by waiting. A missing mailbox, a
+    rejected draft or a bad credential are not deferrals: they need a person.
+    """
+
+    def __init__(self, message: str, *, retry_at: datetime) -> None:
+        super().__init__(message)
+        self.retry_at = retry_at
 
 
 def _is_permanent(exc: BaseException) -> bool:
@@ -308,6 +328,34 @@ def _hold_lead(session: Session, lead_id: int) -> None:
     lead.status = LeadStatus.HELD
 
 
+def defer_job(
+    session: Session,
+    job: Job,
+    deferred: JobDeferred,
+    *,
+    now: datetime | None = None,
+) -> Job:
+    """Put a job back in the queue for later, without counting a failure.
+
+    ``last_error`` is written even though nothing failed: it is the only field
+    that can explain why an otherwise-healthy job is sitting with a
+    ``run_after`` six hours out, and it is prefixed so a reader can tell it
+    apart from a real error. The dashboard only surfaces ``last_error`` for
+    FAILED jobs, so this never reads as a fault there.
+    """
+
+    now = now or utcnow()
+    job.status = JobStatus.PENDING
+    job.locked_at = None
+    job.run_after = max(deferred.retry_at, now)
+    job.last_error = f"[deferred] {deferred}"[:4000]
+    session.flush()
+    log.info(
+        "job %s (%s) deferred until %s: %s", job.id, job.kind, job.run_after, deferred
+    )
+    return job
+
+
 def reclaim_stale_jobs(
     session: Session,
     *,
@@ -386,23 +434,39 @@ JobHandler = Callable[[JobContext], None]
 
 
 def _default_handlers() -> dict[str, JobHandler]:
-    """The full Phase 1 chain, in the order a lead moves through it.
+    """The pipeline chain, in the order a lead moves through it.
 
     Each handler calls ``ctx.enqueue_next(...)`` for the following stage, so
-    registering all four is what makes ingest -> sent actually run end to end.
+    registering them is what makes ingest -> verify actually run end to end.
     Imported lazily so importing the queue does not drag in the adapters.
+
+    **The chain stops at verify.** ``send`` is registered here so the worker can
+    run it, but NOTHING enqueues it: a send job exists only because a human
+    pressed approve in the review app, one lead at a time. Do not add
+    ``ctx.enqueue_next("send")`` to `handle_verify` -- that single line would
+    turn this into an auto-sender and break guardrail 4.
     """
 
     from mazz.pipeline.draft import handle_draft
     from mazz.pipeline.enrich import handle_enrich
-    from mazz.pipeline.score import handle_score
+    from mazz.pipeline.qualify import handle_qualify
+    from mazz.pipeline.send import handle_send
     from mazz.pipeline.verify import handle_verify
 
     return {
         "enrich": handle_enrich,
-        "score": handle_score,
+        "qualify": handle_qualify,
+        # Jobs queued before the qualification cutover, drained rather than
+        # dead-lettered. `score` ranked event facts by "reason to reach out
+        # right now"; `qualify` asks whether the premise of the copy holds.
+        # Different questions, same position in the chain, and a lead sitting
+        # in a queue is better re-asked than failed. Delete this alias once no
+        # `score` rows remain.
+        "score": handle_qualify,
         "draft": handle_draft,
         "verify": handle_verify,
+        # Enqueued by the approve route only. See the docstring above.
+        "send": handle_send,
     }
 
 
@@ -429,8 +493,7 @@ class _HandlerRegistry(Mapping[str, JobHandler]):
 
 #: The Phase 1 registry. Other agents extend it by passing their own mapping to
 #: ``run_worker`` / ``process_next`` -- e.g. ``{**DEFAULT_HANDLERS,
-#: "score": handle_score}``. Register a ``"score"`` handler and the enrich step
-#: chains to it automatically.
+#: "qualify": handle_qualify}``.
 DEFAULT_HANDLERS: Mapping[str, JobHandler] = _HandlerRegistry()
 
 
@@ -445,12 +508,13 @@ class WorkerStats:
     done: int = 0
     retried: int = 0
     failed: int = 0
+    deferred: int = 0
     kinds: dict[str, int] = field(default_factory=dict)
 
     def __str__(self) -> str:
         return (
             f"claimed={self.claimed} done={self.done} "
-            f"retried={self.retried} failed={self.failed}"
+            f"retried={self.retried} deferred={self.deferred} failed={self.failed}"
         )
 
 
@@ -507,6 +571,16 @@ def process_next(
             handler(JobContext(session=session, job=live, lead=lead, handlers=registry))
             complete_job(session, live)
             stats.done += 1
+            return live
+    except JobDeferred as deferred:
+        # Not an error: the handler asked to be run again later (a paced send
+        # waiting on a mailbox's cap). No attempt is spent.
+        with session_factory() as session:
+            live = session.get(Job, job_id)
+            if live is None:
+                return claimed
+            defer_job(session, live, deferred)
+            stats.deferred += 1
             return live
     except Exception as exc:  # noqa: BLE001 - the queue is the top of the stack
         with session_factory() as session:

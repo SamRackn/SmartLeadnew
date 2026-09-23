@@ -48,9 +48,23 @@ class Settings(BaseSettings):
     sender_postal_address: str = ""
 
     # --- Phase 2 providers (unused in Phase 1; everything is stubbed) ----
-    smartlead_api_key: str = ""
-    smartlead_default_campaign_id: str = ""
     anthropic_api_key: str = ""
+
+    # --- Sending --------------------------------------------------------
+    # Which sender is in force. "stub" appends the real MIME to
+    # `sent_outbox.jsonl` and touches no network; "google" sends as the
+    # client's own Google Workspace mailboxes over the Gmail API.
+    #
+    # Explicit, exactly like `draft_composer`, and for a sharper reason: a
+    # service-account key appearing in the environment is not consent to start
+    # emailing strangers. Presence of GMAIL_SA_* must never flip this.
+    email_sender: str = "stub"
+    # Per-mailbox daily send ceiling used when a mailbox row does not set its
+    # own. Small on purpose -- Workspace permits ~2000/day, and cold outreach
+    # from a burner domain does not survive anything near that.
+    default_daily_cap: int = 30
+    # Minimum gap between two sends from the SAME mailbox, in seconds.
+    default_min_spacing_seconds: int = 300
 
     # --- Drafting -------------------------------------------------------
     # Which composer is in force. "template" is the deterministic Phase 1

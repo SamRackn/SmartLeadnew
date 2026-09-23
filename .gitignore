@@ -3,7 +3,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
-smartlead_outbox.jsonl
+sent_outbox.jsonl
 .DS_Store
 *.egg-info/
 var/

@@ -442,7 +442,7 @@ def test_enrich_handler_marks_a_genuinely_empty_result_no_angle(session):
     assert lead.status is LeadStatus.NO_ANGLE
 
 
-def test_enrich_handler_chains_to_the_scorer_only_when_one_is_registered(session):
+def test_enrich_handler_chains_to_qualify_only_when_one_is_registered(session):
     lead = h.make_lead(session)
     job, _ = enqueue_job(session, lead.id, "enrich")
 
@@ -452,10 +452,10 @@ def test_enrich_handler_chains_to_the_scorer_only_when_one_is_registered(session
     handle_enrich(
         JobContext(
             session=session, job=job, lead=lead,
-            handlers={"enrich": handle_enrich, "score": lambda ctx: None},
+            handlers={"enrich": handle_enrich, "qualify": lambda ctx: None},
         )
     )
-    assert sorted(j.kind for j in h.jobs_for(session, lead.id)) == ["enrich", "score"]
+    assert sorted(j.kind for j in h.jobs_for(session, lead.id)) == ["enrich", "qualify"]
 
 
 def test_worker_drains_the_queue_end_to_end(monkeypatch):
@@ -472,9 +472,13 @@ def test_worker_drains_the_queue_end_to_end(monkeypatch):
     reload_settings()
     h.reset_db()
     with h.db_session() as setup:
-        dana = h.make_lead(setup)
+        # Both routed to ONE campaign: colleagues at one employer, one offer,
+        # and the research they share is fetched once between them.
+        campaign = h.make_campaign(setup)
+        dana = h.make_lead(setup, campaign_id=campaign.id)
         marcus = h.make_lead(
             setup,
+            campaign_id=campaign.id,
             full_name="Marcus Oyelaran",
             email="marcus.oyelaran@northwind-logistics.com",
             linkedin_url=h.SHARED_PROFILES[1],
@@ -490,7 +494,7 @@ def test_worker_drains_the_queue_end_to_end(monkeypatch):
     assert stats.claimed == 8, stats
     assert stats.done == 8, stats
     assert stats.failed == 0, stats
-    assert stats.kinds == {"enrich": 2, "score": 2, "draft": 2, "verify": 2}, stats
+    assert stats.kinds == {"enrich": 2, "qualify": 2, "draft": 2, "verify": 2}, stats
 
     with h.db_session() as check:
         assert h.count(check, ResearchCache) == 1, "one row for the shared employer"
