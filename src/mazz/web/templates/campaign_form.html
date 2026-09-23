@@ -23,9 +23,88 @@
       auto-routed — leads can still be pointed at it directly.
     </span>
   </label>
+  <fieldset class="offer">
+    <legend>The offer — what email 1 says</legend>
+    <p class="hint">
+      Email 1 is a fixed template with three slots. Two come from the lead
+      (first name, company name). Everything else is here, in your words:
+    </p>
+    <blockquote class="preview">
+      Hey <em>Louis</em>,<br><br>
+      Quick question — is <em>DAME Legal</em> currently looking to bring in more clients?<br><br>
+      We help <strong>{% if form.vertical %}{{ form.vertical }}{% elif form.generic_vertical_fallback %}businesses like yours{% else %}&lt;vertical&gt;{% endif %}</strong>
+      <strong>{{ form.offer_line or "&lt;offer line&gt;" }}</strong>.
+      {% if proof_points and proof_points[0].active %}<strong>{{ proof_points[0].claim_text }}</strong>{% endif %}<br><br>
+      Worth sending over a little more info?
+    </blockquote>
+
+    <label>Vertical
+      <input type="text" name="vertical" value="{{ form.vertical }}" placeholder="law firms">
+      <span class="hint">
+        Plural, exactly as the sentence should read: "We help <strong>law firms</strong> …".
+        This is the only personalised word in the email that is not already on the lead
+        row, and it is never printed unless the prospect's own homepage, services or
+        contact page confirms it — see the vocabulary below. A campaign with no vertical
+        cannot draft at all; it raises rather than quietly marking every lead no-angle.
+      </span>
+    </label>
+
+    <label class="checkbox">
+      <input type="checkbox" name="generic_vertical_fallback" value="on"
+             {% if form.generic_vertical_fallback %}checked{% endif %}>
+      Send "businesses like yours" when no vertical is set
+      <span class="hint">
+        Off by default. With no vertical and this unticked, the campaign
+        <strong>refuses to draft</strong> — a blank vertical is normally a setup gap,
+        and the loud error is what gets it filled in. Tick it when the offer genuinely
+        is vertical-agnostic and you would rather send than wait.
+        <br><br>
+        What you give up: "We help law firms" is specific enough that a partner at a law
+        firm reads the next sentence, and "businesses like yours" is what every
+        competitor's template already says. What you do <em>not</em> give up: the
+        prospect still has to show they take on new clients, and a parked or closed site
+        still stops the lead — the generic phrase changes what we claim, not whether this
+        company is worth writing to. The review panel says plainly that no vertical was
+        confirmed.
+      </span>
+    </label>
+
+    <label>Offer line
+      <input type="text" name="offer_line" value="{{ form.offer_line }}"
+             placeholder="generate qualified client opportunities through search marketing">
+      <span class="hint">
+        Completes "We help &lt;vertical&gt; ___". No numbers here: that sentence reads as
+        a statement about you, so the verifier does not hold its figures to anything,
+        which would make a statistic typed here the strongest claim in the message with
+        nothing behind it. Results go in a proof point, below, where they get a client
+        name and a date.
+      </span>
+    </label>
+
+    <label>Qualification vocabulary (JSON)
+      <textarea name="qualification_config" rows="10" spellcheck="false">{{ form.qualification_config }}</textarea>
+      <span class="hint">
+        What has to appear on a prospect's own homepage, services or contact page before
+        we will call them your vertical. <code>{}</code> means the shipped defaults, which
+        deliberately qualify <strong>nobody</strong> — an unconfigured campaign writes to
+        no one rather than to everyone. Typical:
+        <code>{"vertical_terms": ["law firm", "attorneys at law", "practice areas"]}</code>.
+        Terms match whole words only ("legal" will not match "paralegal") and case does
+        not matter. Other keys: <code>service_terms</code>, <code>intake_terms</code>,
+        <code>disqualifier_terms</code>, <code>require_intake_signal</code> (on by
+        default — the opening question presupposes they take new clients, so we make them
+        show it), <code>min_vertical_matches</code>. Validated here through the exact
+        loader the worker uses; an unknown key is refused, not ignored.
+      </span>
+    </label>
+  </fieldset>
+
   <label>Scoring config (JSON)
     <textarea name="scoring_config" rows="12" spellcheck="false">{{ form.scoring_config }}</textarea>
     <span class="hint">
+      <strong>Legacy.</strong> This configured the event-research scoring the cold path
+      no longer runs — leads are qualified against the vocabulary above instead. It is
+      kept because the deep-research path still reads it. Below:
       A PARTIAL override of the shipped <code>ScoringConfig</code> — <code>{}</code> means
       "shipped defaults, unchanged". Keys must be real <code>ScoringConfig</code> field
       names (an unknown key is refused, not ignored); the value must be a JSON object, not
@@ -44,14 +123,97 @@
 </form>
 
 {% if campaign %}
+{% set proof_form = proof_form | default({}, true) %}
+<section class="proof-points">
+  <h2>Proof points</h2>
+  <p class="hint">
+    The sender's own evidence, and the only place a number may enter the copy from.
+    Email 1 carries the top active claim, verbatim — it is never reworded, rounded or
+    recalculated. Retiring one takes effect immediately and retroactively: a draft
+    already waiting for review stops verifying the moment its claim is pulled.
+  </p>
+
+  {% if proof_points %}
+  <table class="proof-table">
+    <thead>
+      <tr><th>Claim</th><th>Client</th><th>When</th><th>Evidence</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for proof in proof_points %}
+      <tr class="{{ 'retired' if not proof.active }}">
+        <td>
+          {{ proof.claim_text }}
+          {% if loop.first and proof.active %}<span class="badge">in use</span>{% endif %}
+        </td>
+        <td>{{ proof.client_name }}</td>
+        <td>{{ proof.occurred_on.isoformat() if proof.occurred_on else "—" }}</td>
+        <td class="muted">{{ proof.source_note or "—" }}</td>
+        <td>
+          <form method="post"
+                action="/campaigns/{{ campaign.id }}/proof-points/{{ proof.id }}/retire">
+            <input type="hidden" name="active" value="{{ 'false' if proof.active else 'true' }}">
+            <button type="submit" class="{{ 'reject' if proof.active else '' }}">
+              {{ "Retire" if proof.active else "Restore" }}
+            </button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">
+    No proof points yet. Email 1 still sends — it carries the offer sentence without a
+    result claim, which is one fewer thing to stand behind, not a failure.
+  </p>
+  {% endif %}
+
+  <form method="post" action="/campaigns/{{ campaign.id }}/proof-points" class="entity-form">
+    <h3>Add a proof point</h3>
+    <label>Claim
+      <input type="text" name="claim_text" value="{{ proof_form.claim_text or "" }}"
+             placeholder="One recent client saw 50+ potential clients in a single month."
+             required>
+      <span class="hint">
+        The sentence exactly as it should appear in the email. It is copied character
+        for character.
+      </span>
+    </label>
+    <label>Client
+      <input type="text" name="client_name" value="{{ proof_form.client_name or "" }}"
+             placeholder="Hartley &amp; Boyd LLP" required>
+      <span class="hint">
+        Whose result this was. Required, and never printed in the email — it exists so
+        the claim cannot be entered as a number with nobody behind it.
+      </span>
+    </label>
+    <label>When
+      <input type="date" name="occurred_on" value="{{ proof_form.occurred_on or "" }}">
+      <span class="hint">
+        The copy says "one <em>recent</em> client". Dated claims are used first; leave it
+        blank if you do not have the date and this one sorts last.
+      </span>
+    </label>
+    <label>Where the evidence lives
+      <input type="text" name="source_note" value="{{ proof_form.source_note or "" }}"
+             placeholder="GA4 + call tracking export, July 2026">
+      <span class="hint">Never printed. What you would show if the recipient asked.</span>
+    </label>
+    <button type="submit">Add proof point</button>
+  </form>
+</section>
+{% endif %}
+
+{% if campaign %}
 <section class="danger-zone">
   <h2>Retire this campaign</h2>
   <p>
     {% if lead_count %}
       <strong>{{ lead_count }}</strong> lead(s) are currently routed to this campaign.
       Deleting it will <strong>not</strong> delete them, their drafts, or any queued job —
-      <code>leads.campaign_id</code> is set to <code>NULL</code> and they revert to the
-      shipped scoring defaults, exactly as an unrouted lead scores today.
+      <code>leads.campaign_id</code> is set to <code>NULL</code>. They stop qualifying,
+      because an unrouted lead has no vertical to be confirmed as and so no email to
+      write. Its proof points go with it.
     {% else %}
       No leads are currently routed to this campaign. Deleting it affects nobody.
     {% endif %}

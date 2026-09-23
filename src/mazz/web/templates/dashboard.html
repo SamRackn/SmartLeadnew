@@ -1,0 +1,247 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — MazzSmartLead Review{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+<p class="rationale">
+  Read-only. Leads with cost per usable lead, because it is the primary objective —
+  everything else here is where that cost is coming from.
+</p>
+
+{% if show_cost_panel %}
+<section class="dash-panel">
+  <h2>Cost per usable lead</h2>
+  <dl class="dash-stats">
+    <dt>Total measured spend</dt>
+    <dd>${{ "%.4f"|format(total_cost_usd) }}</dd>
+
+    <dt>Usable leads (drafts that passed verification)</dt>
+    <dd>{{ usable_leads }}</dd>
+
+    <dt>Cost per usable lead</dt>
+    {% if cost_per_usable_lead is none %}
+      <dd class="undefined">
+        no usable leads yet — ${{ "%.4f"|format(total_cost_usd) }} spent, 0 drafts have passed verification
+      </dd>
+    {% else %}
+      <dd>${{ "%.5f"|format(cost_per_usable_lead) }}</dd>
+    {% endif %}
+  </dl>
+</section>
+{% endif %}
+
+<section class="dash-panel">
+  <h2>Pipeline</h2>
+  <table class="dash-table">
+    <thead>
+      <tr><th>Status</th><th>Leads</th></tr>
+    </thead>
+    <tbody>
+      {% for s in all_statuses %}
+      <tr class="row-status-{{ s.value }}">
+        <td><span class="status-tag status-{{ s.value }}">{{ s.value }}</span></td>
+        <td>{{ status_counts[s] }}</td>
+      </tr>
+      {% endfor %}
+      <tr class="dash-total-row">
+        <td>total</td>
+        <td>{{ total_leads }}</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    <strong>no_angle share:</strong>
+    {% if no_angle_share is none %}
+      <span class="undefined">no leads yet</span>
+    {% else %}
+      {{ "%.1f"|format(no_angle_share) }}% of all leads —
+      the earliest signal that research quality is degrading.
+    {% endif %}
+  </p>
+</section>
+
+<section class="dash-panel">
+  <h2>Verification</h2>
+  <table class="dash-table">
+    <thead>
+      <tr><th>Verification status</th><th>Drafts</th></tr>
+    </thead>
+    <tbody>
+      {% for v in verification_counts %}
+      <tr>
+        <td><span class="verification-tag verification-{{ v.value }}">{{ v.value }}</span></td>
+        <td>{{ verification_counts[v] }}</td>
+      </tr>
+      {% endfor %}
+      <tr class="dash-total-row">
+        <td>total</td>
+        <td>{{ total_drafts }}</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    <strong>Hold rate:</strong>
+    {% if hold_rate is none %}
+      <span class="undefined">no verified drafts yet</span>
+    {% else %}
+      {{ "%.1f"|format(hold_rate * 100) }}% of verified drafts failed —
+      the number standing between this project and <code>DRAFT_COMPOSER=claude</code>.
+    {% endif %}
+  </p>
+</section>
+
+{% if show_research_cache_panel or show_prompt_cache_panel %}
+<section class="dash-panel">
+  <h2>Cache effectiveness</h2>
+
+  {% if show_research_cache_panel %}
+  <h3>Research cache (dedup across colleagues at the same employer)</h3>
+  <dl class="dash-stats">
+    <dt>Leads</dt><dd>{{ total_leads }}</dd>
+    <dt>Research cache rows (distinct companies)</dt><dd>{{ research_cache_rows }}</dd>
+    <dt>Leads per cached company</dt>
+    <dd>
+      {% if leads_per_cache_row is none %}
+        <span class="undefined">no research cached yet</span>
+      {% else %}
+        {{ "%.1f"|format(leads_per_cache_row) }}
+      {% endif %}
+    </dd>
+  </dl>
+  {% endif %}
+
+  {% if show_prompt_cache_panel %}
+  <h3>Prompt cache (Claude Batch API system-prompt reuse)</h3>
+  <dl class="dash-stats">
+    <dt>Cache read tokens</dt><dd>{{ cache_read_tokens }}</dd>
+    <dt>Cache creation tokens</dt><dd>{{ cache_creation_tokens }}</dd>
+    <dt>Cache hit rate</dt>
+    <dd>
+      {% if prompt_cache_hit_rate is none %}
+        <span class="undefined">no token usage recorded yet</span>
+      {% else %}
+        {{ "%.1f"|format(prompt_cache_hit_rate * 100) }}%
+        {% if prompt_cache_hit_rate <= 0.01 %}
+          <span class="dash-alert">— near zero: caching may be broken</span>
+        {% endif %}
+      {% endif %}
+    </dd>
+  </dl>
+  {% endif %}
+</section>
+{% endif %}
+
+{% if show_queue_panel %}
+<section class="dash-panel">
+  <h2>Queue health</h2>
+  <table class="dash-table">
+    <thead>
+      <tr><th>Job status</th><th>Jobs</th></tr>
+    </thead>
+    <tbody>
+      {% for j in all_job_statuses %}
+      <tr>
+        <td><span class="job-tag job-{{ j.value }}">{{ j.value }}</span></td>
+        <td>{{ job_counts[j] }}</td>
+      </tr>
+      {% endfor %}
+      <tr class="dash-total-row">
+        <td>total</td>
+        <td>{{ total_jobs }}</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <dl class="dash-stats">
+    <dt>Failure rate (of settled jobs)</dt>
+    <dd>
+      {% if job_failure_rate is none %}
+        <span class="undefined">no jobs have settled yet</span>
+      {% else %}
+        {{ "%.1f"|format(job_failure_rate * 100) }}%
+      {% endif %}
+    </dd>
+
+    <dt>Oldest claimable job</dt>
+    <dd>
+      {% if oldest_claimable_age is none %}
+        <span class="undefined">nothing waiting</span>
+      {% else %}
+        {{ oldest_claimable_age }} old
+      {% endif %}
+    </dd>
+
+    <dt>Stale <code>running</code> jobs (held &gt; {{ stale_after_display }})</dt>
+    <dd>
+      {{ stale_running_jobs }}
+      {% if stale_running_jobs %}
+        <span class="dash-alert">— a worker may have died; nothing reclaims these automatically</span>
+      {% endif %}
+    </dd>
+  </dl>
+
+  {% if recent_failures %}
+  <h3>Jobs that gave up</h3>
+  <p class="rationale">
+    Retry budget spent, or a permanent error. Each of these leads was parked in
+    <code>held</code> rather than marked <code>no_angle</code> — we failed to research him,
+    which is not the same as finding nothing.
+  </p>
+  <table class="dash-table">
+    <thead>
+      <tr>
+        <th>Job</th>
+        <th>Lead</th>
+        <th>Kind</th>
+        <th>Attempts</th>
+        <th>Failed</th>
+        <th>Last error</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for f in recent_failures %}
+      <tr>
+        <td>{{ f.job_id }}</td>
+        <td><a href="/leads/{{ f.lead_id }}">{{ f.lead_id }}</a></td>
+        <td>{{ f.kind }}</td>
+        <td>{{ f.attempts }}</td>
+        <td>{{ f.age_display }} ago</td>
+        <td class="error-cell">{{ f.error_excerpt }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endif %}
+
+{% if recent_batches %}
+<section class="dash-panel">
+  <h2>Recent batches</h2>
+  <table class="dash-table">
+    <thead>
+      <tr>
+        <th>Batch id</th>
+        <th>Model</th>
+        <th>Requests</th>
+        <th>Cost</th>
+        <th>Status</th>
+        <th>Wall clock</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for b in recent_batches %}
+      <tr>
+        <td>{{ b.batch_id }}</td>
+        <td>{{ b.model }}</td>
+        <td>{{ b.request_count }}</td>
+        <td>{% if b.cost_usd is none %}—{% else %}${{ "%.4f"|format(b.cost_usd) }}{% endif %}</td>
+        <td>{{ b.status }}</td>
+        <td>{{ b.duration_display }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+{% endblock %}

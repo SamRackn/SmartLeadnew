@@ -7,14 +7,23 @@ are enforced here, not just in the templates:
   route that approves anything without a specific ``lead_id`` a human clicked
   into. Grep this file for "for lead in" if you doubt it — it is not here.
 * A draft that is not ``is_approvable()`` (verification_status != PASSED)
-  is rejected by ``approve()`` itself, with a 409, before Smartlead is ever
-  touched. The template hides the button too, but that is cosmetic; this
+  is rejected by ``approve()`` itself, with a 409, before a send job is ever
+  created. The template hides the button too, but that is cosmetic; this
   check is the control.
+
+Approve ENQUEUES; it does not send. The click is the human decision and it is
+final in the sense that matters -- nothing else can create a send job -- but the
+message leaves from the worker, which owns mailbox rotation, daily caps and
+spacing, and which re-checks suppression at the moment of sending. A route
+handler that talked to Gmail directly would either ignore the client's daily
+caps or block an HTTP request on a provider call, and it would put the
+last-moment compliance re-checks in the place least able to retry them.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -23,9 +32,22 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from mazz.db import get_session
-from mazz.integrations.smartlead import SmartleadLead, get_smartlead_client
-from mazz.models import Draft, Lead, LeadStatus, VerificationStatus
+from mazz.models import (
+    Draft,
+    Lead,
+    LeadStatus,
+    Mailbox,
+    SentMessage,
+    VerificationStatus,
+)
 from mazz.pipeline.draft import MissingSenderAddress, render_body
+from mazz.pipeline.mailbox import (
+    MailboxUnavailable,
+    NoMailboxConfigured,
+    select_mailbox,
+)
+from mazz.pipeline.queue import enqueue_job
+from mazz.pipeline.send import SEND_JOB_KIND
 from mazz.pipeline.score import ScoredFact, ScoreResult, score_lead
 from mazz.pipeline.verify import (
     Grounding,
@@ -169,8 +191,52 @@ def _detail_context(
         "score_result": score_result,
         "grounding": grounding,
         "can_approve": draft is not None and is_approvable(draft),
+        "send_state": _send_state(session, lead),
         "user": user,
     }
+
+
+@dataclass(frozen=True, slots=True)
+class SendState:
+    """What the reviewer is told about sending, before and after the click.
+
+    The screen used to say "push to Smartlead" and then, on success, nothing at
+    all -- the lead went `sent` and where it went from was Smartlead's business.
+    Now it is ours, so the reviewer sees which of the client's mailboxes will
+    carry the message, and afterwards which one did.
+    """
+
+    #: Which mailbox would send it, if one can right now.
+    mailbox: Mailbox | None = None
+    #: Set when every mailbox is capped or spacing: the message waits, and this
+    #: says until when, so a queued lead does not read as a broken one.
+    waiting_until: datetime | None = None
+    #: Set when no mailbox can EVER serve this lead. Approve refuses on this.
+    problem: str | None = None
+    #: After the fact: the audit row for the message that actually left.
+    sent: SentMessage | None = None
+
+    @property
+    def sent_from(self) -> str | None:
+        return self.sent.from_address if self.sent is not None else None
+
+
+def _send_state(session: Session, lead: Lead) -> SendState:
+    if lead.status == LeadStatus.SENT:
+        sent = session.execute(
+            select(SentMessage)
+            .where(SentMessage.lead_id == lead.id)
+            .order_by(SentMessage.sent_at.desc())
+            .limit(1)
+        ).scalars().first()
+        return SendState(sent=sent)
+
+    try:
+        return SendState(mailbox=select_mailbox(session, campaign_id=lead.campaign_id))
+    except MailboxUnavailable as exc:
+        return SendState(waiting_until=exc.retry_at)
+    except NoMailboxConfigured as exc:
+        return SendState(problem=str(exc))
 
 
 @router.get("/leads/{lead_id}", response_class=HTMLResponse)
@@ -205,16 +271,31 @@ async def approve_lead(
     session: Session = Depends(get_session),
     user: str = Depends(current_user),
 ):
-    """Approve exactly one lead's current draft and push it to Smartlead.
+    """Approve exactly one lead's current draft and queue it for sending.
 
     Server-side gate: a draft whose `verification_status` is not PASSED is
     refused here with a 409, regardless of what the UI shows. This is the
     control the brief requires — not the hidden button.
+
+    The lead goes to ``approved``, not ``sent``. It becomes ``sent`` when the
+    message actually leaves, which the worker records against a real receipt.
+    Marking it sent at click time would be a lie the client could not detect:
+    a screen saying "sent" for an email still sitting behind a daily cap, or
+    one that failed on a dead credential.
     """
 
     lead = session.get(Lead, lead_id)
     if lead is None:
         raise HTTPException(status_code=404, detail="lead not found")
+
+    if lead.status == LeadStatus.SENT:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"lead {lead_id} has already been sent. Approving again would "
+                "email the same person the same thing twice."
+            ),
+        )
 
     draft = latest_draft(session, lead)
     if draft is None:
@@ -231,22 +312,21 @@ async def approve_lead(
             ),
         )
 
-    first_name, last_name = _first_last(lead.full_name)
-    smartlead_lead = SmartleadLead(
-        email=lead.email,
-        first_name=first_name,
-        last_name=last_name,
-        company_name=lead.company_name or "",
-        website=lead.website or "",
-        location=lead.location or "",
-        linkedin_profile=lead.linkedin_url or "",
-        custom_fields={"subject": draft.subject, "body": draft.body},
-    )
+    # Tell the reviewer now if nothing could ever send this. A mailbox that is
+    # merely capped or spacing is fine — the job waits for it — but a roster
+    # with no active mailbox at all would queue work that can only fail, and
+    # the click would look like it worked.
+    try:
+        select_mailbox(session, campaign_id=lead.campaign_id)
+    except NoMailboxConfigured as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except MailboxUnavailable:
+        pass
 
-    client = get_smartlead_client()
-    client.add_lead_to_campaign(smartlead_lead)
-
-    lead.status = LeadStatus.SENT
+    lead.status = LeadStatus.APPROVED
+    # enqueue_job is idempotent for an identical pending job, so a double-click
+    # queues one send, not two.
+    enqueue_job(session, lead.id, SEND_JOB_KIND)
     session.flush()
 
     return _draft_panel_response(request, session, lead_id, user)

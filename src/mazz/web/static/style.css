@@ -27,9 +27,12 @@ main {
 .topbar .brand { color: #fff; font-weight: 600; text-decoration: none; }
 .topbar-user { margin-left: auto; opacity: 0.8; }
 .link-button {
-  background: none; border: none; color: #cfcfcf; cursor: pointer; text-decoration: underline;
+  background: none; border: none; color: #0a5cbf; cursor: pointer; text-decoration: underline;
   font-size: 0.9rem;
 }
+/* The pale variant belongs to the dark topbar only. On a white panel it reads
+   as a disabled control, which is how "pause" ended up looking unclickable. */
+.topbar .link-button { color: #cfcfcf; }
 .inline-form { display: inline; }
 
 a { color: #0a5cbf; }
@@ -42,7 +45,7 @@ th { background: #f0f0f0; }
 .status-filter a { padding: 0.25rem 0.6rem; border-radius: 4px; text-decoration: none; background: #eee; }
 .status-filter a.active { background: #1c1c1c; color: #fff; }
 
-.status-tag, .verification-tag {
+.status-tag, .verification-tag, .job-tag, .mailbox-tag {
   display: inline-block;
   padding: 0.1rem 0.5rem;
   border-radius: 4px;
@@ -58,6 +61,31 @@ th { background: #f0f0f0; }
 .verification-passed { background: #dff5e1; color: #1e7a2e; }
 .verification-failed { background: #fde3e3; color: #b3261e; }
 .verification-pending { background: #f2f2f2; color: #555; }
+
+/* Job (queue) statuses. Separate from lead statuses on purpose: a lead
+   that is `held` and a job that `failed` are different facts. */
+.job-done { background: #dff5e1; color: #1e7a2e; }
+.job-failed { background: #fde3e3; color: #b3261e; }
+.job-running { background: #e0eefc; color: #0a5cbf; }
+.job-pending { background: #f2f2f2; color: #555; }
+
+.mailbox-active { background: #dff5e1; color: #1e7a2e; }
+.mailbox-paused { background: #f2f2f2; color: #555; }
+.mailbox-disabled { background: #fde3e3; color: #b3261e; }
+.mailbox-table .muted { display: block; font-size: 0.8rem; }
+.mailbox-actions { white-space: nowrap; }
+.mailbox-actions form { display: inline; }
+.link-button.danger { color: #b3261e; }
+
+.sent-banner, .queued-banner, .mailbox-problem {
+  padding: 0.6rem 0.9rem;
+  border-radius: 4px;
+  margin: 0 0 1rem;
+}
+.sent-banner { background: #dff5e1; border: 1px solid #1e7a2e; }
+.queued-banner { background: #e0eefc; border: 1px solid #0a5cbf; }
+.mailbox-problem { background: #fde3e3; border: 1px solid #b3261e; }
+.send-hint { margin-top: 0.4rem; }
 
 .held-banner {
   background: #fde3e3;
@@ -144,6 +172,23 @@ button.reject { background: #b3261e; color: #fff; border-color: #b3261e; }
 .entity-form textarea { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; }
 .entity-form .hint { display: block; font-weight: normal; color: #666; font-size: 0.8rem; margin-top: 0.3rem; }
 
+.dash-panel {
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1.5rem;
+}
+.dash-panel h2 { margin-top: 0; }
+.dash-table { margin: 0.5rem 0 1rem; }
+.dash-total-row td { font-weight: 600; border-top: 2px solid #999; }
+.dash-stats { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 0.25rem 1rem; margin: 0.5rem 0; }
+.dash-stats dt { color: #555; }
+.dash-stats dd { margin: 0; font-weight: 600; }
+.undefined { color: #888; font-style: italic; font-weight: normal; }
+.dash-alert { color: #b3261e; font-weight: 600; }
+.dash-table .error-cell { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.8rem; color: #555; max-width: 32rem; }
+
 .danger-zone {
   margin-top: 2rem;
   max-width: 640px;
@@ -151,4 +196,70 @@ button.reject { background: #b3261e; color: #fff; border-color: #b3261e; }
   border-radius: 4px;
   padding: 1rem;
   background: #fff6f6;
+}
+
+/* --- the offer and its proof points ------------------------------------ */
+/* The campaign form is where the client enters the entire non-lead content
+   of email 1, so the preview is not decoration: it is the only place he can
+   read the sentence his fields actually produce before a stranger does. */
+
+.offer {
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+  background: #fbfbfb;
+}
+.offer legend { font-weight: 600; padding: 0 0.4rem; }
+.offer > .hint { display: block; color: #666; font-size: 0.8rem; margin-bottom: 0.6rem; }
+
+.preview {
+  background: #fff;
+  border-left: 3px solid #4a6fa5;
+  margin: 0 0 1rem;
+  padding: 0.8rem 1rem;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+.preview em { color: #888; font-style: normal; }
+.preview strong { background: #fff3cd; font-weight: 600; padding: 0 0.15rem; }
+
+.proof-points { margin-top: 2rem; }
+.proof-points > .hint { display: block; color: #666; font-size: 0.85rem; margin-bottom: 0.8rem; }
+
+.proof-table { border-collapse: collapse; width: 100%; margin-bottom: 1.5rem; font-size: 0.9rem; }
+.proof-table th, .proof-table td {
+  text-align: left;
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid #eee;
+  vertical-align: top;
+}
+.proof-table th { font-size: 0.75rem; text-transform: uppercase; color: #888; letter-spacing: 0.04em; }
+.proof-table form { margin: 0; }
+
+/* Retired claims stay visible rather than disappearing: a draft sent last
+   month may still cite one, and "where did that stat go" is a worse question
+   than "why is that one struck through". */
+.proof-table tr.retired td { color: #999; text-decoration: line-through; }
+.proof-table tr.retired td:last-child { text-decoration: none; }
+
+.badge {
+  display: inline-block;
+  background: #4a6fa5;
+  color: #fff;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  margin-left: 0.4rem;
+  vertical-align: middle;
+}
+
+/* A checkbox is a sentence, not a field: label beside the box, hint beneath. */
+.entity-form label.checkbox { font-weight: 600; }
+.entity-form label.checkbox input[type="checkbox"] {
+  width: auto;
+  margin-right: 0.4rem;
+  vertical-align: baseline;
 }

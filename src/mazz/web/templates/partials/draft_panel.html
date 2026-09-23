@@ -63,10 +63,45 @@
     <section class="actions">
       <h2>Actions</h2>
 
-      {% if can_approve %}
+      {% if lead.status.value == "sent" %}
+        <p class="sent-banner">
+          <strong>Sent.</strong>
+          {% if send_state.sent %}
+            From <code>{{ send_state.sent.from_address }}</code>
+            on {{ send_state.sent.sent_at.strftime("%Y-%m-%d %H:%M UTC") }}.
+          {% endif %}
+        </p>
+      {% elif lead.status.value == "approved" %}
+        <p class="queued-banner">
+          <strong>Approved — queued to send.</strong>
+          {% if send_state.mailbox %}
+            Next out of <code>{{ send_state.mailbox.email_address }}</code>.
+          {% elif send_state.waiting_until %}
+            Every mailbox is at its daily cap or spacing; this goes out after
+            {{ send_state.waiting_until.strftime("%Y-%m-%d %H:%M UTC") }}.
+            Waiting is the pacing working, not a fault.
+          {% endif %}
+        </p>
+      {% elif can_approve %}
+        {% if send_state.problem %}
+          <p class="mailbox-problem">
+            <strong>Nothing can send this.</strong> {{ send_state.problem }}
+          </p>
+        {% endif %}
         <form hx-post="/leads/{{ lead.id }}/approve" hx-target="#draft-panel" hx-swap="outerHTML">
-          <button type="submit" class="approve">Approve &amp; push to Smartlead</button>
+          <button type="submit" class="approve">Approve &amp; send</button>
         </form>
+        <p class="muted send-hint">
+          {% if send_state.mailbox %}
+            Sends from <code>{{ send_state.mailbox.email_address }}</code>
+            ({{ send_state.mailbox.display_name }}) once the worker picks it up.
+          {% elif send_state.waiting_until %}
+            Every mailbox is at its daily cap or spacing right now — approving
+            queues this to go out after
+            {{ send_state.waiting_until.strftime("%Y-%m-%d %H:%M UTC") }}.
+          {% endif %}
+          Approving queues exactly this one email. Nothing else is sent.
+        </p>
       {% else %}
         <p class="muted">
           Approve is disabled: this draft's verification_status is

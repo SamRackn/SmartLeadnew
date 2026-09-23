@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}{{ "Edit mailbox" if mailbox else "New mailbox" }} — MazzSmartLead Review{% endblock %}
+{% block content %}
+<p><a href="/mailboxes">← back to mailboxes</a></p>
+<h1>{{ "Edit mailbox" if mailbox else "New mailbox" }}</h1>
+
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+<form
+  method="post"
+  action="{% if mailbox %}/mailboxes/{{ mailbox.id }}/edit{% else %}/mailboxes{% endif %}"
+  class="entity-form"
+>
+  <label>Email address
+    <input type="text" name="email_address" value="{{ form.email_address }}"
+           placeholder="dana@outreach-northwind.com" required>
+    <span class="hint">The Google Workspace account that sends. One row per account.</span>
+  </label>
+
+  <label>From name
+    <input type="text" name="display_name" value="{{ form.display_name }}"
+           placeholder="Dana Whitfield" required>
+    <span class="hint">What the recipient sees in their inbox.</span>
+  </label>
+
+  <label>Credential ref
+    <input type="text" name="credential_ref" value="{{ form.credential_ref }}"
+           placeholder="northwind-burner" required>
+    <span class="hint">
+      A NAME, never a key. Resolved at send time as
+      <code>GMAIL_SA_&lt;REF&gt;</code> (uppercased, hyphens to underscores),
+      falling back to <code>GMAIL_SA_DEFAULT</code>. The service-account JSON
+      stays in the environment — nothing about it is stored here.
+    </span>
+  </label>
+
+  <label>Daily cap
+    <input type="number" name="daily_cap" value="{{ form.daily_cap }}" min="0">
+    <span class="hint">
+      Messages per UTC day. Google permits ~2000; cold outreach from a burner
+      domain does not survive anything near that. Counted from messages that
+      actually sent, so a crash cannot hand the mailbox a fresh budget.
+    </span>
+  </label>
+
+  <label>Minimum spacing (seconds)
+    <input type="number" name="min_spacing_seconds" value="{{ form.min_spacing_seconds }}" min="0">
+    <span class="hint">Gap between two sends from this mailbox.</span>
+  </label>
+
+  <label>Campaign
+    <select name="campaign_id">
+      <option value="">general rotation (serves every campaign)</option>
+      {% for cid, label in campaigns %}
+      <option value="{{ cid }}" {% if form.campaign_id|string == cid|string %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <span class="hint">
+      Pin this mailbox to one campaign, or leave it in the general rotation.
+      If any mailbox is pinned to a campaign, only pinned ones serve it.
+    </span>
+  </label>
+
+  <label>Notes
+    <textarea name="notes" rows="3">{{ form.notes }}</textarea>
+    <span class="hint">Domain, warmup provider, when it was bought — whatever the next person needs.</span>
+  </label>
+
+  <button type="submit">Save</button>
+</form>
+{% endblock %}

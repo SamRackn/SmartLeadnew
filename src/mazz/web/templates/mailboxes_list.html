@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}Mailboxes — MazzSmartLead Review{% endblock %}
+{% block content %}
+<h1>Mailboxes</h1>
+<p class="hint">
+  The accounts approved email actually goes out of. A mailbox sends up to its
+  daily cap and waits out its spacing between messages — small numbers are the
+  point, not a limitation: five burner-domain mailboxes emptying their caps in
+  a burst is the pattern spam filters exist to catch.
+</p>
+
+{% if sender == "stub" %}
+<p class="mailbox-problem">
+  <strong>EMAIL_SENDER is <code>stub</code>.</strong>
+  Approved mail is written to <code>sent_outbox.jsonl</code> and nothing leaves
+  this machine. Set <code>EMAIL_SENDER=google</code> to send for real.
+</p>
+{% endif %}
+
+<p><a href="/mailboxes/new">+ add mailbox</a></p>
+
+{% if not rows %}
+  <p class="empty">
+    No mailboxes yet. Nothing can be sent until one is added — approving a lead
+    will tell you so rather than queueing work that can only fail.
+  </p>
+{% else %}
+<table class="mailbox-table">
+  <thead>
+    <tr>
+      <th>Mailbox</th>
+      <th>From name</th>
+      <th>Campaign</th>
+      <th>Today</th>
+      <th>Status</th>
+      <th>Health</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td>
+        <code>{{ row.mailbox.email_address }}</code>
+        <span class="muted">cred: {{ row.mailbox.credential_ref }}</span>
+      </td>
+      <td>{{ row.mailbox.display_name }}</td>
+      <td>
+        {% if row.mailbox.campaign %}
+          {{ row.mailbox.campaign.name }}
+        {% else %}
+          <span class="muted">general rotation</span>
+        {% endif %}
+      </td>
+      <td>
+        {{ row.sent_today }} / {{ row.mailbox.daily_cap }}
+        {% if row.headroom == 0 %}
+          <span class="dash-alert">capped</span>
+        {% endif %}
+      </td>
+      <td><span class="mailbox-tag mailbox-{{ row.mailbox.status.value }}">{{ row.mailbox.status.value }}</span></td>
+      <td>
+        {% if row.mailbox.consecutive_failures %}
+          <span class="dash-alert">{{ row.mailbox.consecutive_failures }} consecutive failures</span>
+          <div class="error-cell">{{ row.mailbox.last_error }}</div>
+        {% else %}
+          <span class="muted">ok</span>
+        {% endif %}
+      </td>
+      <td class="mailbox-actions">
+        <a href="/mailboxes/{{ row.mailbox.id }}/edit">edit</a>
+        <form method="post" action="/mailboxes/{{ row.mailbox.id }}/status" class="inline-form">
+          {% if row.mailbox.status.value == "active" %}
+            <input type="hidden" name="status" value="paused">
+            <button type="submit" class="link-button">pause</button>
+          {% else %}
+            <input type="hidden" name="status" value="active">
+            <button type="submit" class="link-button">resume</button>
+          {% endif %}
+        </form>
+        <form method="post" action="/mailboxes/{{ row.mailbox.id }}/delete" class="inline-form">
+          <button type="submit" class="link-button danger">remove</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}
