@@ -254,6 +254,11 @@ class LeadRead(LeadBase):
     id: int
     company_domain: str | None = None
     status: LeadStatus
+    #: Who approved this lead and when. Read-only mirror of the audit columns:
+    #: deliberately absent from LeadBase/LeadCreate, because an inbound CSV row
+    #: must never be able to claim it was approved.
+    approved_at: datetime | None = None
+    approved_by: str | None = None
     created_at: datetime
     updated_at: datetime
 

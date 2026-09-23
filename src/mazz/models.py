@@ -488,6 +488,27 @@ class Lead(Base):
         index=True,
     )
 
+    # --- approval audit trail -------------------------------------------
+    #
+    # Guardrail 4 says every email is approved individually by a human. These
+    # two columns are what lets us EVIDENCE that rather than assert it, and
+    # they are what the outbox screen reads to show how long a message has
+    # been sitting approved once approve and send become two separate actions.
+    #
+    # Both NULLABLE, and they stay nullable: a lead that has never been
+    # approved has neither, which is most of the table, and the columns were
+    # added to a table that already had rows. Nothing here is a status — the
+    # authority on "is this approved" remains ``status``; these record WHO and
+    # WHEN, and are written only by the human-approve route.
+
+    #: When the reviewer pressed approve.
+    approved_at: Mapped[datetime | None] = _utcnow_column()
+
+    #: The operator's session username. A name, not a foreign key: there is one
+    #: account today (``REVIEW_USER``), and a deleted or renamed operator must
+    #: not erase or rewrite the record of what they approved.
+    approved_by: Mapped[str | None] = mapped_column(String(64))
+
     created_at: Mapped[datetime] = _utcnow_column(
         nullable=False, server_default=func.now()
     )
