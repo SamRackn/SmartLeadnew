@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}Outbox{% endblock %}
+
+{% block content %}
+<h1>Outbox</h1>
+<p class="lede">
+  Approved copy that has not left yet. Approving said the message is right;
+  sending is a separate decision, made here, one message at a time.
+</p>
+
+<section class="dash-panel">
+  <h2>Roster capacity</h2>
+  {% if roster %}
+  <table class="lead-table">
+    <thead>
+      <tr><th>Mailbox</th><th>Status</th><th>Remaining today</th><th>Next send</th></tr>
+    </thead>
+    <tbody>
+      {% for r in roster %}
+      <tr>
+        <td>{{ r.mailbox.email_address }}</td>
+        <td><span class="mailbox-tag {{ r.mailbox.status.value }}">{{ r.mailbox.status.value }}</span></td>
+        <td>{{ r.headroom }} of {{ r.mailbox.daily_cap }}</td>
+        <td>
+          {% if r.next_eligible_at > now %}{{ r.next_eligible_at.strftime("%H:%M UTC") }}{% else %}now{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">
+    No mailboxes configured. Nothing can be sent until one exists —
+    <a href="/mailboxes/new">add one</a>.
+  </p>
+  {% endif %}
+</section>
+
+<section class="dash-panel">
+  <h2>Waiting to send <span class="count">{{ rows | length }}</span></h2>
+
+  {% if not rows %}
+  <p class="empty">Nothing approved is waiting. Approve something on <a href="/leads">the review queue</a>.</p>
+  {% else %}
+  <table class="lead-table outbox-table">
+    <thead>
+      <tr>
+        <th>Recipient</th><th>Subject</th><th>Approved</th><th>State</th><th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr class="{% if row.blocked_reason %}blocked{% endif %}">
+        <td>
+          <a href="/leads/{{ row.lead.id }}">{{ row.lead.full_name }}</a>
+          <span class="muted">{{ row.lead.email }}</span>
+        </td>
+        <td>{{ row.draft.subject if row.draft else "—" }}</td>
+        <td>
+          {% if row.lead.approved_at %}
+            {{ row.lead.approved_at.strftime("%Y-%m-%d %H:%M") }}
+            {% if row.lead.approved_by %}<span class="muted">by {{ row.lead.approved_by }}</span>{% endif %}
+          {% else %}
+            <span class="muted">not recorded</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if row.queued %}
+            <span class="job-tag pending">queued</span>
+          {% elif row.blocked_reason %}
+            <span class="verification-tag failed">blocked</span>
+            <span class="muted block-reason">{{ row.blocked_reason }}</span>
+          {% else %}
+            <span class="verification-tag passed">ready</span>
+          {% endif %}
+        </td>
+        <td class="row-action">
+          {% if row.queued %}
+            <span class="muted">on the queue</span>
+          {% else %}
+            <form method="post" action="/outbox/{{ row.lead.id }}/send">
+              <button type="submit" {% if row.blocked_reason %}disabled{% endif %}>Send</button>
+            </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+
+<p class="note">
+  There is no "send all" here, and there is not going to be. Every message on
+  this page leaves because one person pressed one button for it.
+</p>
+{% endblock %}

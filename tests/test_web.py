@@ -35,6 +35,7 @@ from mazz.models import (
     ProofPoint,
     ResearchCache,
     SentMessage,
+    SuppressionEntry,
     VerificationStatus,
     Workspace,
 )
@@ -401,10 +402,15 @@ def test_approve_refused_for_held_failed_draft(
     assert refreshed.status is LeadStatus.HELD
 
 
-def test_approve_queues_a_send_and_does_not_send_inline(
+def test_approve_records_the_decision_and_queues_nothing(
     logged_in_client: TestClient, session, env: Path
 ):
-    """Approve is the human decision; the worker does the sending.
+    """Approve is a judgement about copy. It creates no send job at all.
+
+    This is the load-bearing assertion of the approve/send split. Approving
+    used to enqueue the send on the same click; now releasing it is a separate
+    human action on /outbox, and an approval that quietly queued work would
+    put that second decision back in the first one's pocket.
 
     The lead lands in `approved`, NOT `sent`: nothing has left yet, and a
     screen that said "sent" here would be lying to the client about an email
@@ -423,23 +429,30 @@ def test_approve_queues_a_send_and_does_not_send_inline(
     session.refresh(refreshed)
     assert refreshed.status is LeadStatus.APPROVED
 
-    jobs = send_jobs_for(session, lead.id)
-    assert len(jobs) == 1
-    assert jobs[0].status is JobStatus.PENDING
+    # The whole point: no job, from the click alone.
+    assert send_jobs_for(session, lead.id) == []
+
+    # And who decided it, and when, is now on the record.
+    assert refreshed.approved_by == "client"
+    assert refreshed.approved_at is not None
 
     # The route itself put nothing on the wire.
     assert read_outbox(outbox_path) == []
     assert session.execute(select(SentMessage)).scalars().all() == []
 
 
-def test_double_approve_queues_one_send(logged_in_client: TestClient, session):
-    """A double-click must not email the same person twice."""
+def test_double_release_queues_one_send(logged_in_client: TestClient, session):
+    """A double-click on Send must not email the same person twice."""
 
     make_mailbox(session)
     lead, _ = make_passed_lead(session)
+    assert logged_in_client.post(f"/leads/{lead.id}/approve").status_code == 200
 
-    assert logged_in_client.post(f"/leads/{lead.id}/approve").status_code == 200
-    assert logged_in_client.post(f"/leads/{lead.id}/approve").status_code == 200
+    for _ in range(2):
+        resp = logged_in_client.post(
+            f"/outbox/{lead.id}/send", follow_redirects=False
+        )
+        assert resp.status_code == 303, resp.text
 
     assert len(send_jobs_for(session, lead.id)) == 1
 
@@ -456,24 +469,147 @@ def test_approve_refused_once_already_sent(logged_in_client: TestClient, session
     assert send_jobs_for(session, lead.id) == []
 
 
-def test_approve_refused_when_no_mailbox_is_configured(
+def test_approve_succeeds_with_no_mailbox_but_release_does_not(
     logged_in_client: TestClient, session
 ):
-    """Queueing work that can only fail would make the click look like it worked.
+    """An empty roster is a sending problem, not a reason to block review.
 
-    A capped mailbox is fine — the job waits for it. No mailbox at all is an
-    operator error, and the reviewer is the operator standing right there.
+    Approving used to 503 when no mailbox existed. That put an operational
+    failure in the way of a reviewer who only wanted to record that the copy
+    reads correctly. The refusal belongs on the screen that actually sends.
     """
 
     lead, _ = make_passed_lead(session)  # no mailbox on the roster
 
-    resp = logged_in_client.post(f"/leads/{lead.id}/approve")
-    assert resp.status_code == 503
-    assert "no active mailbox" in resp.text
+    approved = logged_in_client.post(f"/leads/{lead.id}/approve")
+    assert approved.status_code == 200, approved.text
 
     refreshed = session.get(Lead, lead.id)
     session.refresh(refreshed)
-    assert refreshed.status is not LeadStatus.APPROVED
+    assert refreshed.status is LeadStatus.APPROVED
+    assert send_jobs_for(session, lead.id) == []
+
+    # ...but it cannot be released.
+    released = logged_in_client.post(
+        f"/outbox/{lead.id}/send", follow_redirects=False
+    )
+    assert released.status_code == 503
+    assert "no active mailbox" in released.text
+    assert send_jobs_for(session, lead.id) == []
+
+
+# ==========================================================================
+# /outbox — the only place a send job is created (guardrail 4)
+# ==========================================================================
+
+
+def test_release_queues_exactly_one_send(logged_in_client: TestClient, session):
+    make_mailbox(session)
+    lead, _ = make_passed_lead(session)
+    assert logged_in_client.post(f"/leads/{lead.id}/approve").status_code == 200
+    assert send_jobs_for(session, lead.id) == []
+
+    resp = logged_in_client.post(f"/outbox/{lead.id}/send", follow_redirects=False)
+    assert resp.status_code == 303
+
+    jobs = send_jobs_for(session, lead.id)
+    assert len(jobs) == 1
+    assert jobs[0].status is JobStatus.PENDING
+
+
+def test_release_refused_for_a_lead_that_was_never_approved(
+    logged_in_client: TestClient, session
+):
+    """Only a human approval makes a lead releasable. `ready` is not approval."""
+
+    make_mailbox(session)
+    lead, _ = make_passed_lead(session)
+    assert lead.status is not LeadStatus.APPROVED
+
+    resp = logged_in_client.post(f"/outbox/{lead.id}/send", follow_redirects=False)
+    assert resp.status_code == 409
+    assert "not approved" in resp.text
+    assert send_jobs_for(session, lead.id) == []
+
+
+def test_release_refused_for_someone_suppressed_after_approval(
+    logged_in_client: TestClient, session
+):
+    """Approval is not a licence that outlives an unsubscribe."""
+
+    make_mailbox(session)
+    lead, _ = make_passed_lead(session)
+    assert logged_in_client.post(f"/leads/{lead.id}/approve").status_code == 200
+
+    session.add(SuppressionEntry(email=lead.email, reason="unsubscribed since"))
+    session.commit()
+
+    resp = logged_in_client.post(f"/outbox/{lead.id}/send", follow_redirects=False)
+    assert resp.status_code == 409
+    assert "suppressed" in resp.text
+    assert send_jobs_for(session, lead.id) == []
+
+    refreshed = session.get(Lead, lead.id)
+    session.refresh(refreshed)
+    assert refreshed.status is LeadStatus.HELD
+
+
+def test_release_refused_when_verification_no_longer_passes(
+    logged_in_client: TestClient, session
+):
+    """Re-drafted or rejected after approval means it cannot go."""
+
+    make_mailbox(session)
+    lead, draft = make_passed_lead(session)
+    assert logged_in_client.post(f"/leads/{lead.id}/approve").status_code == 200
+
+    draft.verification_status = VerificationStatus.FAILED
+    session.commit()
+
+    resp = logged_in_client.post(f"/outbox/{lead.id}/send", follow_redirects=False)
+    assert resp.status_code == 409
+    assert "not approvable" in resp.text
+    assert send_jobs_for(session, lead.id) == []
+
+
+def test_outbox_lists_approved_work_and_offers_no_bulk_control(
+    logged_in_client: TestClient, session
+):
+    """The absence of a "send all" is the feature, so assert the absence."""
+
+    make_mailbox(session)
+    lead, _ = make_passed_lead(session)
+    assert logged_in_client.post(f"/leads/{lead.id}/approve").status_code == 200
+
+    page = logged_in_client.get("/outbox")
+    assert page.status_code == 200
+    assert lead.email in page.text
+    assert f"/outbox/{lead.id}/send" in page.text
+
+    # Assert on what the page can DO, not on what it says. The page's prose
+    # explains that there is no "send all", so a substring search for that
+    # phrase matches the explanation and proves nothing.
+    body = page.text.lower()
+    assert 'type="checkbox"' not in body, "no row selection on /outbox"
+    for forbidden in ("/outbox/send-all", "/outbox/release-all", "/outbox/all/send"):
+        assert f'action="{forbidden}"' not in body, f"{forbidden} must not be a form target"
+
+    # Exactly one send form per approved message, each naming one lead_id.
+    # (Counting every <form> would also count the logout form in base.html.)
+    assert body.count('action="/outbox/') == 1
+
+
+def test_no_bulk_release_route_exists(logged_in_client: TestClient, session):
+    """Every plausible bulk-release URL must 404/405, never succeed."""
+
+    make_mailbox(session)
+    lead, _ = make_passed_lead(session)
+    assert logged_in_client.post(f"/leads/{lead.id}/approve").status_code == 200
+
+    for path in ("/outbox/send", "/outbox/send-all", "/outbox/release-all", "/outbox/all/send"):
+        resp = logged_in_client.post(path, follow_redirects=False)
+        assert resp.status_code in (404, 405, 422), f"{path} -> {resp.status_code}"
+
     assert send_jobs_for(session, lead.id) == []
 
 

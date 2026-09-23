@@ -123,13 +123,28 @@ throughput. All are built and audited.
    that sentence reads as sender voice, so the verifier never holds its
    figures to anything, which would make a statistic typed there the strongest
    claim in the message with nothing behind it.
-4. **No auto-send.** Every email is human-approved individually. No approve-all,
-   no scheduled approval, no retry path that approves. Now that we own the
-   sending rail this is structural: the pipeline chain stops at `verify`, and
-   the ONLY thing that creates a `send` job is one human pressing approve on
-   one lead. Never add `enqueue_next("send")` to a pipeline stage. The send
-   step re-checks the approval, the verification verdict and suppression at the
-   moment of sending, because all three can have changed since the click.
+4. **No auto-send.** Every email is human-approved individually, and approving
+   is not sending. No approve-all, no send-all, no scheduled approval, no retry
+   path that approves. Now that we own the sending rail this is structural, and
+   it is enforced in two places:
+   - The pipeline chain stops at `verify`. Never add `enqueue_next("send")` to
+     a pipeline stage.
+   - The ONLY thing that creates a `send` job is one human pressing send on one
+     message in `web/routes/outbox.py`. **Exactly one call site exists in the
+     whole codebase and a test counts them**
+     (`test_exactly_one_place_in_the_codebase_creates_a_send_job`). A second
+     one appearing anywhere is the auto-sender arriving by increments, which
+     is the only way it ever would.
+   (Restated 2026-09-23. Approve used to enqueue the send itself, which fused
+   "this copy is correct" and "put this on the wire now" into one click and
+   left no instant in which an approval could be reconsidered. `web/routes/
+   leads.py` no longer imports the queue or the send-job kind at all, so
+   restoring the old behaviour means restoring an import — a visible line in a
+   diff rather than one word changed inside an existing call.)
+   The send step re-checks the approval, the verification verdict and
+   suppression at the moment of sending, because all three can have changed
+   since the click — and the release action re-checks them eagerly too, so the
+   operator learns before the job runs rather than after it fails.
 5. **Delete-by-person is complete** — leads, drafts, jobs, and person-scoped facts
    pruned from the shared company cache by `subject_email`.
 6. **Footer carries a physical mailing address and one-click unsubscribe**, added

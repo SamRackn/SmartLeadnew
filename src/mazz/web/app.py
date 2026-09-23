@@ -22,6 +22,7 @@ from mazz.web.routes import campaigns as campaigns_routes
 from mazz.web.routes import dashboard as dashboard_routes
 from mazz.web.routes import leads as leads_routes
 from mazz.web.routes import mailboxes as mailboxes_routes
+from mazz.web.routes import outbox as outbox_routes
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -64,6 +65,7 @@ def create_app() -> FastAPI:
     app.include_router(campaigns_routes.router)
     app.include_router(dashboard_routes.router)
     app.include_router(mailboxes_routes.router)
+    app.include_router(outbox_routes.router)
 
     return app
 

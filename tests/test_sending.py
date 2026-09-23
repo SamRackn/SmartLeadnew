@@ -651,7 +651,7 @@ def test_a_success_resets_the_failure_counter(session, sender):
 def test_the_pipeline_never_enqueues_a_send_itself(session):
     """Guardrail 4, structurally: the chain stops at verify.
 
-    `send` is registered so the worker can run it, but only the approve route
+    `send` is registered so the worker can run it, but only a human action
     creates one. If some future stage chains into it, this fails.
     """
 
@@ -659,13 +659,68 @@ def test_the_pipeline_never_enqueues_a_send_itself(session):
 
     import mazz.pipeline.draft as draft_module
     import mazz.pipeline.enrich as enrich_module
+    import mazz.pipeline.qualify as qualify_module
     import mazz.pipeline.score as score_module
     import mazz.pipeline.verify as verify_module
 
-    for module in (enrich_module, score_module, draft_module, verify_module):
+    for module in (
+        enrich_module,
+        qualify_module,
+        score_module,
+        draft_module,
+        verify_module,
+    ):
         source = inspect.getsource(module)
         assert 'enqueue_next("send")' not in source
         assert "enqueue_next(SEND_JOB_KIND)" not in source
+
+
+def test_exactly_one_place_in_the_codebase_creates_a_send_job():
+    """Guardrail 4's real shape, counted rather than asserted.
+
+    Approving used to enqueue the send itself. Now approving records a
+    judgement and `mazz.web.routes.outbox` releases it -- so there must be
+    exactly ONE call site, and it must be that one. A second one appearing
+    anywhere, in a route or a stage or a script, is the auto-sender arriving
+    by increments, which is the only way it ever would.
+    """
+
+    import pathlib
+    import re
+
+    src = pathlib.Path(__file__).resolve().parents[1] / "src" / "mazz"
+    call = re.compile(r"enqueue_job\s*\([^)]*SEND_JOB_KIND")
+
+    creators = sorted(
+        path.relative_to(src).as_posix()
+        for path in src.rglob("*.py")
+        if call.search(path.read_text())
+    )
+
+    assert creators == ["web/routes/outbox.py"], (
+        "exactly one module may create a send job, and it is the outbox "
+        f"release action. Found: {creators}"
+    )
+
+
+def test_approving_does_not_create_a_send_job():
+    """The approve route must not be able to queue a send even by accident.
+
+    It does not import the queue or the send-job kind at all, so restoring the
+    old behaviour means restoring an import too -- a visible line in a diff
+    rather than one word changed inside an existing call.
+    """
+
+    import inspect
+
+    import mazz.web.routes.leads as leads_module
+
+    source = inspect.getsource(leads_module)
+    assert "enqueue_job" not in source.replace("enqueued", ""), (
+        "leads.py must not enqueue anything; releasing a send belongs to "
+        "mazz.web.routes.outbox"
+    )
+    assert "SEND_JOB_KIND" not in source
 
 
 def test_worker_runs_a_queued_send_end_to_end(session, monkeypatch, outbox):

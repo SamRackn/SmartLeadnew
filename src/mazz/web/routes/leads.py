@@ -11,19 +11,27 @@ are enforced here, not just in the templates:
   created. The template hides the button too, but that is cosmetic; this
   check is the control.
 
-Approve ENQUEUES; it does not send. The click is the human decision and it is
-final in the sense that matters -- nothing else can create a send job -- but the
-message leaves from the worker, which owns mailbox rotation, daily caps and
-spacing, and which re-checks suppression at the moment of sending. A route
-handler that talked to Gmail directly would either ignore the client's daily
-caps or block an HTTP request on a provider call, and it would put the
+Approve does NOT enqueue, and does not send. It records one human's judgement
+that one draft is fit to go, and stops there. Creating the send job is a second,
+separate human action on /outbox -- see `mazz.web.routes.outbox`.
+
+That split is deliberate. When approve enqueued the send itself, the two
+decisions "this copy is correct" and "put this on the wire now" were the same
+click, which meant there was no moment at which a reviewer could approve a
+batch of copy and then release it deliberately. Splitting them costs one extra
+click and buys a gap in which an approval can still be revoked.
+
+The message still leaves from the worker, which owns mailbox rotation, daily
+caps and spacing, and which re-checks suppression at the moment of sending. A
+route handler that talked to Gmail directly would either ignore the client's
+daily caps or block an HTTP request on a provider call, and it would put the
 last-moment compliance re-checks in the place least able to retry them.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -46,8 +54,6 @@ from mazz.pipeline.mailbox import (
     NoMailboxConfigured,
     select_mailbox,
 )
-from mazz.pipeline.queue import enqueue_job
-from mazz.pipeline.send import SEND_JOB_KIND
 from mazz.pipeline.score import ScoredFact, ScoreResult, score_lead
 from mazz.pipeline.verify import (
     Grounding,
@@ -271,17 +277,18 @@ async def approve_lead(
     session: Session = Depends(get_session),
     user: str = Depends(current_user),
 ):
-    """Approve exactly one lead's current draft and queue it for sending.
+    """Approve exactly one lead's current draft. Queues nothing.
 
     Server-side gate: a draft whose `verification_status` is not PASSED is
     refused here with a 409, regardless of what the UI shows. This is the
     control the brief requires — not the hidden button.
 
-    The lead goes to ``approved``, not ``sent``. It becomes ``sent`` when the
-    message actually leaves, which the worker records against a real receipt.
-    Marking it sent at click time would be a lie the client could not detect:
-    a screen saying "sent" for an email still sitting behind a daily cap, or
-    one that failed on a dead credential.
+    The lead goes to ``approved``, not ``sent``, and no send job is created.
+    Releasing it is a separate human action on /outbox. It becomes ``sent``
+    when the message actually leaves, which the worker records against a real
+    receipt. Marking it sent at click time would be a lie the client could not
+    detect: a screen saying "sent" for an email still sitting behind a daily
+    cap, or one that failed on a dead credential.
     """
 
     lead = session.get(Lead, lead_id)
@@ -312,22 +319,26 @@ async def approve_lead(
             ),
         )
 
-    # Tell the reviewer now if nothing could ever send this. A mailbox that is
-    # merely capped or spacing is fine — the job waits for it — but a roster
-    # with no active mailbox at all would queue work that can only fail, and
-    # the click would look like it worked.
-    try:
-        select_mailbox(session, campaign_id=lead.campaign_id)
-    except NoMailboxConfigured as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except MailboxUnavailable:
-        pass
-
     lead.status = LeadStatus.APPROVED
-    # enqueue_job is idempotent for an identical pending job, so a double-click
-    # queues one send, not two.
-    enqueue_job(session, lead.id, SEND_JOB_KIND)
+    lead.approved_at = datetime.now(timezone.utc)
+    lead.approved_by = user
     session.flush()
+
+    # NOTE FOR ANYONE EDITING THIS FUNCTION
+    # Do not queue a send here. A send job used to be created on this very line,
+    # and moving it out is the entire point of the split: exactly one human
+    # pressing send on exactly one message creates one, in
+    # `mazz.web.routes.outbox`, and nothing else in the codebase does.
+    # This module no longer imports the queue or the send-job kind at all, so
+    # putting one back means adding an import too -- which is the point. Two
+    # tests hold the line: one asserts approving creates no job row, one reads
+    # this file's source (tests/test_sending.py).
+    #
+    # The roster is deliberately NOT checked here either. Whether a mailbox is
+    # free is a question about sending, and approving is no longer sending; a
+    # 503 at this point would block the reviewer from recording a judgement
+    # about copy because of an operational problem with the wire. /outbox
+    # reports the roster state, and the send action enforces it.
 
     return _draft_panel_response(request, session, lead_id, user)
 
