@@ -4,7 +4,8 @@ Not a conftest on purpose: ``tests/conftest.py`` is unclaimed and another agent
 may want it. pytest puts ``tests/`` on ``sys.path``, so ``import
 pipeline_helpers`` works from any test module in this directory.
 
-Every test here runs against the real ``mazz_dev`` Postgres. The queue's whole
+Every test here runs against a real Postgres -- ``mazz_test``, never the dev
+database (see ``conftest.py``). The queue's whole
 correctness argument is ``FOR UPDATE SKIP LOCKED``, the cache's is a JSONB
 column and a unique primary key, and privacy's is ``ON DELETE CASCADE`` -- none
 of which SQLite would model. Tables are truncated between tests rather than
@@ -22,7 +23,7 @@ from typing import Any, Iterator
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
-from mazz.db import get_sessionmaker
+from mazz.db import get_engine, get_sessionmaker
 from mazz.integrations.company import StubCompanyAdapter
 from mazz.integrations.linkedin import StubLinkedInAdapter
 from mazz.models import (
@@ -86,6 +87,14 @@ def scenarios() -> dict[str, dict[str, Any]]:
 
 def reset_db() -> None:
     """Empty every table. TRUNCATE ... CASCADE, in its own transaction."""
+
+    database = get_engine().url.database or ""
+    if not database.endswith("_test"):
+        # Second lock on the same door as conftest's: this function is the
+        # one that actually destroys data, so it checks for itself.
+        raise RuntimeError(
+            f"reset_db refused to TRUNCATE {database!r}: not a *_test database"
+        )
 
     factory = get_sessionmaker()
     with factory() as session:

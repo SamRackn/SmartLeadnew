@@ -21,9 +21,71 @@ key set in the environment.
 
 from __future__ import annotations
 
-import pytest
+import os
 
-from mazz.config import reload_settings
+# -- The test database is never the dev database ----------------------------
+#
+# Set BEFORE anything below imports `mazz.db`, whose engine is an lru_cached
+# singleton built from `DATABASE_URL`. The tests TRUNCATE every table between
+# cases, and `.env` points DATABASE_URL at `mazz_dev` -- the database the
+# running app, the demo seed and the client's mailbox roster live in. A plain
+# `pytest` once emptied it. The environment variable wins over `.env` in
+# pydantic-settings, so this redirects every connection the suite makes.
+_TEST_DATABASE_URL = os.environ.get(
+    "TEST_DATABASE_URL", "postgresql+psycopg://localhost/mazz_test"
+)
+os.environ["DATABASE_URL"] = _TEST_DATABASE_URL
+
+import pytest  # noqa: E402
+from sqlalchemy.engine import make_url  # noqa: E402
+
+from mazz.config import reload_settings  # noqa: E402
+
+reload_settings()
+
+#: Refuse outright rather than trust the redirect above: a TEST_DATABASE_URL
+#: typo'd onto a real database would otherwise be truncated just the same.
+TEST_DATABASE_SUFFIX = "_test"
+
+
+def _ensure_test_database() -> None:
+    """Create the test database if it is missing, then migrate it to head."""
+
+    url = make_url(_TEST_DATABASE_URL)
+    name = url.database or ""
+    if not name.endswith(TEST_DATABASE_SUFFIX):
+        raise pytest.UsageError(
+            f"refusing to run the suite against database {name!r}: the tests "
+            f"TRUNCATE every table, so the database name must end in "
+            f"{TEST_DATABASE_SUFFIX!r}. Set TEST_DATABASE_URL."
+        )
+
+    import psycopg
+    from psycopg import sql
+
+    admin = url.set(drivername="postgresql", database="postgres")
+    with psycopg.connect(
+        admin.render_as_string(hide_password=False), autocommit=True
+    ) as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM pg_database WHERE datname = %s", (name,)
+        ).fetchone()
+        if not exists:
+            conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+
+    root = Path(__file__).resolve().parents[1]
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "migrations"))
+    command.upgrade(config, "head")
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    _ensure_test_database()
 
 # Every provider-selection / credential setting known to this codebase.
 # Add to this list, never remove from it, as new providers show up.
