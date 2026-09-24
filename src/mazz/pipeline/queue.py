@@ -104,9 +104,9 @@ class RetrySettings:
 DEFAULT_RETRY = RetrySettings()
 
 #: How long a ``running`` job may sit untouched before we assume its worker
-#: died. Nothing reclaims automatically -- ``reclaim_stale_jobs`` is a hook the
-#: operator (or a cron) calls, so a slow job is never yanked out from under a
-#: worker that is merely busy.
+#: died. ``python -m mazz.ops worker`` sweeps with ``reclaim_stale_jobs`` once a
+#: minute; the threshold is long enough that a job which is merely slow is
+#: never yanked out from under a worker that is still busy with it.
 DEFAULT_STALE_AFTER = timedelta(minutes=15)
 
 
@@ -364,9 +364,12 @@ def reclaim_stale_jobs(
 ) -> list[Job]:
     """Return jobs stuck in ``running`` past ``stale_after`` to ``pending``.
 
-    The crashed-worker hook. Deliberately manual: a job that is merely slow
-    looks exactly like a job whose worker died, and yanking the first kind back
-    into the queue would run it twice.
+    The crashed-worker hook, swept by the service worker. A job that is merely
+    slow looks exactly like one whose worker died, which is why the threshold
+    is generous and why ``mazz.ops`` runs a single worker. Sends are safe to
+    reclaim for a different reason: the send step commits an attempt marker
+    before touching the wire, so a reclaimed send that may have left is held
+    for a human rather than sent again.
     """
 
     now = now or utcnow()
@@ -383,13 +386,15 @@ def reclaim_stale_jobs(
         .all()
     )
     for job in jobs:
+        held_since = job.locked_at
         job.status = JobStatus.PENDING
         job.locked_at = None
         job.last_error = (
-            f"reclaimed: worker held this job since {job.locked_at or cutoff} "
+            f"reclaimed: worker held this job since {held_since} "
             "and did not report back"
         )
         job.run_after = now
+        log.warning("job %s (%s) reclaimed from a stale worker", job.id, job.kind)
     session.flush()
     return list(jobs)
 

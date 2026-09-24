@@ -123,11 +123,44 @@ burner domain's Workspace. `mailboxes.credential_ref` names which key to use;
 no key is ever stored in the database.
 
 Run the app: `.venv/bin/uvicorn mazz.web.app:app --reload`
+Run the worker: `.venv/bin/python -m mazz.ops worker` — without it, Send in the
+outbox and a browser import only queue work; nothing runs it.
 Run the tests: `.venv/bin/pytest`
 
 A plain `pytest` run cannot reach a paid API or bill the client's account:
 `tests/conftest.py` has a session-wide autouse fixture pinning every provider to
-stub and blanking credentials.
+stub and blanking credentials. It also cannot touch your data: the suite
+TRUNCATEs every table, so it runs in `mazz_test` (created and migrated
+automatically; override with `TEST_DATABASE_URL`) and refuses any database
+whose name does not end in `_test`.
+
+## Operations
+
+```bash
+.venv/bin/python -m mazz.ops worker            # drain the queue; reclaims crashed jobs each minute
+.venv/bin/python -m mazz.ops health --notify   # exit 1 + macOS notification if anything needs a human
+.venv/bin/python -m mazz.ops backup            # pg_dump, verified with pg_restore --list, keeps 14
+.venv/bin/python -m mazz.ops resolve-send LEAD_ID --sent | --not-sent
+scripts/launchd.sh install                     # all three on a schedule, as LaunchAgents
+```
+
+`health` reports, most urgent first: a send that may have gone out with no
+record, a mailbox the system disabled, a queue no worker is draining, jobs
+stuck `running`, jobs that gave up in the last 24h, a verification hold rate
+over 50% (7 days, at least 5 drafts), and a missing or >36h-old backup.
+
+**Sends go out at most once.** The send step commits a marker on the draft
+before handing it to Gmail. If anything fails after that and the outcome is
+not a clear refusal (401/403, 429, other 4xx), the lead is held and `health`
+says which mailbox's Sent folder to check. `resolve-send` records the answer;
+`--not-sent` puts the lead back in the outbox and never queues a send itself.
+
+Run ONE worker. Mailbox selection takes no row lock, so two workers sending
+at once could pick the same mailbox and break its spacing.
+
+Backups default to `~/Library/Application Support/MazzSmartLead/backups`
+(`BACKUP_DIR` overrides) — outside the repository, but on the same disk. Copy
+them somewhere else before calling this backed up.
 
 ## Spending money
 

@@ -185,19 +185,43 @@ Owner: `integrations-engineer` (adapter), `pipeline-engineer` (send step).
 
 ---
 
-## W6 — Operations
+## W6 — Operations (mostly done, 2026-09-24)
 
 Everything above assumes someone notices when it breaks.
 
-- Run the worker as a real service (launchd or systemd) rather than a manual
-  invocation, with `reclaim_stale_jobs()` on a timer — `locked_at` exists as the
-  crashed-worker hook but nothing reclaims automatically yet.
-- Alert on: jobs exhausting `max_attempts`, provider error rate, and the `held`
-  rate. A rising `held` rate is the early warning that W1's precision has regressed
-  or a prompt change went bad.
-- Log per-draft token usage and cost.
-- Back up Postgres. The research cache is the expensive artifact — it represents real
-  money already spent with the scraping provider.
+**Shipped** (`src/mazz/ops.py`, `scripts/launchd.sh`, README "Operations"):
+
+- `python -m mazz.ops worker` — the queue's first process of its own. Before
+  it, Send in the outbox and a browser import enqueued jobs nothing ran. It
+  sweeps `reclaim_stale_jobs()` every minute and stops cleanly on SIGTERM.
+  `scripts/launchd.sh install` runs it as a LaunchAgent with KeepAlive.
+- `python -m mazz.ops health` — alerts on an unresolved send, a disabled
+  mailbox, a stalled queue, stale `running` jobs, jobs that gave up in 24h,
+  hold rate over 50%, and a missing or stale backup. Every 15 min with a
+  macOS notification under launchd.
+- `python -m mazz.ops backup` — `pg_dump -Fc`, verified with `pg_restore
+  --list` before it counts, rotated to 14. Nightly under launchd.
+
+**Found on the way, fixed first** — each would have gone live with the worker:
+
+- *Double send.* Gmail call and booking shared one transaction, so a failure
+  after Gmail accepted rolled back to "never sent" and the queue re-sent, up
+  to five times. Now `drafts.send_attempted_at` is committed before the wire;
+  an ambiguous outcome holds the lead and `resolve-send` records what a human
+  found in the Sent folder (migration `b3e1c9d4f2a7`).
+- *Mailbox disable rolled back.* A 401 marked the mailbox `disabled` inside the
+  job's transaction, which the failure then rolled back — every retry reused
+  the dead credential. Mailbox health is now committed before re-raising.
+- *Tests wiped the dev database.* The suite truncated `mazz_dev`. It now runs
+  in `mazz_test` and refuses any database not named `*_test`.
+
+**Still open:**
+
+- Provider error-rate alerting (health covers outcomes, not rates).
+- Alerts reach this Mac only. Off-machine delivery (email/SMS) and off-machine
+  backup copies are the next step before the client relies on it.
+- Log per-draft token usage and cost (moot on the cold path, which spends none).
+- Mailbox selection takes no row lock: one worker only until it does.
 - Secrets out of `.env` and into something managed once real keys exist.
 
 Owner: `pipeline-engineer`.
