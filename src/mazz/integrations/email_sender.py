@@ -378,6 +378,7 @@ class GmailSender(EmailSender):
                     f"Gmail quota exhausted for {message.from_address}: {detail}",
                     provider=self.provider,
                     target=target,
+                    status_code=status,
                 )
             return ProviderAuthError(
                 f"Gmail refused {message.from_address}: {detail}. Check the "
@@ -385,14 +386,23 @@ class GmailSender(EmailSender):
                 f"{GMAIL_SEND_SCOPE} is authorised for this Workspace.",
                 provider=self.provider,
                 target=target,
+                status_code=status,
             )
         if status == 429:
-            return ProviderRateLimited(detail, provider=self.provider, target=target)
+            return ProviderRateLimited(
+                detail, provider=self.provider, target=target, status_code=status
+            )
         if status is not None and 500 <= int(status) < 600:
-            return ProviderUnavailable(detail, provider=self.provider, target=target)
+            return ProviderUnavailable(
+                detail, provider=self.provider, target=target, status_code=status
+            )
         if status is not None and 400 <= int(status) < 500:
-            return ProviderBadResponse(detail, provider=self.provider, target=target)
-        # Transport-level: DNS, connection reset, timeout. Worth another go.
+            return ProviderBadResponse(
+                detail, provider=self.provider, target=target, status_code=status
+            )
+        # Transport-level: DNS, connection reset, timeout. Worth another go
+        # as far as the provider is concerned -- but no status means the send
+        # step cannot rule out delivery (see `send.definitely_not_sent`).
         return ProviderUnavailable(detail, provider=self.provider, target=target)
 
 

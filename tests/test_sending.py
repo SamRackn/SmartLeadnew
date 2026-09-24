@@ -39,6 +39,7 @@ from mazz.integrations.email_sender import (
 )
 from mazz.models import (
     Campaign,
+    Draft,
     Job,
     JobStatus,
     Lead,
@@ -62,10 +63,17 @@ from mazz.pipeline.mailbox import (
 from mazz.pipeline.queue import (
     DEFAULT_HANDLERS,
     JobDeferred,
+    PermanentJobError,
     enqueue_job,
     process_next,
+    reclaim_stale_jobs,
 )
-from mazz.pipeline.send import handle_send, send_lead
+from mazz.pipeline.send import (
+    definitely_not_sent,
+    handle_send,
+    send_lead,
+    unresolved_send_attempt,
+)
 
 NOW = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
 
@@ -351,17 +359,17 @@ def test_gmail_accepting_without_an_id_is_a_bad_response():
 
 
 @pytest.mark.parametrize(
-    "status, message, expected",
+    "status, message, expected, not_sent",
     [
-        (401, "invalid credentials", ProviderAuthError),
-        (403, "forbidden", ProviderAuthError),
-        (403, "rateLimitExceeded", ProviderRateLimited),
-        (429, "too many", ProviderRateLimited),
-        (503, "backend error", ProviderUnavailable),
-        (400, "malformed", ProviderBadResponse),
+        (401, "invalid credentials", ProviderAuthError, True),
+        (403, "forbidden", ProviderAuthError, True),
+        (403, "rateLimitExceeded", ProviderRateLimited, True),
+        (429, "too many", ProviderRateLimited, True),
+        (503, "backend error", ProviderUnavailable, False),
+        (400, "malformed", ProviderBadResponse, True),
     ],
 )
-def test_gmail_error_translation(status, message, expected):
+def test_gmail_error_translation(status, message, expected, not_sent):
     """Retryability is the thing this mapping gets right or expensively wrong.
 
     403 is overloaded: a quota refusal and a broken delegation arrive with the
@@ -369,14 +377,29 @@ def test_gmail_error_translation(status, message, expected):
     """
 
     sender, _ = _gmail(error=_FakeHttpError(status, message))
-    with pytest.raises(expected):
+    with pytest.raises(expected) as exc:
         sender.send(_message(), credential_ref="northwind-burner")
+
+    # The second question the send step asks of the same error: can it rule
+    # out that Gmail delivered the message anyway? Only a refusal can.
+    assert definitely_not_sent(exc.value) is not_sent
 
 
 def test_gmail_transport_failure_is_retryable():
     sender, _ = _gmail(error=OSError("connection reset"))
-    with pytest.raises(ProviderUnavailable):
+    with pytest.raises(ProviderUnavailable) as exc:
         sender.send(_message(), credential_ref="northwind-burner")
+
+    # A reset connection can follow a delivered message.
+    assert definitely_not_sent(exc.value) is False
+
+
+def test_gmail_accepting_without_an_id_may_have_sent():
+    sender, _ = _gmail(result={})
+    with pytest.raises(ProviderBadResponse) as exc:
+        sender.send(_message(), credential_ref="northwind-burner")
+
+    assert definitely_not_sent(exc.value) is False
 
 
 # ==========================================================================
@@ -622,15 +645,25 @@ def test_an_auth_failure_disables_the_mailbox(session, outbox):
 
 
 def test_a_transient_failure_marks_health_but_keeps_the_mailbox(session, outbox):
-    mailbox = make_mailbox(session)
-    lead, _ = make_approved_lead(session)
-    sender = _FailingSender(ProviderUnavailable("503"), outbox_path=outbox)
+    """A 503 is not the mailbox's fault -- and not proof nothing left, either.
 
-    with pytest.raises(ProviderUnavailable):
+    Gmail's send is not idempotent, so a 5xx is treated as "may have been
+    sent": held for a human, not retried into a second copy.
+    """
+
+    mailbox = make_mailbox(session)
+    lead, draft = make_approved_lead(session)
+    sender = _FailingSender(
+        ProviderUnavailable("503", status_code=503), outbox_path=outbox
+    )
+
+    with pytest.raises(PermanentJobError, match="MAY ALREADY HAVE BEEN SENT"):
         send_lead(session, lead, sender=sender, now=NOW)
 
     assert mailbox.status is MailboxStatus.ACTIVE
     assert mailbox.consecutive_failures == 1
+    assert draft.send_attempted_at == NOW
+    assert draft.send_attempt_mailbox_id == mailbox.id
 
 
 def test_a_success_resets_the_failure_counter(session, sender):
@@ -781,6 +814,186 @@ def test_a_deferred_send_does_not_spend_an_attempt(session, monkeypatch, outbox)
     assert refreshed.attempts == 0
     assert "[deferred]" in refreshed.last_error
     assert refreshed.run_after > datetime.now(timezone.utc)
+
+
+# ==========================================================================
+# At most once: a retry never re-sends what may already have left
+# ==========================================================================
+#
+# These go through `process_next` on purpose. The send step used to hand the
+# message to Gmail and book the result in ONE transaction, so anything failing
+# after Gmail accepted it rolled back to "never sent" and the queue sent it
+# again. Tests that called `send_lead` directly and inspected the objects in
+# memory could not see that: the rollback is the bug.
+
+
+class _CountingSender(StubEmailSender):
+    """A stub that remembers every message it was handed."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.sent_to: list[str] = []
+
+    def send(self, message, *, credential_ref):
+        self.sent_to.append(message.to_address)
+        return super().send(message, credential_ref=credential_ref)
+
+
+def _use_sender(monkeypatch, sender):
+    import mazz.pipeline.send as send_module
+
+    monkeypatch.setattr(send_module, "get_email_sender", lambda: sender)
+
+
+def _run_send():
+    return process_next(handlers={**DEFAULT_HANDLERS, "send": handle_send})
+
+
+def test_a_failure_after_the_wire_is_never_retried_into_a_second_send(
+    session, monkeypatch, outbox
+):
+    import mazz.pipeline.send as send_module
+
+    make_mailbox(session)
+    lead, draft = make_approved_lead(session)
+    job, _ = enqueue_job(session, lead.id, "send")
+    job_id, lead_id, draft_id = job.id, lead.id, draft.id
+    session.commit()
+
+    sender = _CountingSender(outbox_path=outbox)
+    _use_sender(monkeypatch, sender)
+
+    # Gmail accepts; then booking the result blows up, as a dropped database
+    # connection or a killed worker would.
+    def booking_fails(*_args, **_kwargs):
+        raise RuntimeError("server closed the connection unexpectedly")
+
+    real_book = send_module._book_sent
+    monkeypatch.setattr(send_module, "_book_sent", booking_fails)
+    _run_send()
+    monkeypatch.setattr(send_module, "_book_sent", real_book)
+    assert sender.sent_to == [lead.email]  # it DID leave, before the failure
+
+    session.expire_all()
+    job = session.get(Job, job_id)
+    assert job.status is JobStatus.PENDING  # an ordinary, retryable failure
+    job.run_after = datetime.now(timezone.utc) - timedelta(seconds=1)
+    session.commit()
+
+    _run_send()
+
+    session.expire_all()
+    assert sender.sent_to == [lead.email], "the retry sent the email a second time"
+    job = session.get(Job, job_id)
+    assert job.status is JobStatus.FAILED
+    assert "MAY ALREADY HAVE BEEN SENT" in job.last_error
+    assert "dana@outreach-northwind.com" in job.last_error
+    assert session.get(Lead, lead_id).status is LeadStatus.HELD
+    assert unresolved_send_attempt(session, session.get(Lead, lead_id)).id == draft_id
+
+
+def test_an_auth_failure_through_the_worker_stays_disabled(
+    session, monkeypatch, outbox
+):
+    """The disable used to be rolled back with the failed job's transaction."""
+
+    make_mailbox(session)
+    lead, draft = make_approved_lead(session)
+    enqueue_job(session, lead.id, "send")
+    draft_id = draft.id
+    session.commit()
+
+    _use_sender(
+        monkeypatch,
+        _FailingSender(ProviderAuthError("delegation revoked"), outbox_path=outbox),
+    )
+    _run_send()
+
+    session.expire_all()
+    mailbox = session.execute(select(Mailbox)).scalars().one()
+    assert mailbox.status is MailboxStatus.DISABLED
+    assert mailbox.consecutive_failures == 1
+    assert "delegation revoked" in mailbox.last_error
+    # A refused credential proves nothing left, so no send is left dangling.
+    assert session.get(Draft, draft_id).send_attempted_at is None
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        ProviderRateLimited("429", status_code=429),
+        ProviderBadResponse("400 malformed", status_code=400),
+    ],
+)
+def test_a_clear_refusal_leaves_the_send_free_to_retry(session, outbox, refusal):
+    make_mailbox(session)
+    lead, draft = make_approved_lead(session)
+
+    with pytest.raises(type(refusal)):
+        send_lead(
+            session, lead, sender=_FailingSender(refusal, outbox_path=outbox), now=NOW
+        )
+
+    assert draft.send_attempted_at is None
+    assert unresolved_send_attempt(session, lead) is None
+
+    sender = _CountingSender(outbox_path=outbox, clock=lambda: NOW)
+    send_lead(session, lead, sender=sender, now=NOW)
+    assert sender.sent_to == [lead.email]
+    assert lead.status is LeadStatus.SENT
+
+
+def test_a_send_reclaimed_from_a_crashed_worker_is_held_not_resent(
+    session, monkeypatch, outbox
+):
+    """Reclaim is safe for sends only because the marker was committed first."""
+
+    mailbox = make_mailbox(session)
+    lead, draft = make_approved_lead(session)
+    job, _ = enqueue_job(session, lead.id, "send")
+    crashed_at = datetime.now(timezone.utc) - timedelta(minutes=30)
+    # The worker marked the attempt, handed the message over, and died.
+    draft.send_attempted_at = crashed_at
+    draft.send_attempt_mailbox_id = mailbox.id
+    job.status = JobStatus.RUNNING
+    job.locked_at = crashed_at
+    job_id, lead_id = job.id, lead.id
+    session.commit()
+
+    reclaimed = reclaim_stale_jobs(session)
+    session.commit()
+    assert [j.id for j in reclaimed] == [job_id]
+    assert str(crashed_at) in reclaimed[0].last_error
+
+    sender = _CountingSender(outbox_path=outbox)
+    _use_sender(monkeypatch, sender)
+    _run_send()
+
+    session.expire_all()
+    assert sender.sent_to == []
+    assert session.get(Job, job_id).status is JobStatus.FAILED
+    assert session.get(Lead, lead_id).status is LeadStatus.HELD
+
+
+def test_a_redraft_does_not_launder_an_unresolved_attempt(session, outbox):
+    """The stranger may have the FIRST draft; a fresh one must not go too."""
+
+    mailbox = make_mailbox(session)
+    lead, first = make_approved_lead(session)
+    first.send_attempted_at = NOW - timedelta(hours=1)
+    first.send_attempt_mailbox_id = mailbox.id
+    h.make_draft(
+        session,
+        lead,
+        verification_status=VerificationStatus.PASSED,
+        body=first.body,
+    )
+    session.flush()
+
+    sender = _CountingSender(outbox_path=outbox, clock=lambda: NOW)
+    with pytest.raises(PermanentJobError, match="MAY ALREADY HAVE BEEN SENT"):
+        send_lead(session, lead, sender=sender, now=NOW)
+    assert sender.sent_to == []
 
 
 # ==========================================================================

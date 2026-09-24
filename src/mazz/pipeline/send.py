@@ -20,6 +20,14 @@ moment, everything an earlier stage already checked:
 
 None of these re-checks can be traded for throughput. They are each cheap --
 one SELECT -- next to the cost of the thing they prevent.
+
+**At most once.** Gmail's send is not idempotent, and the queue retries. So
+the attempt is marked on the draft and COMMITTED before the message is handed
+over, and cleared only when the sender's failure proves nothing left. A retry
+that finds a marker with no booked ``sent_messages`` row -- the booking
+failed, the worker died, Gmail timed out -- holds the lead and names the
+mailbox to check, instead of emailing the same stranger a second time.
+``python -m mazz.ops resolve-send`` records what the human found.
 """
 
 from __future__ import annotations
@@ -28,8 +36,14 @@ import logging
 import re
 from datetime import datetime, timezone
 
+from sqlalchemy import exists, select
+
 from mazz.ingest.csv_import import SuppressionChecker, SuppressionUnavailable
-from mazz.integrations.base import ProviderAuthError, ProviderError
+from mazz.integrations.base import (
+    ProviderAuthError,
+    ProviderError,
+    ProviderRateLimited,
+)
 from mazz.integrations.email_sender import (
     EmailSender,
     OutgoingMessage,
@@ -47,9 +61,15 @@ from mazz.pipeline.verify import is_approvable, latest_draft
 
 log = logging.getLogger(__name__)
 
-__all__ = ["SEND_JOB_KIND", "handle_send", "send_lead"]
+__all__ = [
+    "SEND_JOB_KIND",
+    "definitely_not_sent",
+    "handle_send",
+    "send_lead",
+    "unresolved_send_attempt",
+]
 
-#: ``jobs.kind`` for this step. The review app enqueues it on approve.
+#: ``jobs.kind`` for this step. Only the outbox's Send action enqueues it.
 SEND_JOB_KIND = "send"
 
 
@@ -142,6 +162,23 @@ def send_lead(
             "have been re-drafted or rejected after approval. Refusing to send."
         )
 
+    # -- a previous attempt must be resolved -------------------------------
+    # Lead-wide, not just this draft: a lead re-drafted after an ambiguous
+    # send has a fresh draft with no marker, and the stranger may already
+    # have the first one.
+    unresolved = unresolved_send_attempt(session, lead)
+    if unresolved is not None:
+        attempted_from = (
+            session.get(Mailbox, unresolved.send_attempt_mailbox_id)
+            if unresolved.send_attempt_mailbox_id is not None
+            else None
+        )
+        _hold_unresolved(session, lead)
+        raise PermanentJobError(
+            _may_have_been_sent(lead, unresolved, attempted_from)
+            + " Refusing to try again."
+        )
+
     # -- suppression, again, now ------------------------------------------
     try:
         match = SuppressionChecker(session).check(lead.email, lead.company_domain)
@@ -173,14 +210,62 @@ def send_lead(
 
     message = _outgoing(lead, draft, mailbox)
 
+    # -- mark the attempt, durably, BEFORE the wire -------------------------
+    # Everything after `sender.send` returns can fail: the booking, the
+    # commit, the process. Without a committed marker, each of those rolls
+    # back to "never sent" and the queue sends the same email again.
+    draft.send_attempted_at = now
+    draft.send_attempt_mailbox_id = mailbox.id
+    session.commit()
+
     # -- send --------------------------------------------------------------
     try:
         receipt = sender.send(message, credential_ref=mailbox.credential_ref)
     except ProviderError as exc:
         _record_mailbox_failure(session, mailbox, exc)
-        raise
+        not_sent = definitely_not_sent(exc)
+        if not_sent:
+            draft.send_attempted_at = None
+            draft.send_attempt_mailbox_id = None
+        else:
+            lead.status = LeadStatus.HELD
+        # Committed before raising: the job's own transaction is about to be
+        # rolled back, and a mailbox disabled for a dead credential that
+        # un-disables itself on rollback hands the next lead the same 401.
+        session.commit()
+        if not_sent:
+            raise
+        raise PermanentJobError(
+            f"{_may_have_been_sent(lead, draft, mailbox)} The sender failed "
+            f"ambiguously: {exc.__class__.__name__}: {exc}"
+        ) from exc
 
     # -- book it -----------------------------------------------------------
+    sent = _book_sent(session, lead, draft, mailbox, message, receipt)
+
+    log.info(
+        "sent lead %s from %s (message %s)",
+        lead.id,
+        mailbox.email_address,
+        receipt.provider_message_id or receipt.rfc_message_id,
+    )
+    return sent
+
+
+def _book_sent(
+    session,
+    lead: Lead,
+    draft: Draft,
+    mailbox: Mailbox,
+    message: OutgoingMessage,
+    receipt,
+) -> SentMessage:
+    """Record a message that has left. Runs only after the sender accepted it.
+
+    Its own function so the seam between "Gmail has it" and "we know Gmail
+    has it" is one named place -- the place the attempt marker exists for.
+    """
+
     sent = SentMessage(
         lead_id=lead.id,
         draft_id=draft.id,
@@ -202,14 +287,67 @@ def send_lead(
 
     lead.status = LeadStatus.SENT
     session.flush()
-
-    log.info(
-        "sent lead %s from %s (message %s)",
-        lead.id,
-        mailbox.email_address,
-        receipt.provider_message_id or receipt.rfc_message_id,
-    )
     return sent
+
+
+def definitely_not_sent(exc: ProviderError) -> bool:
+    """True only when the sender's failure proves nothing left.
+
+    Gmail's ``messages.send`` is not idempotent, so every other outcome is
+    treated as "may have been sent". A refused credential, a rate limit and a
+    4xx are the provider declining the request; a 5xx, a timeout, a reset
+    connection or an acceptance with no message id can each follow a
+    delivered message. Guessing wrong one way holds a lead for a human to
+    clear in a minute; guessing wrong the other way emails a stranger twice.
+    """
+
+    if isinstance(exc, (ProviderAuthError, ProviderRateLimited)):
+        return True
+    status = exc.status_code
+    return status is not None and 400 <= int(status) < 500
+
+
+def unresolved_send_attempt(session, lead: Lead) -> Draft | None:
+    """This lead's draft that was handed to the sender with no booked result."""
+
+    return (
+        session.execute(
+            select(Draft)
+            .where(
+                Draft.lead_id == lead.id,
+                Draft.send_attempted_at.isnot(None),
+                ~exists().where(SentMessage.draft_id == Draft.id),
+            )
+            .order_by(Draft.send_attempted_at.desc())
+            .limit(1)
+        )
+        .scalars()
+        .first()
+    )
+
+
+def _hold_unresolved(session, lead: Lead) -> None:
+    """Take a may-have-been-sent lead out of the outbox, durably.
+
+    ``held`` and committed here rather than left to the queue: the queue's
+    give-up path deliberately never holds an ``approved`` lead, and one left
+    ``approved`` sits in the outbox looking ready to send when it may already
+    be in the recipient's inbox.
+    """
+
+    lead.status = LeadStatus.HELD
+    session.commit()
+
+
+def _may_have_been_sent(lead: Lead, draft: Draft, mailbox: Mailbox | None) -> str:
+    where = mailbox.email_address if mailbox is not None else "the sending mailbox"
+    return (
+        f"Lead {lead.id} ({lead.email}) MAY ALREADY HAVE BEEN SENT draft "
+        f"{draft.id}: it was handed to the sender at {draft.send_attempted_at} "
+        f"and no result was booked. Check the Sent folder of {where}, then "
+        f"resolve it with `python -m mazz.ops resolve-send {lead.id} "
+        "--sent` or `--not-sent`."
+    )
 
 
 def _record_mailbox_failure(session, mailbox: Mailbox, exc: ProviderError) -> None:

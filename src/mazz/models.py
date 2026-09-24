@@ -618,6 +618,18 @@ class Draft(Base):
         nullable=False, server_default=func.now()
     )
 
+    #: Set and COMMITTED immediately before this draft is handed to the
+    #: sender, cleared only when the sender says unambiguously that nothing
+    #: left. Set with no `sent_messages` row for this draft means "may have
+    #: been sent": the send step refuses to try again, because a crash between
+    #: Gmail accepting a message and our booking it would otherwise re-send
+    #: the same email to the same stranger on every retry.
+    send_attempted_at: Mapped[datetime | None] = _utcnow_column()
+    #: Which mailbox's Sent folder to check when the above is unresolved.
+    send_attempt_mailbox_id: Mapped[int | None] = mapped_column(
+        ForeignKey("mailboxes.id", ondelete="SET NULL")
+    )
+
     lead: Mapped[Lead] = relationship(back_populates="drafts")
 
     # "the latest draft governs" — this index serves the newest-per-lead lookup.
