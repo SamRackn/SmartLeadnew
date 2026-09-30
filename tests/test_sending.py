@@ -727,7 +727,7 @@ def test_exactly_one_place_in_the_codebase_creates_a_send_job():
     creators = sorted(
         path.relative_to(src).as_posix()
         for path in src.rglob("*.py")
-        if call.search(path.read_text())
+        if call.search(path.read_text(encoding="utf-8"))
     )
 
     assert creators == ["web/routes/outbox.py"], (
