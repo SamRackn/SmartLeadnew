@@ -33,6 +33,7 @@ about routing can reorder or soften the suppression check above it.
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,7 +50,7 @@ from mazz.ingest.validate import (
     email_domain,
     validate_row,
 )
-from mazz.models import Lead, LeadStatus, SuppressionEntry
+from mazz.models import Campaign, Lead, LeadStatus, SuppressionEntry
 from mazz.pipeline.queue import enqueue_job
 from mazz.pipeline.routing import RoutingPolicy, assign_campaign
 
@@ -60,6 +61,8 @@ __all__ = [
     "SuppressionChecker",
     "SuppressionMatch",
     "SuppressionUnavailable",
+    "email_sha256",
+    "workspace_id_of",
     "import_csv",
     "import_csv_file",
     "import_lead",
@@ -236,22 +239,41 @@ class SuppressionChecker:
     def __init__(self, session: Session) -> None:
         self.session = session
 
-    def check(self, email: str, company_domain: str | None) -> SuppressionMatch | None:
-        """Return the matching entry, or None. Raises on any read failure."""
+    def check(
+        self,
+        email: str,
+        company_domain: str | None,
+        *,
+        workspace_id: int | None = None,
+    ) -> SuppressionMatch | None:
+        """Return the matching entry, or None. Raises on any read failure.
 
+        Global rows (``workspace_id IS NULL``) always apply. A workspace's own
+        rows apply only when that workspace is named -- Sean's client list
+        blocks Sean's campaigns, not ClientRise's.
+        """
+
+        email = (email or "").strip().lower()
+        digest = email_sha256(email) if email else ""
         domains = {d for d in (company_domain, email_domain(email)) if d}
         try:
+            scope = SuppressionEntry.workspace_id.is_(None)
+            if workspace_id is not None:
+                scope = scope | (SuppressionEntry.workspace_id == workspace_id)
             stmt = select(SuppressionEntry).where(
+                scope,
                 or_(
                     SuppressionEntry.email.isnot(None)
                     & (SuppressionEntry.email.ilike(email)),
+                    SuppressionEntry.email_sha256.isnot(None)
+                    & (SuppressionEntry.email_sha256 == digest),
                     SuppressionEntry.domain.isnot(None)
                     & sql_text(
                         "lower(suppression_list.domain) = ANY(:dom) "
                         "OR EXISTS (SELECT 1 FROM unnest(CAST(:dom AS text[])) AS d(v) "
                         "           WHERE d.v LIKE '%.' || lower(suppression_list.domain))"
                     ).bindparams(dom=sorted(domains) or [""]),
-                )
+                ),
             )
             entries = self.session.execute(stmt).scalars().all()
         except SQLAlchemyError as exc:
@@ -267,9 +289,40 @@ class SuppressionChecker:
             if entry.email and entry.email.strip().lower() == email:
                 return SuppressionMatch(entry.id, "email", entry.email, entry.reason)
         for entry in entries:
+            if entry.email_sha256 and entry.email_sha256 == digest:
+                return SuppressionMatch(entry.id, "email_sha256", entry.email_sha256[:12], entry.reason)
+        for entry in entries:
             if entry.domain:
                 return SuppressionMatch(entry.id, "domain", entry.domain, entry.reason)
         return None
+
+    def check_lead(self, lead: Lead) -> SuppressionMatch | None:
+        """`check`, scoped to the lead's own workspace (via its campaign)."""
+
+        return self.check(
+            lead.email, lead.company_domain, workspace_id=workspace_id_of(self.session, lead)
+        )
+
+
+def email_sha256(email: str) -> str:
+    """The tombstone key: sha256 of the trimmed, lower-cased address."""
+
+    return hashlib.sha256((email or "").strip().lower().encode("utf-8")).hexdigest()
+
+
+def workspace_id_of(session: Session, lead: Lead) -> int | None:
+    if lead.campaign_id is None:
+        return None
+    campaign = session.get(Campaign, lead.campaign_id)
+    return campaign.workspace_id if campaign is not None else None
+
+
+class _ScopedSuppressed(Exception):
+    """Routing put the lead in a workspace that blocks it. Rolls back the admit."""
+
+    def __init__(self, match: SuppressionMatch) -> None:
+        super().__init__(match.describe())
+        self.match = match
 
 
 # --------------------------------------------------------------------------
@@ -358,6 +411,15 @@ def _admit(
     decision = assign_campaign(session, lead, policy)
     session.flush()
 
+    # The global gate ran before any write. A workspace's own blocks (a
+    # client's existing customers) can only be checked once routing has said
+    # which workspace this is -- still before a job exists. A match raises so
+    # the caller's SAVEPOINT takes the lead row back out.
+    if lead.campaign_id is not None:
+        scoped = SuppressionChecker(session).check_lead(lead)
+        if scoped is not None:
+            raise _ScopedSuppressed(scoped)
+
     # `enqueue_job` de-duplicates against an outstanding job of the same kind,
     # so uploading the same sheet twice does not mean researching twice.
     job, enqueued = enqueue_job(session, lead.id, ENRICH_JOB_KIND)
@@ -430,6 +492,22 @@ def _process_row(
     try:
         with session.begin_nested():
             return _admit(session, validated, row_number, policy)
+    except _ScopedSuppressed as exc:
+        return RejectedRow(
+            row_number=row_number,
+            kind="suppressed",
+            reason=f"suppressed for this workspace: matched {exc.match.describe()}",
+            email=validated.email,
+            raw=raw_dict,
+        )
+    except SuppressionUnavailable as exc:
+        return RejectedRow(
+            row_number=row_number,
+            kind="suppression_unavailable",
+            reason=f"refused (fail closed): {exc}",
+            email=validated.email,
+            raw=raw_dict,
+        )
     except SQLAlchemyError as exc:
         return RejectedRow(
             row_number=row_number,

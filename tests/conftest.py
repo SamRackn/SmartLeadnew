@@ -94,6 +94,11 @@ _SAFE_ENV: dict[str, str] = {
     "LINKEDIN_API_KEY": "",
     "COMPANY_SCRAPER_PROVIDER": "stub",
     "EMAIL_SENDER": "stub",
+    # The kill switch is ON in tests so the send path runs end to end -- safe
+    # only because EMAIL_SENDER is pinned to the stub on the line above, which
+    # writes to a local file and has no network code. Tests of the switch
+    # itself set it false explicitly.
+    "SEND_ENABLED": "true",
     "ANTHROPIC_API_KEY": "",
     # Not a credential, but the same hazard: `DRAFT_COMPOSER=claude` in a
     # developer's `.env` would route every drafting test through a paid,

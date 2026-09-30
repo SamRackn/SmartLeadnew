@@ -51,7 +51,7 @@ from mazz.models import (
     VerificationStatus,
     Workspace,
 )
-from mazz.pipeline.draft import unsubscribe_url
+from mazz.pipeline.draft import RELEVANCE_LINE, unsubscribe_url
 from mazz.pipeline.mailbox import (
     MailboxUnavailable,
     NoMailboxConfigured,
@@ -132,7 +132,8 @@ def make_approved_lead(session, **kwargs):
         lead,
         verification_status=VerificationStatus.PASSED,
         body="Saw the Revenue Operations Manager req.\n\n-- \nMazz Ltd, 1 Test "
-        "Street, Testville\nUnsubscribe (one click): https://example.test/u/abc",
+        f"Street, Testville\n{RELEVANCE_LINE}\n"
+        "Unsubscribe (one click): https://example.test/u/abc",
     )
     session.flush()
     return lead, draft
@@ -589,7 +590,10 @@ def test_an_unreadable_suppression_list_holds_the_lead(session, sender, monkeypa
         def __init__(self, session):
             pass
 
-        def check(self, email, company_domain):
+        def check(self, email, company_domain, **_):
+            raise SuppressionUnavailable("relation suppression_list does not exist")
+
+        def check_lead(self, lead):
             raise SuppressionUnavailable("relation suppression_list does not exist")
 
     make_mailbox(session)

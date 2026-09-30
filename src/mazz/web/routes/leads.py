@@ -49,7 +49,12 @@ from mazz.models import (
     SentMessage,
     VerificationStatus,
 )
-from mazz.pipeline.draft import MissingSenderAddress, render_body, split_body
+from mazz.pipeline.draft import (
+    MissingSenderAddress,
+    render_body,
+    split_body,
+    unresolved_placeholders,
+)
 from mazz.pipeline.mailbox import (
     MailboxUnavailable,
     NoMailboxConfigured,
@@ -383,6 +388,22 @@ async def approve_lead(
                 f"(verification_status={draft.verification_status.value}); "
                 "a failed or pending draft can never be sent. "
                 f"verification_notes: {draft.verification_notes or '(none)'}"
+            ),
+        )
+
+    holes = unresolved_placeholders(draft.subject, draft.body)
+    if holes:
+        # A template rendered with a hole in it -- `{day}` nobody filled, or
+        # no subject at all. Refused here, server-side, like a failed draft.
+        return _draft_panel_response(
+            request,
+            session,
+            lead_id,
+            user,
+            status_code=409,
+            error=(
+                f"draft {draft.id} cannot be approved: unfilled merge fields or "
+                f"no subject {holes}. Edit the draft to fill them first."
             ),
         )
 

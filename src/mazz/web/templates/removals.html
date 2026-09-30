@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Removals{% endblock %}
+
+{% block content %}
+<h1>Removals and never-contact</h1>
+<p class="lede">
+  Takes effect immediately, on every workspace unless you scope a domain to one.
+  Pending leads it covers are held on the spot; sent leads get no further steps.
+</p>
+
+{% if error %}<div class="banner error" role="alert">{{ error }}</div>{% endif %}
+{% if message %}<div class="banner ok" role="status">{{ message }}</div>{% endif %}
+
+<section class="dash-panel">
+  <h2>Add an email or domain</h2>
+  <form method="post" action="/removals" class="stack-form">
+    <label>Email or domain
+      <input name="value" required placeholder="name@firm.com or firm.com" autocomplete="off">
+    </label>
+    <label>Applies to
+      <select name="scope">
+        <option value="global">Every workspace (removal requests, bounces)</option>
+        {% for ws in workspaces %}
+        <option value="{{ ws.id }}">Only {{ ws.name }} (domains only, e.g. a sender's own clients)</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Reason <input name="reason" placeholder="e.g. asked by reply 30 Sep"></label>
+    <button type="submit">Add</button>
+  </form>
+</section>
+
+{% if can_delete %}
+<section class="dash-panel">
+  <h2>Delete a person</h2>
+  <p>Erases their lead, drafts, jobs, send records and person-level research, and
+  leaves a suppression tombstone so a re-import cannot bring them back. Cannot be undone.</p>
+  <form method="post" action="/removals/delete-person" class="stack-form">
+    <label>Email <input name="email" type="email" required autocomplete="off"></label>
+    <label>Type DELETE to confirm <input name="confirm" required autocomplete="off"></label>
+    <button type="submit">Delete this person</button>
+  </form>
+</section>
+{% endif %}
+
+<section class="dash-panel">
+  <h2>Recent entries</h2>
+  <table class="lead-table">
+    <thead><tr><th>Entry</th><th>Scope</th><th>Reason</th><th>Added by</th><th>When</th></tr></thead>
+    <tbody>
+      {% for e in entries %}
+      <tr>
+        <td>{{ e.email or e.domain or ("erased person " ~ e.email_sha256[:10] ~ "…") }}</td>
+        <td>{{ "global" if e.workspace_id is none else "workspace " ~ e.workspace_id }}</td>
+        <td>{{ e.reason or "" }}</td>
+        <td>{{ e.added_by or "" }}</td>
+        <td>{{ e.added_at.strftime("%Y-%m-%d %H:%M UTC") }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5">No entries yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

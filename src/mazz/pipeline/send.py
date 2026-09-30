@@ -35,6 +35,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 
 from sqlalchemy import exists, select
 
@@ -50,7 +51,19 @@ from mazz.integrations.email_sender import (
     get_email_sender,
 )
 from mazz.models import Draft, Lead, LeadStatus, Mailbox, MailboxStatus, SentMessage
-from mazz.pipeline.draft import unsubscribe_url
+from mazz import audit
+from mazz.config import get_settings
+from mazz.integrations.base import find_repo_root, setting
+from mazz.integrations.email_sender import STUB_PROVIDER, build_mime
+from mazz.pipeline.draft import (
+    RELEVANCE_LINE,
+    MissingSenderAddress,
+    postal_address_for,
+    split_body,
+    unresolved_placeholders,
+    unsubscribe_base_url,
+    unsubscribe_url,
+)
 from mazz.pipeline.mailbox import (
     MailboxUnavailable,
     NoMailboxConfigured,
@@ -63,6 +76,9 @@ log = logging.getLogger(__name__)
 
 __all__ = [
     "SEND_JOB_KIND",
+    "SendDisabled",
+    "check_live_send_ready",
+    "write_dry_run",
     "definitely_not_sent",
     "handle_send",
     "send_lead",
@@ -142,7 +158,6 @@ def send_lead(
     """
 
     now = now or _now()
-    sender = sender or get_email_sender()
 
     # -- the approval must still stand ------------------------------------
     if lead.status != LeadStatus.APPROVED:
@@ -181,7 +196,7 @@ def send_lead(
 
     # -- suppression, again, now ------------------------------------------
     try:
-        match = SuppressionChecker(session).check(lead.email, lead.company_domain)
+        match = SuppressionChecker(session).check_lead(lead)
     except SuppressionUnavailable as exc:
         # Fails closed, exactly as the ingest gate does.
         lead.status = LeadStatus.HELD
@@ -199,6 +214,43 @@ def send_lead(
             "suppressed since. Held, not sent."
         )
 
+    # -- the copy must be whole, and its footer still true -----------------
+    holes = unresolved_placeholders(draft.subject, draft.body)
+    if holes:
+        _hold(session, lead)
+        raise PermanentJobError(
+            f"draft {draft.id} has unfilled merge fields or no subject {holes}; "
+            "a template rendered with a hole in it is never sent."
+        )
+    try:
+        address = postal_address_for(lead)
+    except MissingSenderAddress as exc:
+        _hold(session, lead)
+        raise PermanentJobError(f"lead {lead.id}: {exc}") from exc
+    footer = split_body(draft.body)[1] or ""
+    footer_lines = [line.strip() for line in footer.splitlines()]
+    # Address and opt-out line compared exactly; the unsubscribe link only
+    # for presence -- its token may legitimately differ after a secret
+    # rotation, and the link in the body is the one that is sent (see
+    # `_unsubscribe_link`).
+    if (
+        address not in footer_lines
+        or RELEVANCE_LINE not in footer_lines
+        or not _FOOTER_UNSUBSCRIBE_RE.search(footer)
+    ):
+        _hold(session, lead)
+        raise PermanentJobError(
+            f"draft {draft.id}'s footer does not carry the current confirmed "
+            "sender address, the opt-out line and an unsubscribe link (the "
+            "address changed since it was drafted, or the body was damaged). "
+            "Held: re-draft it."
+        )
+
+    enabled = bool(get_settings().send_enabled)
+    if enabled:
+        sender = sender or get_email_sender()
+        check_live_send_ready(lead, draft, sender)
+
     # -- pick a mailbox ----------------------------------------------------
     try:
         mailbox = select_mailbox(session, campaign_id=lead.campaign_id, now=now)
@@ -209,6 +261,13 @@ def send_lead(
         raise PermanentJobError(str(exc)) from exc
 
     message = _outgoing(lead, draft, mailbox)
+
+    # -- the kill switch ----------------------------------------------------
+    # Before the attempt marker and before any sender exists: with sending
+    # off, nothing is handed to anything that could put it on the wire.
+    if not enabled:
+        path = write_dry_run(message, lead, draft, now=now)
+        raise SendDisabled(path)
 
     # -- mark the attempt, durably, BEFORE the wire -------------------------
     # Everything after `sender.send` returns can fail: the booking, the
@@ -371,7 +430,74 @@ def _record_mailbox_failure(session, mailbox: Mailbox, exc: ProviderError) -> No
     session.flush()
 
 
+class SendDisabled(Exception):
+    """``SEND_ENABLED`` is false: the message was rendered to disk, not sent.
+
+    Not a failure and not a send. The lead stays ``approved`` and nothing is
+    booked, so nothing downstream (caps, follow-up clocks, the dashboard)
+    believes an email left.
+    """
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(f"SEND_ENABLED is false; MIME written to {path}, nothing sent")
+        self.path = path
+
+
+def dry_run_dir() -> Path:
+    return Path(setting("DRYRUN_DIR") or (find_repo_root() / "out" / "dryrun"))
+
+
+def write_dry_run(message: OutgoingMessage, lead: Lead, draft: Draft, *, now: datetime) -> Path:
+    """The exact MIME the live sender would transmit, as an .eml on disk."""
+
+    directory = dry_run_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{now:%Y%m%dT%H%M%S}-lead{lead.id}-draft{draft.id}.eml"
+    path.write_bytes(build_mime(message, now=now).as_bytes())
+    log.info("dry run: lead %s rendered to %s (SEND_ENABLED is false)", lead.id, path)
+    return path
+
+
+def check_live_send_ready(lead: Lead, draft: Draft, sender: EmailSender) -> None:
+    """Refuse a LIVE send that would carry a footer we cannot stand behind.
+
+    The stub writes to a local file and is exempt. A real provider needs the
+    lead in a workspace (so its address is the confirmed one, not the env
+    fallback) and an unsubscribe link on a real https host -- a link to the
+    placeholder host is a dead unsubscribe, which is a compliance failure
+    wearing a working footer.
+    """
+
+    if sender.provider == STUB_PROVIDER:
+        return
+    if lead.campaign is None:
+        raise PermanentJobError(
+            f"lead {lead.id} has no campaign, so no workspace and no confirmed "
+            "postal address; live sending refuses unrouted leads."
+        )
+    link = _unsubscribe_link(lead, draft)
+    if not link.startswith("https://") or ".example" in link.split("/u/")[0]:
+        raise PermanentJobError(
+            f"draft {draft.id}'s unsubscribe link is {link!r}, which is not a live "
+            "https unsubscribe host. Set UNSUBSCRIBE_BASE_URL (currently "
+            f"{unsubscribe_base_url()!r}) and re-draft before sending live."
+        )
+
+
+def _hold(session, lead: Lead) -> None:
+    """Park a lead the send step refused, durably (the job transaction is
+    about to roll back)."""
+
+    lead.status = LeadStatus.HELD
+    session.commit()
+
+
 def handle_send(ctx: JobContext) -> None:
     """Queue handler for ``kind='send'``. Nothing chains after it."""
 
-    send_lead(ctx.session, ctx.lead)
+    try:
+        send_lead(ctx.session, ctx.lead)
+    except SendDisabled as exc:
+        audit.record(
+            ctx.session, audit.SYSTEM, "dry_run_send", "lead", ctx.lead.id, path=str(exc.path)
+        )

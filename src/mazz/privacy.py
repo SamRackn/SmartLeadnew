@@ -32,8 +32,10 @@ Suppression entries are kept on purpose
 ---------------------------------------
 An entry in ``suppression_list`` is a record of an instruction *not* to contact
 someone, and deleting it would let the next CSV upload walk them straight back
-into the pipeline. It is reported, never silently removed; pass
-``remove_suppression=True`` if the request really is to forget them entirely.
+into the pipeline. It is reported, never silently removed -- and erasure ends
+by making sure one EXISTS: the normalised email plus its sha256 by default, or
+with ``remove_suppression=True`` ("forget me entirely") the sha256 alone,
+which still matches at every suppression check but names nobody.
 """
 
 from __future__ import annotations
@@ -47,6 +49,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from mazz.db import session_scope
+from mazz.ingest.csv_import import email_sha256
 from mazz.models import Draft, Job, Lead, ResearchCache, SuppressionEntry
 
 __all__ = [
@@ -259,6 +262,7 @@ def delete_person(
     session: Session | None = None,
     remove_suppression: bool = False,
     strict: bool = True,
+    added_by: str = "system",
 ) -> DeletionReport:
     """Erase everything this system holds about one person.
 
@@ -331,6 +335,31 @@ def delete_person(
                 if entry is not None:
                     sess.delete(entry)
                     report.suppression_deleted += 1
+
+        # 5. ...and there is ALWAYS a tombstone afterwards. The next ZoomInfo
+        #    pull will contain this person again; without an entry, erasure
+        #    is followed by a fresh cold email. Default: the normalised email
+        #    plus its sha256. With remove_suppression (forget them entirely):
+        #    the sha256 alone, which still matches at every gate but no
+        #    longer names anyone.
+        sess.flush()
+        digest = email_sha256(email)
+        has_tombstone = sess.execute(
+            select(SuppressionEntry.id).where(
+                SuppressionEntry.workspace_id.is_(None),
+                (func.lower(func.coalesce(SuppressionEntry.email, "")) == email)
+                | (SuppressionEntry.email_sha256 == digest),
+            )
+        ).first()
+        if has_tombstone is None:
+            sess.add(
+                SuppressionEntry(
+                    email=None if remove_suppression else email,
+                    email_sha256=digest,
+                    reason="erased on request (delete-by-person)",
+                    added_by=added_by,
+                )
+            )
 
         sess.flush()
 

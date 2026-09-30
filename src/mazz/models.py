@@ -173,6 +173,21 @@ class Workspace(Base):
     slug: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
 
+    # --- CAN-SPAM sender address ------------------------------------------
+    #
+    # Per workspace because each sender is a different business. An address
+    # is only usable once a named human has confirmed it: a plausible-looking
+    # address nobody vouched for is the failure the placeholder guard in
+    # `pipeline.draft` exists to stop, so "typed in" and "confirmed" are two
+    # different states and only the second one renders a footer.
+
+    #: The physical mailing address printed in every email's footer.
+    postal_address: Mapped[str | None] = mapped_column(Text)
+    #: Who confirmed it (a login handle) and when. Both NULL = unconfirmed,
+    #: and an unconfirmed address refuses to render exactly as an empty one.
+    postal_address_confirmed_by: Mapped[str | None] = mapped_column(String(320))
+    postal_address_confirmed_at: Mapped[datetime | None] = _utcnow_column()
+
     created_at: Mapped[datetime] = _utcnow_column(
         nullable=False, server_default=func.now()
     )
@@ -507,7 +522,7 @@ class Lead(Base):
     #: The approver's login handle (``users.email``). Copied, not a foreign
     #: key: a deleted or renamed account must not erase or rewrite the record
     #: of what it approved. Every other human action is in ``audit_events``.
-    approved_by: Mapped[str | None] = mapped_column(String(64))
+    approved_by: Mapped[str | None] = mapped_column(String(320))
 
     created_at: Mapped[datetime] = _utcnow_column(
         nullable=False, server_default=func.now()
@@ -659,14 +674,26 @@ class SuppressionEntry(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     email: Mapped[str | None] = mapped_column(String(320), index=True)
     domain: Mapped[str | None] = mapped_column(String(253), index=True)
+    #: sha256 of the normalised email. Written on every email entry, and the
+    #: ONLY identifier on the tombstone delete-by-person leaves when asked to
+    #: forget someone entirely: the plaintext goes, the "never again" stays.
+    email_sha256: Mapped[str | None] = mapped_column(String(64), index=True)
+    #: NULL = global (every workspace): unsubscribes, bounces, removal
+    #: requests, our own domains. Set = one client's own block, e.g. Sean's
+    #: current clients, which must not stop ClientRise writing to them.
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
     reason: Mapped[str | None] = mapped_column(Text)
+    #: Who added it: a login handle, or "system" (bounce, unsubscribe link).
+    added_by: Mapped[str | None] = mapped_column(String(320))
     added_at: Mapped[datetime] = _utcnow_column(
         nullable=False, server_default=func.now()
     )
 
     __table_args__ = (
         CheckConstraint(
-            "email IS NOT NULL OR domain IS NOT NULL",
+            "email IS NOT NULL OR domain IS NOT NULL OR email_sha256 IS NOT NULL",
             name="email_or_domain",
         ),
     )

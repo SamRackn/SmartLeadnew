@@ -125,7 +125,7 @@ def _blocked_reason(session: Session, lead: Lead, draft: Draft | None) -> str | 
             "it was re-drafted or rejected after approval"
         )
     try:
-        match = SuppressionChecker(session).check(lead.email, lead.company_domain)
+        match = SuppressionChecker(session).check_lead(lead)
         if match is not None:
             return f"suppressed since approval — {match.describe()}"
     except SuppressionUnavailable:
@@ -245,7 +245,7 @@ async def release_one(
     # The hold is the durable half of the refusal, so it is committed before
     # the exception is raised, not flushed and hoped for.
     try:
-        match = SuppressionChecker(session).check(lead.email, lead.company_domain)
+        match = SuppressionChecker(session).check_lead(lead)
     except SuppressionUnavailable as exc:
         lead.status = LeadStatus.HELD
         session.commit()

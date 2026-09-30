@@ -57,6 +57,15 @@ class Settings(BaseSettings):
     # service-account key appearing in the environment is not consent to start
     # emailing strangers. Presence of GMAIL_SA_* must never flip this.
     email_sender: str = "stub"
+    # THE kill switch, checked in the send path before any sender is even
+    # built. False (the default) renders each released message's MIME to
+    # out/dryrun/ and sends nothing, whatever EMAIL_SENDER says. Only the
+    # go-live gate sets it true.
+    send_enabled: bool = False
+    # Host that serves the public unsubscribe page. Requests arriving on it may
+    # reach /u/* and /health only; everything else is a 404 there. Blank = no
+    # dedicated host (single-host dev).
+    unsubscribe_host: str = ""
     # Per-mailbox daily send ceiling used when a mailbox row does not set its
     # own. Small on purpose -- Workspace permits ~2000/day, and cold outreach
     # from a burner domain does not survive anything near that.

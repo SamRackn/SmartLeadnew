@@ -8,3 +8,6 @@ sent_outbox.jsonl
 *.egg-info/
 var/
 scratch_measurements/
+
+# Dry-run MIME from SEND_ENABLED=false, and other local artefacts
+out/

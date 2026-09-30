@@ -186,6 +186,15 @@ LOGISTICS_QUALIFICATION = {
 }
 
 
+#: A workspace footer address that has been confirmed by a named person --
+#: what every routed lead needs before its email can render.
+CONFIRMED_ADDRESS: dict[str, Any] = {
+    "postal_address": "Mazz Ltd, 1 Test Street, Testville",
+    "postal_address_confirmed_by": "tester@example.test",
+    "postal_address_confirmed_at": datetime(2026, 9, 1, tzinfo=timezone.utc),
+}
+
+
 def make_campaign(session: Session, **kwargs: Any) -> Campaign:
     """A workspace + campaign complete enough to write email 1.
 
@@ -195,7 +204,11 @@ def make_campaign(session: Session, **kwargs: Any) -> Campaign:
     write, which is a different test.
     """
 
-    workspace = Workspace(name="ClientRise Demo", slug=f"demo-{utcnow().timestamp()}")
+    workspace = Workspace(
+        name="ClientRise Demo",
+        slug=f"demo-{utcnow().timestamp()}",
+        **CONFIRMED_ADDRESS,
+    )
     session.add(workspace)
     session.flush()
 

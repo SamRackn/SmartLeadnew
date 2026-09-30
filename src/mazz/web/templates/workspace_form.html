@@ -20,4 +20,31 @@
   </label>
   <button type="submit">Save</button>
 </form>
+
+{% if workspace %}
+<section class="dash-panel" id="postal-address">
+  <h2>Postal address (email footer)</h2>
+  <p class="hint">Printed in the footer of every email this workspace sends (CAN-SPAM).
+  Nothing sends until a named person confirms it. Editing the text clears the confirmation.</p>
+  <p>
+    {% if workspace.postal_address_confirmed_at %}
+      <strong>Confirmed</strong> by {{ workspace.postal_address_confirmed_by }}
+      on {{ workspace.postal_address_confirmed_at.strftime("%Y-%m-%d %H:%M UTC") }}.
+    {% elif workspace.postal_address %}
+      <strong>Not confirmed.</strong> Emails for this workspace cannot render until it is.
+    {% else %}
+      <strong>Not set.</strong>
+    {% endif %}
+  </p>
+  <form method="post" action="/workspaces/{{ workspace.id }}/address" class="entity-form">
+    <label>Address
+      <textarea name="postal_address" rows="2" required>{{ workspace.postal_address or "" }}</textarea>
+    </label>
+    <button type="submit" name="action" value="save">Save address</button>
+    {% if workspace.postal_address and not workspace.postal_address_confirmed_at %}
+    <button type="submit" name="action" value="confirm">I confirm this is the sender's real mailing address</button>
+    {% endif %}
+  </form>
+</section>
+{% endif %}
 {% endblock %}

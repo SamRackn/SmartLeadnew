@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date
+from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -34,8 +34,10 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from mazz import audit
 from mazz.db import get_session
 from mazz.models import Campaign, Lead, ProofPoint, Workspace
+from mazz.pipeline.draft import placeholder_marker_in
 from mazz.pipeline.qualify import qualification_config_from_json
 from mazz.pipeline.score import scoring_config_from_json
 from mazz.web.auth import current_user, require_operator
@@ -358,6 +360,60 @@ async def update_workspace(
         )
 
     return RedirectResponse(url="/workspaces", status_code=303)
+
+
+@router.post("/workspaces/{workspace_id}/address", response_class=HTMLResponse)
+async def update_workspace_address(
+    request: Request,
+    workspace_id: int,
+    postal_address: str = Form(...),
+    action: str = Form("save"),
+    session: Session = Depends(get_session),
+    user: str = Depends(current_user),
+):
+    """Save or confirm the footer address. Two steps on purpose: typing an
+    address and vouching for it are different acts, and only the second one
+    lets an email render (see `draft.postal_address_for`)."""
+
+    workspace = session.get(Workspace, workspace_id)
+    if workspace is None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+    address = " ".join((postal_address or "").split())
+
+    def _form(error: str, status_code: int):
+        return _templates(request).TemplateResponse(
+            request,
+            "workspace_form.html",
+            {
+                "workspace": workspace,
+                "error": error,
+                "form": {"slug": workspace.slug, "name": workspace.name},
+                "user": user,
+            },
+            status_code=status_code,
+        )
+
+    marker = placeholder_marker_in(address)
+    if not address or marker:
+        return _form(
+            f"refused: {'empty' if not address else f'looks like a placeholder ({marker!r})'}",
+            400,
+        )
+
+    if action == "confirm":
+        if address != (workspace.postal_address or ""):
+            return _form("the address changed since it was saved; save it, then confirm", 409)
+        workspace.postal_address_confirmed_by = user
+        workspace.postal_address_confirmed_at = datetime.now(timezone.utc)
+        audit.record(session, user, "confirm_postal_address", "workspace", workspace.id, address=address)
+    else:
+        if address != (workspace.postal_address or ""):
+            workspace.postal_address = address
+            workspace.postal_address_confirmed_by = None
+            workspace.postal_address_confirmed_at = None
+            audit.record(session, user, "set_postal_address", "workspace", workspace.id, address=address)
+    session.flush()
+    return RedirectResponse(url=f"/workspaces/{workspace.id}/edit#postal-address", status_code=303)
 
 
 # --------------------------------------------------------------------------

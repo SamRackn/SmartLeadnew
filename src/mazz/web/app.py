@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
@@ -24,6 +24,8 @@ from mazz.web.routes import imports as imports_routes
 from mazz.web.routes import leads as leads_routes
 from mazz.web.routes import mailboxes as mailboxes_routes
 from mazz.web.routes import outbox as outbox_routes
+from mazz.web.routes import public as public_routes
+from mazz.web.routes import removals as removals_routes
 from mazz.web.routes import review as review_routes
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -62,10 +64,28 @@ def create_app() -> FastAPI:
     async def _forbidden(request: Request, exc: Forbidden):
         return JSONResponse({"detail": str(exc)}, status_code=403)
 
+    @app.middleware("http")
+    async def _unsubscribe_host_isolation(request: Request, call_next):
+        # The public unsubscribe host exposes /u/* and /health and NOTHING
+        # else — not the login page, not static files. Everything else on it
+        # is a plain 404, so the host a stranger's email links to reveals no
+        # app behind it.
+        public_host = (get_settings().unsubscribe_host or "").strip().lower()
+        path = request.url.path
+        if (
+            public_host
+            and (request.url.hostname or "").lower() == public_host
+            and not (path.startswith("/u/") or path == "/health")
+        ):
+            return PlainTextResponse("Not Found", status_code=404)
+        return await call_next(request)
+
     @app.get("/")
     async def root():
         return RedirectResponse(url="/leads", status_code=303)
 
+    app.include_router(public_routes.router)
+    app.include_router(removals_routes.router)
     app.include_router(auth_routes.router)
     # Before leads_routes: /leads/import would otherwise be matched by
     # /leads/{lead_id} and fail to parse "import" as an integer.

@@ -24,6 +24,7 @@ import pytest
 from sqlalchemy.orm import sessionmaker
 
 from mazz.db import get_engine
+from pipeline_helpers import CONFIRMED_ADDRESS
 from mazz.config import reload_settings
 from mazz.models import Campaign, Lead, ProofPoint, ResearchCache, Workspace
 from mazz.pipeline.draft import outreach_for_lead, persist_draft
@@ -81,7 +82,11 @@ def fact(kind: str, content: str, path: str = "") -> Fact:
 
 
 def seed(session, *, vertical="law firms", offer_line=None, proof=True, facts=None):
-    workspace = Workspace(name="Search Site Marketing", slug=f"ssm-{datetime.now().timestamp()}")
+    workspace = Workspace(
+        name="Search Site Marketing",
+        slug=f"ssm-{datetime.now().timestamp()}",
+        **CONFIRMED_ADDRESS,
+    )
     session.add(workspace)
     session.flush()
     campaign = Campaign(
@@ -161,7 +166,11 @@ def test_the_footer_is_appended_outside_the_composer(session):
 
     outcome = outreach_for_lead(session, lead)
 
-    assert "Search Site Marketing, 12 Main St" in outcome.body
+    # A routed lead carries its WORKSPACE's confirmed address, never the env
+    # fallback (which is set to something else in this module on purpose).
+    assert CONFIRMED_ADDRESS["postal_address"] in outcome.body
+    assert "Search Site Marketing, 12 Main St" not in outcome.body
+    assert "If this isn't relevant, just let me know and I won't follow up." in outcome.body
     assert "Unsubscribe (one click)" in outcome.body
     assert "Unsubscribe" not in outcome.content.body_text
 
@@ -232,7 +241,9 @@ def test_a_proof_point_from_another_campaign_does_not_resolve(session):
     """One agency-client's copy must never stand on another one's results."""
 
     lead, _ = seed(session)
-    other_ws = Workspace(name="Other Agency", slug=f"other-{datetime.now().timestamp()}")
+    other_ws = Workspace(
+        name="Other Agency", slug=f"other-{datetime.now().timestamp()}", **CONFIRMED_ADDRESS
+    )
     session.add(other_ws)
     session.flush()
     other = Campaign(workspace_id=other_ws.id, name="Other", vertical="dental practices")

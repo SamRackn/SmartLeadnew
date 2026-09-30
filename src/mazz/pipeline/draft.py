@@ -96,6 +96,10 @@ __all__ = [
     "default_composer",
     "render_body",
     "render_footer",
+    "RELEVANCE_LINE",
+    "postal_address_for",
+    "unresolved_placeholders",
+    "unsubscribe_base_url",
     "split_body",
     "unsubscribe_token",
     "unsubscribe_url",
@@ -162,6 +166,12 @@ PLACEHOLDER_ADDRESS_MARKERS: tuple[str, ...] = (
     "unset",
     "not set",
     "lorem ipsum",
+    "lorem",
+    "example",
+    # The house number every sample address uses. It refuses a real
+    # "123 Elm St" too; that is the fail-closed direction, and the fix is one
+    # confirmed edit on the workspace, not a code change.
+    "123",
 )
 
 _PLACEHOLDER_RE = re.compile(
@@ -196,36 +206,94 @@ def unsubscribe_token(lead: Lead | str) -> str:
     return hmac.new(secret, email.strip().lower().encode("utf-8"), hashlib.sha256).hexdigest()[:32]
 
 
+def unsubscribe_base_url() -> str:
+    """Where `/u/<token>` is served. ``UNSUBSCRIBE_BASE_URL`` (the public
+    unsubscribe host), else ``APP_BASE_URL``, else a placeholder that the live
+    send path refuses (see `send.check_live_send_ready`)."""
+
+    base = setting("UNSUBSCRIBE_BASE_URL") or setting("APP_BASE_URL", DEFAULT_UNSUBSCRIBE_BASE)
+    return str(base).rstrip("/")
+
+
 def unsubscribe_url(lead: Lead | str) -> str:
-    base = str(setting("APP_BASE_URL", DEFAULT_UNSUBSCRIBE_BASE)).rstrip("/")
-    return f"{base}/u/{unsubscribe_token(lead)}"
+    return f"{unsubscribe_base_url()}/u/{unsubscribe_token(lead)}"
 
 
-def render_footer(lead: Lead) -> str:
-    """The CAN-SPAM block: physical mailing address + one-click unsubscribe.
+#: The client's own line (launch decision 2026-09-29). In the footer so every
+#: step of every sequence carries it and no template can drop it.
+RELEVANCE_LINE = "If this isn't relevant, just let me know and I won't follow up."
 
-    Raises `MissingSenderAddress` when the address is not configured.
+
+def postal_address_for(lead: Lead) -> str:
+    """The confirmed physical address this lead's email must carry, or raise.
+
+    A routed lead uses its WORKSPACE's address, and only once a named person
+    has confirmed it. An unrouted lead (no campaign, so no workspace) falls
+    back to ``SENDER_POSTAL_ADDRESS``: that path cannot reach the cold-path
+    drafter, and the live send path refuses unrouted leads outright.
     """
 
-    address = (get_settings().sender_postal_address or "").strip()
+    workspace = lead.campaign.workspace if lead.campaign is not None else None
+    if workspace is not None:
+        address = (workspace.postal_address or "").strip()
+        where = f"workspace {workspace.slug!r} postal address"
+        if address and not workspace.postal_address_confirmed_at:
+            raise MissingSenderAddress(
+                f"{where} has not been confirmed. A named person has to confirm "
+                "it (Workspaces > edit > confirm address) before any email "
+                "carries it."
+            )
+    else:
+        address = (get_settings().sender_postal_address or "").strip()
+        where = "SENDER_POSTAL_ADDRESS"
     if not address:
         raise MissingSenderAddress(
-            "SENDER_POSTAL_ADDRESS is not set. Every outbound email needs a "
-            "physical mailing address (CAN-SPAM); refusing to render a draft "
-            "without one. Set it in .env — see .env.example."
+            f"{where} is not set. Every outbound email needs a physical mailing "
+            "address (CAN-SPAM); refusing to render a draft without one."
         )
     address = " ".join(address.split())
     marker = placeholder_marker_in(address)
     if marker:
         raise MissingSenderAddress(
-            f"SENDER_POSTAL_ADDRESS looks like a placeholder ({marker!r} in "
-            f"{address!r}), so it is refused exactly as an empty value is. A "
-            "stand-in address is worse than none: it renders a footer that "
-            "passes a glance and a 'footer present' check while the email "
-            "carries a mailing address that is not the sender's. Set a real "
-            "physical address in .env — see .env.example."
+            f"{where} looks like a placeholder ({marker!r} in {address!r}), so it "
+            "is refused exactly as an empty value is. A stand-in address is worse "
+            "than none: it renders a footer that passes a glance and a 'footer "
+            "present' check while the email carries a mailing address that is "
+            "not the sender's."
         )
-    return f"{address}\nUnsubscribe (one click): {unsubscribe_url(lead)}"
+    return address
+
+
+def render_footer(lead: Lead) -> str:
+    """The CAN-SPAM block: address, the client's opt-out line, one-click unsubscribe.
+
+    Raises `MissingSenderAddress` when the address is missing, unconfirmed or
+    a placeholder.
+    """
+
+    return (
+        f"{postal_address_for(lead)}\n{RELEVANCE_LINE}\n"
+        f"Unsubscribe (one click): {unsubscribe_url(lead)}"
+    )
+
+
+_PLACEHOLDER_TOKEN = re.compile(r"\{[^{}\n]{0,40}\}|\[\[[^\]\n]*\]\]")
+
+
+def unresolved_placeholders(subject: str | None, body: str | None) -> list[str]:
+    """Merge fields that never got filled, plus an empty subject.
+
+    `{first_name}`, `{day}`, `{{x}}`, `[[x]]` left in copy mean a template
+    rendered with a hole in it. Checked at approve AND at send: one is the
+    human gate, the other is the last moment anything can still stop it.
+    """
+
+    problems = []
+    if not (subject or "").strip():
+        problems.append("empty subject")
+    for text in (subject or "", body or ""):
+        problems += [m.group(0) for m in _PLACEHOLDER_TOKEN.finditer(text)]
+    return problems
 
 
 def render_body(message: str, lead: Lead) -> str:
