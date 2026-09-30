@@ -102,8 +102,10 @@ Postgres 17 via Homebrew, Python 3.12+:
 brew services start postgresql@17
 createdb mazz_dev
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
-cp .env.example .env          # fill SESSION_SECRET, REVIEW_PASSWORD_HASH, SENDER_POSTAL_ADDRESS
+cp .env.example .env          # fill SESSION_SECRET
 .venv/bin/alembic upgrade head
+.venv/bin/python -m mazz.users seed-launch          # Maaz + Sean, no passwords
+.venv/bin/python -m mazz.users set-password <email>  # each person sets their own
 ```
 
 `psql` is keg-only; it lives at `/usr/local/opt/postgresql@17/bin/psql`.

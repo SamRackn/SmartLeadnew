@@ -39,6 +39,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from mazz import audit
 from mazz.db import get_session
 from mazz.models import (
     Draft,
@@ -62,10 +63,11 @@ from mazz.pipeline.verify import (
     is_approvable,
     latest_draft,
     verify_content,
+    verify_draft,
 )
 from mazz.pipeline.score import facts_for_lead
 from mazz.schemas import Fact
-from mazz.web.auth import current_user
+from mazz.web.auth import Account, current_account, current_user, visible_lead
 
 router = APIRouter()
 
@@ -106,6 +108,7 @@ async def list_leads(
     status: str | None = None,
     session: Session = Depends(get_session),
     user: str = Depends(current_user),
+    account: Account = Depends(current_account),
 ):
     templates = _templates(request)
 
@@ -116,7 +119,11 @@ async def list_leads(
         except ValueError:
             raise HTTPException(status_code=400, detail=f"unknown status {status!r}")
 
-    query = select(Lead).order_by(Lead.updated_at.desc(), Lead.id.desc())
+    query = (
+        select(Lead)
+        .where(account.lead_filter())
+        .order_by(Lead.updated_at.desc(), Lead.id.desc())
+    )
     if status_filter is not None:
         query = query.where(Lead.status == status_filter)
     leads = list(session.execute(query).scalars().all())
@@ -257,7 +264,9 @@ async def lead_detail(
     lead_id: int,
     session: Session = Depends(get_session),
     user: str = Depends(current_user),
+    account: Account = Depends(current_account),
 ):
+    visible_lead(session, account, lead_id)
     templates = _templates(request)
     context = _detail_context(request, session, lead_id, user)
     return templates.TemplateResponse(request, "lead_detail.html", context)
@@ -320,6 +329,7 @@ async def approve_lead(
     lead_id: int,
     session: Session = Depends(get_session),
     user: str = Depends(current_user),
+    account: Account = Depends(current_account),
 ):
     """Approve exactly one lead's current draft. Queues nothing.
 
@@ -335,9 +345,7 @@ async def approve_lead(
     cap, or one that failed on a dead credential.
     """
 
-    lead = session.get(Lead, lead_id)
-    if lead is None:
-        raise HTTPException(status_code=404, detail="lead not found")
+    lead = visible_lead(session, account, lead_id)
 
     if lead.status == LeadStatus.SENT:
         # Refused, not silently ignored -- but not a bare HTTPException either.
@@ -382,6 +390,7 @@ async def approve_lead(
     lead.approved_at = datetime.now(timezone.utc)
     lead.approved_by = user
     session.flush()
+    audit.record(session, user, "approve", "lead", lead.id, draft_id=draft.id)
 
     # NOTE FOR ANYONE EDITING THIS FUNCTION
     # Do not queue a send here. A send job used to be created on this very line,
@@ -409,6 +418,7 @@ async def reject_lead(
     reason: str = Form(""),
     session: Session = Depends(get_session),
     user: str = Depends(current_user),
+    account: Account = Depends(current_account),
 ):
     """A human declines to send this draft. Holds the lead; never auto-anything.
 
@@ -418,9 +428,7 @@ async def reject_lead(
     approvable until a new draft replaces it.
     """
 
-    lead = session.get(Lead, lead_id)
-    if lead is None:
-        raise HTTPException(status_code=404, detail="lead not found")
+    lead = visible_lead(session, account, lead_id)
 
     draft = latest_draft(session, lead)
     if draft is None:
@@ -431,6 +439,9 @@ async def reject_lead(
     draft.verification_notes = note
     lead.status = LeadStatus.HELD
     session.flush()
+    audit.record(
+        session, user, "reject", "lead", lead.id, draft_id=draft.id, reason=reason.strip() or None
+    )
 
     return _draft_panel_response(request, session, lead_id, user)
 
@@ -443,6 +454,7 @@ async def edit_draft(
     body_text: str = Form(...),
     session: Session = Depends(get_session),
     user: str = Depends(current_user),
+    account: Account = Depends(current_account),
 ):
     """A human rewrites the draft's subject/body, then it is re-verified.
 
@@ -453,9 +465,7 @@ async def edit_draft(
     control the brief warns against.
     """
 
-    lead = session.get(Lead, lead_id)
-    if lead is None:
-        raise HTTPException(status_code=404, detail="lead not found")
+    lead = visible_lead(session, account, lead_id)
 
     draft = latest_draft(session, lead)
     if draft is None:
@@ -471,14 +481,14 @@ async def edit_draft(
     draft.subject = subject
     draft.body = body
 
-    facts = facts_for_lead(session, lead)
-    result = verify_content(
-        lead=lead,
-        subject=draft.subject,
-        body=draft.body,
-        signals_used=list(draft.signals_used or []),
-        available_facts=facts,
-    )
+    # The same verification drafting goes through, campaign copy and proof
+    # points included -- a bare `verify_content` here would re-check an edited
+    # campaign email without the evidence for its vertical noun and hold it.
+    result = verify_draft(session, lead, draft)
     apply_verification(session, lead, draft, result)
+    audit.record(
+        session, user, "edit", "lead", lead.id, draft_id=draft.id,
+        verification=result.status.value,
+    )
 
     return _draft_panel_response(request, session, lead_id, user)

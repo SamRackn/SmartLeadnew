@@ -39,6 +39,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from mazz import audit
 from mazz.db import get_session
 from mazz.ingest.csv_import import SuppressionChecker, SuppressionUnavailable
 from mazz.models import Draft, Job, JobStatus, Lead, LeadStatus, Mailbox
@@ -52,7 +53,7 @@ from mazz.pipeline.mailbox import (
 from mazz.pipeline.queue import enqueue_job
 from mazz.pipeline.send import SEND_JOB_KIND
 from mazz.pipeline.verify import is_approvable, latest_draft
-from mazz.web.auth import current_user
+from mazz.web.auth import Account, current_account, current_user, visible_lead
 
 router = APIRouter()
 
@@ -144,6 +145,7 @@ async def outbox(
     request: Request,
     session: Session = Depends(get_session),
     user: str = Depends(current_user),
+    account: Account = Depends(current_account),
 ):
     """Approved messages that have not left yet. Read-only; sending is a POST."""
 
@@ -152,7 +154,7 @@ async def outbox(
     leads = list(
         session.execute(
             select(Lead)
-            .where(Lead.status == LeadStatus.APPROVED)
+            .where(Lead.status == LeadStatus.APPROVED, account.lead_filter())
             .order_by(Lead.approved_at.asc().nulls_last(), Lead.id.asc())
         )
         .scalars()
@@ -190,6 +192,7 @@ async def release_one(
     lead_id: int,
     session: Session = Depends(get_session),
     user: str = Depends(current_user),
+    account: Account = Depends(current_account),
 ):
     """Put exactly one approved message on the queue. One lead_id, one job.
 
@@ -197,9 +200,7 @@ async def release_one(
     release that quietly does nothing is indistinguishable from one that worked.
     """
 
-    lead = session.get(Lead, lead_id)
-    if lead is None:
-        raise HTTPException(status_code=404, detail="lead not found")
+    lead = visible_lead(session, account, lead_id)
 
     if lead.status == LeadStatus.SENT:
         raise HTTPException(
@@ -280,5 +281,6 @@ async def release_one(
     # identical pending job, so a double-click releases one message, not two.
     enqueue_job(session, lead.id, SEND_JOB_KIND)
     session.flush()
+    audit.record(session, user, "release_send", "lead", lead.id, draft_id=draft.id)
 
     return RedirectResponse(url="/outbox", status_code=303)

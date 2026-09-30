@@ -87,8 +87,41 @@ def client() -> TestClient:
     return TestClient(app)
 
 
+def ensure_account(
+    handle: str, *, operator: bool = True, workspace_ids: tuple[int, ...] = ()
+) -> None:
+    """Upsert a login. `users` is not truncated between tests (only its
+    workspace memberships are, by cascade), so this is idempotent."""
+
+    from mazz.models import User, UserWorkspace
+
+    with h.db_session() as s:
+        user = s.execute(select(User).where(User.email == handle)).scalar_one_or_none()
+        if user is None:
+            user = User(email=handle, display_name=handle)
+            s.add(user)
+        user.password_hash = hash_password(TEST_PASSWORD)
+        user.all_workspaces = operator
+        user.active = True
+        s.flush()
+        for ws_id in workspace_ids:
+            if s.get(UserWorkspace, (user.id, ws_id)) is None:
+                s.add(UserWorkspace(user_id=user.id, workspace_id=ws_id))
+
+
+def login(client: TestClient, handle: str) -> TestClient:
+    resp = client.post(
+        "/login",
+        data={"username": handle, "password": TEST_PASSWORD},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303, resp.text
+    return client
+
+
 @pytest.fixture()
 def logged_in_client(client: TestClient) -> TestClient:
+    ensure_account("client")
     resp = client.post(
         "/login",
         data={"username": "client", "password": TEST_PASSWORD},
@@ -270,11 +303,13 @@ def test_login_page_serves(client: TestClient):
 
 
 def test_login_wrong_password_rejected(client: TestClient):
+    ensure_account("client")
     resp = client.post("/login", data={"username": "client", "password": "wrong"})
     assert resp.status_code == 401
 
 
 def test_login_success_then_logout(client: TestClient):
+    ensure_account("client")
     resp = client.post(
         "/login",
         data={"username": "client", "password": TEST_PASSWORD},
@@ -2158,3 +2193,101 @@ def test_no_angle_held_and_ready_all_reachable_from_review_default_view(
     assert held_lead.full_name in resp.text
     assert no_angle_lead.full_name in resp.text
     assert passed_lead.full_name in resp.text
+
+
+# --------------------------------------------------------------------------
+# WP1: per-person accounts, workspace scoping, attribution
+# --------------------------------------------------------------------------
+
+
+def _two_workspace_leads(session):
+    """One passed lead in each of two workspaces; returns (lead_a, lead_b, ws_a_id)."""
+
+    lead_a, _ = make_passed_lead(session, email="ada@northwind-logistics.com")
+    lead_b, _ = make_passed_lead(session, email="bob@northwind-logistics.com")
+    camp_a = h.make_campaign(session, name="A")
+    camp_b = h.make_campaign(session, name="B")
+    lead_a.campaign_id = camp_a.id
+    lead_b.campaign_id = camp_b.id
+    session.commit()
+    return lead_a, lead_b, camp_a.workspace_id
+
+
+def test_a_seeded_account_without_a_password_cannot_log_in(client: TestClient, session):
+    from mazz.models import User
+    from mazz.users import seed_launch
+
+    seed_launch(session)
+    session.commit()
+    sean = session.execute(
+        select(User).where(User.email == "sean@searchsitemarketing.com")
+    ).scalar_one()
+    assert sean.password_hash is None and not sean.all_workspaces
+    resp = client.post(
+        "/login", data={"username": "sean@searchsitemarketing.com", "password": TEST_PASSWORD}
+    )
+    assert resp.status_code == 401
+
+
+def test_a_scoped_account_cannot_see_another_workspaces_leads(client: TestClient, session):
+    lead_a, lead_b, ws_a = _two_workspace_leads(session)
+    ensure_account("sean@example.test", operator=False, workspace_ids=(ws_a,))
+    login(client, "sean@example.test")
+
+    listing = client.get("/leads").text
+    assert f'href="/leads/{lead_a.id}"' in listing
+    assert f'href="/leads/{lead_b.id}"' not in listing
+    rows = client.get("/review/list").text
+    assert f"/review/{lead_a.id}/panel" in rows
+    assert f"/review/{lead_b.id}/panel" not in rows
+
+    assert client.get(f"/leads/{lead_a.id}").status_code == 200
+    for method, path in (
+        ("get", f"/leads/{lead_b.id}"),
+        ("get", f"/review/{lead_b.id}/panel"),
+        ("post", f"/leads/{lead_b.id}/approve"),
+        ("post", f"/leads/{lead_b.id}/reject"),
+        ("post", f"/outbox/{lead_b.id}/send"),
+    ):
+        assert getattr(client, method)(path).status_code == 404, path
+
+    session.expire_all()
+    assert session.get(Lead, lead_b.id).status == LeadStatus.READY
+    for path in ("/mailboxes", "/workspaces", "/dashboard", "/leads/import"):
+        assert client.get(path, follow_redirects=False).status_code == 403, path
+
+
+def test_every_human_state_change_names_its_user(logged_in_client: TestClient, session):
+    from mazz.models import AuditEvent
+
+    lead, draft = make_passed_lead(session)
+    make_mailbox(session)
+    assert logged_in_client.post(f"/leads/{lead.id}/approve").status_code == 200
+    assert logged_in_client.post(f"/outbox/{lead.id}/send", follow_redirects=False).status_code == 303
+    other, _ = make_passed_lead(session, email="rej@northwind-logistics.com")
+    assert logged_in_client.post(f"/leads/{other.id}/reject", data={"reason": "tone"}).status_code == 200
+    logged_in_client.post(
+        f"/leads/{other.id}/edit", data={"subject": draft.subject, "body_text": "Hello."}
+    )
+
+    session.expire_all()
+    events = session.execute(select(AuditEvent).order_by(AuditEvent.id)).scalars().all()
+    assert [(e.action, e.target_id) for e in events] == [
+        ("approve", str(lead.id)),
+        ("release_send", str(lead.id)),
+        ("reject", str(other.id)),
+        ("edit", str(other.id)),
+    ]
+    assert all(e.user_email == "client" and e.user_id is not None for e in events)
+    assert session.get(Lead, lead.id).approved_by == "client"
+
+
+def test_a_deactivated_account_is_locked_out_mid_session(logged_in_client: TestClient, session):
+    from mazz.models import User
+
+    assert logged_in_client.get("/leads").status_code == 200
+    with h.db_session() as s:
+        s.execute(select(User).where(User.email == "client")).scalar_one().active = False
+    resp = logged_in_client.get("/leads", follow_redirects=False)
+    assert resp.status_code == 303 and resp.headers["location"] == "/login"
+    ensure_account("client")  # restore for later tests

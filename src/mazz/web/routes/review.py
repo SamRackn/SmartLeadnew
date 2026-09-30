@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 
 from mazz.db import get_session
 from mazz.models import Draft, Lead, LeadStatus, VerificationStatus
-from mazz.web.auth import current_user
+from mazz.web.auth import Account, current_account, current_user, visible_lead
 from mazz.web.routes.leads import ALL_STATUSES, _detail_context
 
 router = APIRouter()
@@ -78,6 +78,7 @@ def _search_rows(
     q: str | None,
     status: LeadStatus | None,
     limit: int | None = None,
+    scope=None,
 ) -> tuple[list[_Row], int]:
     """One query for the left pane: every lead plus its governing draft's
     verification status, no per-row round trip.
@@ -113,6 +114,8 @@ def _search_rows(
         latest, latest.c.lead_id == Lead.id
     )
 
+    if scope is not None:
+        base = base.where(scope)
     if status is not None:
         base = base.where(Lead.status == status)
     if q and q.strip():
@@ -162,16 +165,20 @@ async def review(
     lead_id: int | None = None,
     session: Session = Depends(get_session),
     user: str = Depends(current_user),
+    account: Account = Depends(current_account),
 ):
     templates = _templates(request)
     status_filter = _parse_status(status)
-    rows, total = _search_rows(session, q=q, status=status_filter)
+    rows, total = _search_rows(
+        session, q=q, status=status_filter, scope=account.lead_filter()
+    )
 
     selected_id = lead_id
     if selected_id is None and rows:
         selected_id = rows[0].lead.id
 
     if selected_id is not None:
+        visible_lead(session, account, selected_id)
         panel_context = _detail_context(request, session, selected_id, user)
     else:
         panel_context = _empty_panel_context()
@@ -201,6 +208,7 @@ async def review_list(
     lead_id: int | None = None,
     session: Session = Depends(get_session),
     user: str = Depends(current_user),
+    account: Account = Depends(current_account),
 ):
     """HTMX partial: just the left-pane status facet + rows.
 
@@ -212,7 +220,9 @@ async def review_list(
 
     templates = _templates(request)
     status_filter = _parse_status(status)
-    rows, total = _search_rows(session, q=q, status=status_filter)
+    rows, total = _search_rows(
+        session, q=q, status=status_filter, scope=account.lead_filter()
+    )
     return templates.TemplateResponse(
         request,
         "partials/review_rows.html",
@@ -235,9 +245,11 @@ async def review_panel(
     lead_id: int,
     session: Session = Depends(get_session),
     user: str = Depends(current_user),
+    account: Account = Depends(current_account),
 ):
     """HTMX partial: just the right pane, for a row click."""
 
+    visible_lead(session, account, lead_id)
     templates = _templates(request)
     context = _detail_context(request, session, lead_id, user)
     context["error"] = None

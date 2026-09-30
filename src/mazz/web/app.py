@@ -16,7 +16,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
 from mazz.config import get_settings
-from mazz.web.auth import AuthRequired
+from mazz.web.auth import AuthRequired, Forbidden
 from mazz.web.routes import auth as auth_routes
 from mazz.web.routes import campaigns as campaigns_routes
 from mazz.web.routes import dashboard as dashboard_routes
@@ -57,6 +57,10 @@ def create_app() -> FastAPI:
         if request.method == "GET":
             return RedirectResponse(url="/login", status_code=303)
         return JSONResponse({"detail": "login required"}, status_code=401)
+
+    @app.exception_handler(Forbidden)
+    async def _forbidden(request: Request, exc: Forbidden):
+        return JSONResponse({"detail": str(exc)}, status_code=403)
 
     @app.get("/")
     async def root():

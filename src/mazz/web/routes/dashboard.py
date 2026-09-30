@@ -50,10 +50,12 @@ from mazz.models import (
 )
 from mazz.pipeline.mailbox import day_window, headroom, sent_today
 from mazz.pipeline.queue import DEFAULT_STALE_AFTER
-from mazz.web.auth import current_user
+from mazz.web.auth import current_user, require_operator
 from mazz.web.routes.leads import ALL_STATUSES
 
-router = APIRouter()
+# Operator only: Sean's account sees leads, review, outbox and inbox for his
+# workspace, never the roster or other workspaces' setup.
+router = APIRouter(dependencies=[Depends(require_operator)])
 
 @dataclass(frozen=True, slots=True)
 class MailboxHealth:

@@ -71,6 +71,7 @@ _TABLES = (
     "workspaces",
     "research_cache",
     "suppression_list",
+    "audit_events",
 )
 
 

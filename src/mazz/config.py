@@ -39,8 +39,6 @@ class Settings(BaseSettings):
 
     # --- Review app -----------------------------------------------------
     session_secret: str = "changeme"
-    review_user: str = "client"
-    review_password_hash: str = ""
 
     # --- Compliance -----------------------------------------------------
     # CAN-SPAM requires a physical mailing address in every outbound email.

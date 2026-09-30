@@ -43,9 +43,11 @@ from mazz.ingest.excel_import import (
     looks_like_excel,
 )
 from mazz.ingest.validate import LEAD_COLUMNS
-from mazz.web.auth import current_user
+from mazz.web.auth import current_user, require_operator
 
-router = APIRouter()
+# Operator only: Sean's account sees leads, review, outbox and inbox for his
+# workspace, never the roster or other workspaces' setup.
+router = APIRouter(dependencies=[Depends(require_operator)])
 
 #: Refuse anything larger rather than letting a stray 400MB export take the
 #: process down. Roughly a quarter-million lead rows; far past any real list.

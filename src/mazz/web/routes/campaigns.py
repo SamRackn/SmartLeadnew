@@ -38,9 +38,11 @@ from mazz.db import get_session
 from mazz.models import Campaign, Lead, ProofPoint, Workspace
 from mazz.pipeline.qualify import qualification_config_from_json
 from mazz.pipeline.score import scoring_config_from_json
-from mazz.web.auth import current_user
+from mazz.web.auth import current_user, require_operator
 
-router = APIRouter()
+# Operator only: Sean's account sees leads, review, outbox and inbox for his
+# workspace, never the roster or other workspaces' setup.
+router = APIRouter(dependencies=[Depends(require_operator)])
 
 
 def _campaign_form(

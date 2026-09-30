@@ -504,9 +504,9 @@ class Lead(Base):
     #: When the reviewer pressed approve.
     approved_at: Mapped[datetime | None] = _utcnow_column()
 
-    #: The operator's session username. A name, not a foreign key: there is one
-    #: account today (``REVIEW_USER``), and a deleted or renamed operator must
-    #: not erase or rewrite the record of what they approved.
+    #: The approver's login handle (``users.email``). Copied, not a foreign
+    #: key: a deleted or renamed account must not erase or rewrite the record
+    #: of what it approved. Every other human action is in ``audit_events``.
     approved_by: Mapped[str | None] = mapped_column(String(64))
 
     created_at: Mapped[datetime] = _utcnow_column(
@@ -929,6 +929,90 @@ class SentMessage(Base):
 
 
 # --------------------------------------------------------------------------
+# users, memberships, audit
+# --------------------------------------------------------------------------
+
+
+class User(Base):
+    """One person who can log in. Separate accounts so approvals are attributable.
+
+    ``password_hash`` NULL means the account exists but cannot log in yet —
+    seeding a user never invents a password; `python -m mazz.users
+    set-password` is the only way one gets set.
+
+    ``all_workspaces`` is the operator (Maaz): every workspace, plus the admin
+    screens (workspaces, campaigns, mailboxes, imports). Everyone else sees
+    only the workspaces in ``user_workspaces``.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: Login handle, stored lower-cased. Normally an email address.
+    email: Mapped[str] = mapped_column(String(320), nullable=False, unique=True)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    password_hash: Mapped[str | None] = mapped_column(Text)
+    all_workspaces: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    created_at: Mapped[datetime] = _utcnow_column(
+        nullable=False, server_default=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<User {self.id} {self.email}>"
+
+
+class UserWorkspace(Base):
+    """Which workspaces a (non-operator) user may see."""
+
+    __tablename__ = "user_workspaces"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True
+    )
+
+
+class AuditEvent(Base):
+    """Who changed what, when. Written by every human state change.
+
+    ``user_email`` is denormalised for the same reason ``leads.approved_by``
+    is a name: a deactivated or deleted account must not rewrite the record of
+    what it did. ``target_id`` is text so one table covers leads, drafts,
+    suppression rows, replies and cost entries.
+
+    Not cascaded from leads on purpose, and it carries no personal data beyond
+    the target id: an erased lead leaves "lead 42 approved by maaz@" behind,
+    which names nobody.
+    """
+
+    __tablename__ = "audit_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    user_email: Mapped[str] = mapped_column(String(320), nullable=False)
+    action: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    target_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_id: Mapped[str | None] = mapped_column(String(64))
+    detail: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    created_at: Mapped[datetime] = _utcnow_column(
+        nullable=False, server_default=func.now(), index=True
+    )
+
+    __table_args__ = (Index("ix_audit_events_target", "target_type", "target_id"),)
+
+
+# --------------------------------------------------------------------------
 # jobs
 # --------------------------------------------------------------------------
 
@@ -991,8 +1075,11 @@ class Job(Base):
 
 
 __all__ = [
+    "AuditEvent",
     "Base",
     "Campaign",
+    "User",
+    "UserWorkspace",
     "Draft",
     "DraftBatch",
     "Job",

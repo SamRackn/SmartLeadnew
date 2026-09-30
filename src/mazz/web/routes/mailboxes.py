@@ -37,9 +37,11 @@ from mazz.config import get_settings
 from mazz.db import get_session
 from mazz.models import Campaign, Mailbox, MailboxStatus, Workspace
 from mazz.pipeline.mailbox import headroom, next_eligible_at, sent_today
-from mazz.web.auth import current_user
+from mazz.web.auth import current_user, require_operator
 
-router = APIRouter()
+# Operator only: Sean's account sees leads, review, outbox and inbox for his
+# workspace, never the roster or other workspaces' setup.
+router = APIRouter(dependencies=[Depends(require_operator)])
 
 #: Deliberately loose — we are not the authority on what a valid address is,
 #: the provider is. This only catches the typo that would otherwise become a
