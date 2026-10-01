@@ -658,6 +658,17 @@ def persist_draft(session: "Session", lead: Lead, outcome: DraftOutcome) -> Draf
     drafter's say-so — passing verification is what makes a draft reviewable.
     """
 
+    from mazz.pipeline.queue import PermanentJobError
+    from mazz.pipeline.sequence import thread_parent
+
+    if lead.sequence_step > 1 or thread_parent(session, lead) is not None:
+        # Email 1 exactly once per person, whichever drafting path got here
+        # (queue handler or the Batch API runner). Follow-ups are written by
+        # `sequence.handle_followup`, never through this function.
+        raise PermanentJobError(
+            f"lead {lead.id} has already been emailed; refusing to write Email 1 again"
+        )
+
     if not outcome.drafted:
         lead.status = LeadStatus.NO_ANGLE
         q = outcome.qualification
@@ -775,14 +786,8 @@ def handle_draft(ctx: "JobContext") -> None:
     lead has nothing to verify and is finished.
     """
 
-    from mazz.pipeline.queue import PermanentJobError
-    from mazz.pipeline.sequence import check_company_cap, thread_parent
+    from mazz.pipeline.sequence import check_company_cap
 
-    if ctx.lead.sequence_step > 1 or thread_parent(ctx.session, ctx.lead) is not None:
-        # Email 1 exactly once per person, whatever queued this job.
-        raise PermanentJobError(
-            f"lead {ctx.lead.id} has already been emailed; refusing to write Email 1 again"
-        )
     check_company_cap(ctx.session, ctx.lead, now=datetime.now(timezone.utc))
 
     outcome = outreach_for_lead(ctx.session, ctx.lead)

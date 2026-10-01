@@ -236,6 +236,13 @@ def test_a_scoped_user_cannot_block_for_another_workspace(session, client):
     assert post(value="x.com", scope=str(mine.workspace_id)) == 200
     resp = client.post("/removals/delete-person", data={"email": "a@x.com", "confirm": "DELETE"})
     assert resp.status_code == 403
+    # Global: a person's removal yes, a whole-domain block no.
+    assert post(value="gmail.com", scope="global") == 403
+    assert post(value="someone@gmail.com", scope="global") == 200
+    # Other workspaces' unsubscribers are not shown to him.
+    h.suppress(session, email="private@elsewhere.example")
+    session.commit()
+    assert "private@elsewhere.example" not in client.get("/removals").text
 
 
 @pytest.mark.parametrize("forget_entirely", [False, True])

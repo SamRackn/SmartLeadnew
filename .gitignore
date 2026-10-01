@@ -11,3 +11,8 @@ scratch_measurements/
 
 # Dry-run MIME from SEND_ENABLED=false, and other local artefacts
 out/
+
+# Credentials never live in the tree
+*service-account*.json
+*credentials*.json
+client_secret*.json

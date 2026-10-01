@@ -184,6 +184,13 @@ def send_lead(
     draft = latest_draft(session, lead)
     if draft is None:
         raise PermanentJobError(f"lead {lead.id} has no draft to send")
+    if session.execute(
+        select(SentMessage.id).where(SentMessage.draft_id == draft.id)
+    ).first() is not None:
+        raise PermanentJobError(
+            f"draft {draft.id} was already sent to lead {lead.id}; a draft goes "
+            "out once. A follow-up is a new draft."
+        )
     if not is_approvable(draft):
         raise PermanentJobError(
             f"draft {draft.id} is not approvable "

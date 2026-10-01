@@ -491,6 +491,12 @@ async def edit_draft(
     draft = latest_draft(session, lead)
     if draft is None:
         raise HTTPException(status_code=404, detail="lead has no draft to edit")
+    if lead.status in (LeadStatus.SENT, LeadStatus.APPROVED):
+        # Sent copy is history; approved copy is un-approved by rejecting first.
+        return _draft_panel_response(
+            request, session, lead_id, user, status_code=409,
+            error=f"this lead is {lead.status.value}; its draft can no longer be edited",
+        )
 
     try:
         body = render_body(body_text, lead)

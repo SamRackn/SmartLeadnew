@@ -367,3 +367,64 @@ def test_dashboard_shows_days_to_drain(session):
     assert resp.status_code == 200
     # 4 leads x 3 steps = 12 sends at the default cap of 30/day.
     assert "Days to drain the list" in resp.text and "12 sends left" in resp.text
+
+
+# --------------------------------------------------------------------------
+# Audit fixes (WP1-WP3 compliance-auditor pass)
+# --------------------------------------------------------------------------
+
+
+def test_a_sent_draft_cannot_be_edited_reapproved_or_sent_again(session, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from mazz.web.app import create_app
+    from test_web import ensure_account, login
+
+    campaign = ssm_campaign(session)
+    mailbox(session)
+    lead = drafted_and_approved(session, campaign)
+    send_lead(session, lead, sender=Recording(tmp_path), now=TUE)
+    session.commit()
+
+    ensure_account("client")
+    client = login(TestClient(create_app()), "client")
+    resp = client.post(f"/leads/{lead.id}/edit", data={"subject": "x", "body_text": "Hey"})
+    assert resp.status_code == 409
+
+    lead.status = LeadStatus.APPROVED  # however it got here
+    session.commit()
+    with pytest.raises(PermanentJobError, match="already sent"):
+        send_lead(session, lead, sender=Recording(tmp_path), now=TUE)
+
+
+def test_the_batch_runner_is_off_on_the_template_path(session):
+    from mazz.pipeline.draft_batch import run_once
+
+    with pytest.raises(RuntimeError, match="DRAFT_COMPOSER"):
+        run_once(session)
+
+
+def test_delete_by_person_erases_sent_rows_and_dry_run_mime(session, monkeypatch, tmp_path):
+    from mazz.privacy import delete_person, find_person_references
+    from mazz.pipeline.send import SendDisabled
+
+    monkeypatch.setenv("DRYRUN_DIR", str(tmp_path / "dryrun"))
+    campaign = ssm_campaign(session)
+    mailbox(session)
+    lead = drafted_and_approved(session, campaign)
+    send_lead(session, lead, sender=Recording(tmp_path), now=TUE)
+    session.commit()
+    assert find_person_references(session, lead.email).sent_ids
+
+    monkeypatch.setenv("SEND_ENABLED", "false")
+    reload_settings()
+    other = drafted_and_approved(session, campaign, email="ann@damelegal.com")
+    with pytest.raises(SendDisabled) as exc:
+        send_lead(session, other, now=TUE)
+    assert exc.value.path.exists()
+
+    for email in (lead.email, other.email):
+        delete_person(email, session=session)
+    session.commit()
+    assert not exc.value.path.exists()
+    assert session.execute(select(SentMessage)).first() is None

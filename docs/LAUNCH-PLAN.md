@@ -251,7 +251,7 @@ independent gate (WP9).
   Email 1 / FU1 (+3 days) / FU2 (+4 days) as `sequence_steps`, zero proof
   points, generic fallback off, and the own domains on the global never-contact list.
 * Vertical gate: confirmed by attorney / law firm / practice areas / LLP /
-  PLLC / P.C. on the prospect's own pages. Blocked (robots, 401/403) or still
+  PLLC / P.C. on the prospect's own pages. Blocked (robots, 401/403)
   unreachable on the last retry → qualify from the lead row only if industry
   is legal AND the company name is law-firm-like; cited as `lead_record`.
   Otherwise `no_angle` with `skip_reason=vertical_unconfirmed`, counted on
@@ -285,3 +285,15 @@ independent gate (WP9).
 * Dashboard: "Days to drain the list" = remaining sends (3 per unstarted
   lead, the rest of each live sequence) ÷ daily capacity, plus new
   leads/week the caps sustain. Caps were not raised.
+
+### Audit of WP1–WP3 (compliance-auditor, 2026-10-01)
+Fixed: a sent draft can no longer be edited, re-approved or sent again (HIGH);
+every drafting path (incl. the Batch runner, now off unless
+`DRAFT_COMPOSER=claude`) refuses Email 1 for an already-emailed lead; the
+blocked-site fallback applies to `ProviderBlocked` only, an outage still
+retries and holds; Sean no longer sees global suppression rows nor adds
+global domain blocks; delete-by-person covers `sent_messages` and erases
+dry-run `.eml` files; credential-shaped JSON files are gitignored.
+Open (low): outbox header lists every workspace's mailboxes to scoped users;
+outbox advisory text omits the placeholder check (send still refuses);
+`sent_outbox.jsonl` (stub sender, dev only) is not erased on delete.

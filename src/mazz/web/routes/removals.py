@@ -47,12 +47,9 @@ def _workspaces(session: Session, account: Account) -> list[Workspace]:
 def _entries(session: Session, account: Account) -> list[SuppressionEntry]:
     query = select(SuppressionEntry).order_by(SuppressionEntry.added_at.desc()).limit(200)
     if not account.all_workspaces:
-        query = query.where(
-            or_(
-                SuppressionEntry.workspace_id.is_(None),
-                SuppressionEntry.workspace_id.in_(sorted(account.workspace_ids)),
-            )
-        )
+        # Global rows hold other workspaces' unsubscribers; a scoped user sees
+        # only his own workspace's entries (and can still add global ones).
+        query = query.where(SuppressionEntry.workspace_id.in_(sorted(account.workspace_ids)))
     return list(session.execute(query).scalars())
 
 
@@ -135,6 +132,11 @@ def add_removal(
         if not account.sees_workspace(workspace_id):
             return _render(request, session, account, user, status_code=403,
                            error="you can only scope a block to your own workspace")
+
+    if domain and workspace_id is None and not account.all_workspaces:
+        return _render(request, session, account, user, status_code=403,
+                       error="a global domain block stops every workspace; scope it to "
+                             "your workspace or ask an operator")
 
     entry = SuppressionEntry(
         email=email,

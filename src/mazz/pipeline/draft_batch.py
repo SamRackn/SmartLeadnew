@@ -592,6 +592,16 @@ def run_once(
     often.
     """
 
+    from mazz.config import get_settings
+
+    if get_settings().draft_composer != "claude":
+        # The template cold path (qualify gate, company cap) runs in the queue
+        # worker. This runner scores instead of qualifying, so it must not
+        # drain `draft` jobs meant for a template campaign.
+        raise RuntimeError(
+            "draft_batch.run_once is the DRAFT_COMPOSER=claude path; it is off "
+            "while DRAFT_COMPOSER is template"
+        )
     jobs = claim_draft_jobs(session, limit=limit, now=now)
     if not jobs:
         return RunReport()

@@ -610,7 +610,8 @@ def test_an_unreadable_suppression_list_holds_the_lead(session, sender, monkeypa
 def test_a_capped_roster_defers_the_send(session, sender):
     mailbox = make_mailbox(session, daily_cap=1)
     lead, draft = make_approved_lead(session)
-    record_send(session, mailbox, lead=lead, draft=draft, at=NOW - timedelta(minutes=5))
+    other, other_draft = make_approved_lead(session, email="earlier@elsewhere.example")
+    record_send(session, mailbox, lead=other, draft=other_draft, at=NOW - timedelta(minutes=5))
 
     with pytest.raises(JobDeferred) as exc:
         send_lead(session, lead, sender=sender, now=NOW)
@@ -799,7 +800,8 @@ def test_a_deferred_send_does_not_spend_an_attempt(session, monkeypatch, outbox)
 
     mailbox = make_mailbox(session, daily_cap=1)
     lead, draft = make_approved_lead(session)
-    record_send(session, mailbox, lead=lead, draft=draft, at=prior_at)
+    other, other_draft = make_approved_lead(session, email="earlier@elsewhere.example")
+    record_send(session, mailbox, lead=other, draft=other_draft, at=prior_at)
     job, _ = enqueue_job(session, lead.id, "send")
     job_id = job.id
     session.commit()

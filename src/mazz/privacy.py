@@ -45,12 +45,12 @@ from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from mazz.db import session_scope
 from mazz.ingest.csv_import import email_sha256
-from mazz.models import Draft, Job, Lead, ResearchCache, SuppressionEntry
+from mazz.models import Draft, Job, Lead, ResearchCache, SentMessage, SuppressionEntry
 
 __all__ = [
     "DeletionIncomplete",
@@ -103,6 +103,7 @@ class PersonReferences:
     lead_ids: list[int] = field(default_factory=list)
     draft_ids: list[int] = field(default_factory=list)
     job_ids: list[int] = field(default_factory=list)
+    sent_ids: list[int] = field(default_factory=list)
     #: ``(company_domain, fact_id, why)`` for each surviving person-specific fact.
     cache_facts: list[tuple[str, str, str]] = field(default_factory=list)
     #: Reported, not counted as a residual: a never-contact record is meant to
@@ -117,12 +118,13 @@ class PersonReferences:
             len(self.lead_ids)
             + len(self.draft_ids)
             + len(self.job_ids)
+            + len(self.sent_ids)
             + len(self.cache_facts)
         )
 
     def describe(self) -> str:
         return (
-            f"leads={self.lead_ids} drafts={self.draft_ids} jobs={self.job_ids} "
+            f"leads={self.lead_ids} drafts={self.draft_ids} jobs={self.job_ids} sent={self.sent_ids} "
             f"cache_facts={self.cache_facts}"
         )
 
@@ -188,6 +190,17 @@ def find_person_references(
                 select(Job.id).where(Job.lead_id.in_(refs.lead_ids))
             ).scalars()
         )
+
+    refs.sent_ids = list(
+        session.execute(
+            select(SentMessage.id).where(
+                or_(
+                    func.lower(SentMessage.to_address) == email,
+                    SentMessage.lead_id.in_(refs.lead_ids or [-1]),
+                )
+            )
+        ).scalars()
+    )
 
     for cache in session.execute(select(ResearchCache)).scalars():
         for fact in cache.facts or []:
@@ -319,12 +332,18 @@ def delete_person(
                 report.facts_pruned += len(removed)
                 report.pruned_fact_ids.extend(removed)
 
-        # 3. Delete the lead. drafts + jobs go with it (ON DELETE CASCADE).
+        # 3. Delete the lead. drafts, jobs and sent_messages go with it
+        #    (ON DELETE CASCADE). Dry-run MIME on disk carries the address and
+        #    body too, so it goes as well.
+        from mazz.pipeline.send import dry_run_dir
+
         for lead_id in before.lead_ids:
             lead = sess.get(Lead, lead_id)
             if lead is not None:
                 sess.delete(lead)
                 report.leads_deleted += 1
+            for eml in dry_run_dir().glob(f"*-lead{lead_id}-draft*.eml"):
+                eml.unlink(missing_ok=True)
 
         # 4. Suppression entries are kept unless explicitly asked otherwise --
         #    forgetting that we were told not to contact someone is how they
