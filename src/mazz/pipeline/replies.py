@@ -54,12 +54,20 @@ DEFAULT_OOO_DAYS = 7
 #: A "not interested" longer than this is a conversation, not a brush-off.
 NEGATIVE_MAX_CHARS = 400
 REPLY_BODY_LIMIT = 5000
+#: Hard cap on text read before any pattern runs. A reply is a person's
+#: sentences; megabytes of it are an attack on the worker (the cursor does not
+#: advance on failure, so one slow message would be re-read every cycle).
+MAX_REPLY_CHARS = 50_000
+MAX_DSN_CHARS = 200_000
 
 # --------------------------------------------------------------------------
 # Reading the sender's own words
 # --------------------------------------------------------------------------
 
-_WROTE = re.compile(r"^On\b.{0,300}?\bwrote:\s*$", re.M | re.S)
+# Single-line bounded (Gmail wraps "On ... <addr>" / "wrote:" at most once): no
+# pattern here may scan past a bounded window per line, because a stranger
+# controls this text.
+_WROTE = re.compile(r"^On\b[^\n]{0,300}(?:\n[^\n]{0,100})?\bwrote:[ \t]*$", re.M)
 _ORIGINAL = re.compile(r"^-{2,}\s*(?:Original Message|Forwarded message)", re.M | re.I)
 _OUTLOOK_HEADER = re.compile(r"^From:.*\n(?:Sent|Date):", re.M)
 _OUR_FOOTER = re.compile(r"^(?:If this isn't relevant|Unsubscribe \(one click\))", re.M | re.I)
@@ -68,7 +76,7 @@ _OUR_FOOTER = re.compile(r"^(?:If this isn't relevant|Unsubscribe \(one click\))
 def strip_quoted(text: str) -> str:
     """The sender's own text: quoted history and our footer removed."""
 
-    text = (text or "").replace("\r\n", "\n")
+    text = (text or "")[:MAX_REPLY_CHARS].replace("\r\n", "\n")
     for rx in (_WROTE, _ORIGINAL, _OUTLOOK_HEADER, _OUR_FOOTER):
         m = rx.search(text)
         if m:
@@ -255,7 +263,9 @@ def apply_reply(
     own = strip_quoted(msg.text)
     result = classify(msg.headers, msg.subject, own)
     return_date = (
-        parse_return_date(own or msg.text, msg.received_at.date()) if result.kind == OOO else None
+        parse_return_date((own or msg.text)[:MAX_REPLY_CHARS], msg.received_at.date())
+        if result.kind == OOO
+        else None
     )
     prior_ooo = session.execute(
         select(Reply.id).where(Reply.lead_id == lead.id, Reply.classification == OOO)
@@ -329,7 +339,7 @@ def handle_bounce(session, mailbox: Mailbox, msg: gr.ParsedMessage) -> bool:
     """Match a DSN to the message it bounced and record a HARD bounce.
     True if one was recorded."""
 
-    text = f"{msg.subject}\n{msg.raw_text or msg.text}".lower()
+    text = f"{msg.subject}\n{(msg.raw_text or msg.text)[:MAX_DSN_CHARS]}".lower()
     recent = session.execute(
         select(SentMessage)
         .where(
@@ -361,7 +371,7 @@ def handle_bounce(session, mailbox: Mailbox, msg: gr.ParsedMessage) -> bool:
 
     record_bounce(session, sent, code=code, now=msg.received_at)
     audit.record(session, audit.SYSTEM, "hard_bounce", "lead", sent.lead_id,
-                 to=sent.to_address, code=code, mailbox=mailbox.email_address)
+                 code=code, mailbox=mailbox.email_address)  # no address: audit outlives erasure
     return True
 
 

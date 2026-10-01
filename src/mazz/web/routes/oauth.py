@@ -57,7 +57,12 @@ def google_callback(
     try:
         tokens = google_oauth.exchange_code(code)
         refresh = tokens["refresh_token"]
-        who = google_oauth.mailbox_identity(refresh)
+        try:
+            who = google_oauth.mailbox_identity(refresh)
+        except Exception as exc:  # noqa: BLE001 - HttpError / RefreshError / network
+            raise google_oauth.OAuthExchangeError(
+                f"could not confirm the account ({exc.__class__.__name__})"
+            ) from exc
         if who != mailbox.email_address.strip().lower():
             raise google_oauth.OAuthExchangeError(
                 f"consented as a different account ({who})"

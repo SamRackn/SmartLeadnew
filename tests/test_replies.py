@@ -711,3 +711,78 @@ def test_delete_by_person_erases_their_replies(session, tmp_path):
     delete_person(lead.email, session=session)
     session.commit()
     assert session.execute(select(Reply)).first() is None
+
+
+# --------------------------------------------------------------------------
+# Audit fixes (WP5 compliance-auditor pass)
+# --------------------------------------------------------------------------
+
+
+def test_a_hostile_megabyte_reply_cannot_stall_the_worker():
+    import time
+
+    hostile = "On\n" * 3_000_000 + "Not interested."
+    started = time.monotonic()
+    own = R.strip_quoted(hostile)
+    assert time.monotonic() - started < 2.0
+    assert len(own) <= R.MAX_REPLY_CHARS
+    # A wrapped Gmail attribution still strips; a one-line one too.
+    wrapped = "Yes please.\n\nOn Tue, Oct 6, 2026 at 11:00 AM Sean Gough <s@x.com>\nwrote:\n> hi"
+    assert R.strip_quoted(wrapped) == "Yes please."
+
+
+def test_a_transient_refresh_failure_is_not_a_revocation():
+    class RefreshError(Exception):
+        pass
+
+    assert google_oauth.is_revoked(RefreshError("invalid_grant: Token has been revoked"))
+    assert not google_oauth.is_revoked(RefreshError("Unable to refresh: 503 service unavailable"))
+    assert not google_oauth.is_revoked(RefreshError("invalid_client"))
+    assert not google_oauth.is_revoked(ConnectionError("reset"))
+
+
+def test_the_callback_survives_google_failing_to_say_who_consented(session, monkeypatch):
+    box = _connect_box(session)
+    monkeypatch.setattr(google_oauth, "exchange_code", lambda code: {"refresh_token": "rt"})
+
+    def boom(token):
+        raise RuntimeError("HttpError 503")
+
+    monkeypatch.setattr(google_oauth, "mailbox_identity", boom)
+    resp = TestClient(create_app()).get("/oauth/google/callback", params={"code": "c", "state": "STATE1"})
+    assert resp.status_code == 400
+    session.expire_all()
+    assert session.get(Mailbox, box.id).oauth_refresh_token_enc is None
+
+
+def test_deleting_a_forwarder_erases_replies_they_wrote_on_someone_elses_thread(session, tmp_path):
+    from mazz.privacy import delete_person
+
+    lead, box, sent = sent_lead(session, tmp_path)
+    inbound(session, box, sent, lead, "Please talk to Jane.", frm="jane@damelegal.com")
+    session.commit()
+    delete_person("jane@damelegal.com", session=session)  # must not raise DeletionIncomplete
+    session.commit()
+    assert session.execute(select(Reply)).first() is None
+    assert session.get(Lead, lead.id) is not None  # the lead on that thread is untouched
+
+
+def test_a_bounce_audit_does_not_keep_the_address(session, tmp_path):
+    lead, box, sent = sent_lead(session, tmp_path)
+    dsn = parse_gmail_message(gmsg(
+        "dsn3", "t", "mailer-daemon@googlemail.com", "Delivery Status Notification (Failure)",
+        f"550 5.1.1 user unknown\nMessage-ID: {sent.rfc_message_id}\n"))
+    R.process_message(session, box, dsn, R.SyncReport())
+    detail = session.execute(select(AuditEvent.detail).where(AuditEvent.action == "hard_bounce")).scalar_one()
+    assert lead.email not in str(detail)
+
+
+def test_send_sees_a_stop_committed_by_another_session(session, tmp_path):
+    campaign = ssm_campaign(session)
+    mailbox(session)
+    lead = drafted_and_approved(session, campaign)
+    with h.db_session() as other:  # the reply sync, a separate connection
+        other.get(Lead, lead.id).sequence_state = "stopped"
+        other.commit()
+    with pytest.raises(PermanentJobError, match="stopped"):
+        send_lead(session, lead, sender=Recording(tmp_path), now=TUE)  # stale copy says active/None

@@ -364,3 +364,19 @@ Attachment-borne DSN parts are not fetched (Gmail's inline text + headers are
 enough for Google-hosted senders; a DSN we cannot match is logged, not
 suppressed). `/outbox` and `release` do not yet show a stopped/paused lead as
 blocked before the click; the send step refuses either way.
+
+### Audit of WP5 (compliance-auditor, 2026-10-01)
+No critical or high findings. Fixed: reply text is capped at 50 KB before any
+pattern runs and the attribution pattern is single-line bounded (a hostile
+multi-megabyte reply was a poison message that would have stalled the worker
+every cycle); only Google's own `invalid_grant` counts as a revoked token (a
+token-endpoint outage no longer flags every mailbox `needs_reconnect`); the
+send step locks and re-reads the lead so a reply committed by the sync is
+seen; delete-by-person also erases replies the person wrote on someone else's
+thread, and bounce audit entries no longer carry the address; the OAuth
+callback turns a failure to confirm the account into a refusal, not a 500.
+Open: a reply landing in the milliseconds between the attempt marker commit
+and the wire still leaves (closing it means holding a transaction across the
+Gmail call); a false-positive unsubscribe/negative has no reversal route (the
+keyword rule is broad, e.g. "please don't stop emailing me" suppresses);
+an `Auto-Submitted` header outranks "remove me" (classed OOO).

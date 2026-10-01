@@ -193,10 +193,10 @@ def is_revoked(exc: BaseException) -> bool:
     """A refresh that Google refused permanently: revoked, expired, or the
     app is still in Testing and the 7-day token lapsed."""
 
-    text = f"{exc.__class__.__name__} {exc}".lower()
-    return "invalid_grant" in text or (
-        exc.__class__.__name__ == "RefreshError" and "invalid_client" not in text
-    )
+    # Only Google's own "invalid_grant". A RefreshError can also be a token
+    # endpoint 5xx or a network failure: that is retryable, and must not flag
+    # every mailbox needs_reconnect during a Google outage.
+    return "invalid_grant" in f"{exc.__class__.__name__} {exc}".lower()
 
 
 # --------------------------------------------------------------------------

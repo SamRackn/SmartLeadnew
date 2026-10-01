@@ -45,7 +45,7 @@ from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from mazz.db import session_scope
@@ -349,6 +349,10 @@ def delete_person(
         #    (ON DELETE CASCADE). Dry-run MIME on disk carries the address and
         #    body too, so it goes as well.
         from mazz.pipeline.send import dry_run_dir
+
+        # Replies the person wrote on another lead's thread (a colleague, a
+        # forward) are not under their own lead, so nothing cascades to them.
+        sess.execute(delete(Reply).where(func.lower(Reply.from_address) == email))
 
         for lead_id in before.lead_ids:
             lead = sess.get(Lead, lead_id)

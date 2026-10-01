@@ -174,6 +174,15 @@ def send_lead(
 
     now = now or _now()
 
+    # Hold the lead's row from here until the attempt marker commits, and read
+    # fresh state: a reply, bounce or unsubscribe committed by the reply sync
+    # an instant ago must be seen, not the copy this session loaded earlier.
+    # ponytail: the lock ends at the marker commit, so a reply landing in the
+    # milliseconds before the wire still leaves; closing it would mean holding
+    # a transaction across the Gmail call.
+    session.flush()
+    session.refresh(lead, ["status", "sequence_state", "next_step_due_at"], with_for_update=True)
+
     # -- the approval must still stand ------------------------------------
     if lead.status != LeadStatus.APPROVED:
         raise PermanentJobError(
