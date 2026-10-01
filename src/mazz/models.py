@@ -1009,6 +1009,11 @@ class SentMessage(Base):
     rfc_message_id: Mapped[str | None] = mapped_column(String(512))
     provider_message_id: Mapped[str | None] = mapped_column(String(128))
     provider_thread_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    #: Set when a hard bounce (DSN) for this message comes back. Feeds the
+    #: mailbox's bounce-rate auto-pause (`mailbox.record_bounce`).
+    bounced_at: Mapped[datetime | None] = _utcnow_column()
+    #: Enhanced status code from the DSN, e.g. "5.1.1".
+    bounce_code: Mapped[str | None] = mapped_column(String(16))
 
     sent_at: Mapped[datetime] = _utcnow_column(
         nullable=False, server_default=func.now(), index=True

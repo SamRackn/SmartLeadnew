@@ -37,7 +37,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from mazz.models import Mailbox, MailboxStatus, SentMessage
+from mazz.models import Lead, Mailbox, MailboxStatus, SentMessage, SuppressionEntry
 
 __all__ = [
     "MailboxUnavailable",
@@ -212,12 +212,101 @@ def select_mailbox(
             retry_at=retry_at,
         )
 
+    # Alternate sending domains: whatever went out last, the other domain goes next.
+    last = max(pool, key=lambda m: m.last_sent_at or datetime.min.replace(tzinfo=timezone.utc))
+    last_domain = _domain(last) if last.last_sent_at else None
     ready.sort(
         key=lambda c: (
             c.mailbox.consecutive_failures,
+            _domain(c.mailbox) == last_domain,
             c.sent_today,
             c.mailbox.last_sent_at or datetime.min.replace(tzinfo=timezone.utc),
             c.mailbox.id,
         )
     )
     return ready[0].mailbox
+
+
+def _domain(mailbox: Mailbox) -> str:
+    return mailbox.email_address.rpartition("@")[2].lower()
+
+
+# --------------------------------------------------------------------------
+# Bounce auto-pause
+# --------------------------------------------------------------------------
+
+#: Hard bounces are judged over the mailbox's last this-many sends...
+BOUNCE_WINDOW = 50
+#: ...and above this share of them the mailbox is paused. The denominator is
+#: always the full window, so a new mailbox is not paused by one early bounce
+#: (1/50 = 2%) but is by a second (4%).
+BOUNCE_LIMIT = 0.03
+
+
+def is_policy_rejection(code: str | None) -> bool:
+    """5.7.x: the receiving side refused us on policy or reputation."""
+
+    return bool(code) and code.strip().startswith("5.7.")
+
+
+def pause_mailbox(mailbox: Mailbox, reason: str) -> None:
+    if mailbox.status == MailboxStatus.ACTIVE:
+        mailbox.status = MailboxStatus.PAUSED
+    mailbox.last_error = f"auto-paused: {reason}"[:4000]
+
+
+def bounce_rate(session: Session, mailbox: Mailbox) -> float:
+    recent = (
+        select(SentMessage.bounced_at)
+        .where(SentMessage.mailbox_id == mailbox.id)
+        .order_by(SentMessage.sent_at.desc())
+        .limit(BOUNCE_WINDOW)
+        .subquery()
+    )
+    bounced = session.execute(
+        select(func.count()).select_from(recent).where(recent.c.bounced_at.is_not(None))
+    ).scalar_one()
+    return bounced / BOUNCE_WINDOW
+
+
+def record_bounce(
+    session: Session, sent: SentMessage, *, code: str | None, now: datetime | None = None
+) -> None:
+    """A hard bounce came back for ``sent``: suppress the address, stop the
+    lead's sequence, and pause the mailbox on a 5.7.x or a rate above 3%.
+
+    Called by reply sync (WP5) for a DSN it classifies as a hard bounce. A
+    paused mailbox needs a person to look at it and un-pause it on /mailboxes.
+    """
+
+    now = now or datetime.now(timezone.utc)
+    sent.bounced_at = sent.bounced_at or now
+    sent.bounce_code = (code or "")[:16] or None
+
+    address = sent.to_address.strip().lower()
+    if session.execute(
+        select(SuppressionEntry.id).where(
+            SuppressionEntry.email == address, SuppressionEntry.workspace_id.is_(None)
+        )
+    ).first() is None:
+        from mazz.ingest.csv_import import email_sha256
+
+        session.add(SuppressionEntry(email=address, email_sha256=email_sha256(address),
+                                     reason=f"hard bounce {code or ''}".strip(),
+                                     added_by="system:bounce"))
+    lead = session.get(Lead, sent.lead_id)
+    if lead is not None and lead.sequence_state in ("active", "paused"):
+        lead.sequence_state = "stopped"
+        lead.next_step_due_at = None
+    session.flush()
+
+    mailbox = session.get(Mailbox, sent.mailbox_id) if sent.mailbox_id else None
+    if mailbox is None:
+        return
+    if is_policy_rejection(code):
+        pause_mailbox(mailbox, f"5.7.x rejection ({code}) for {address}")
+    else:
+        rate = bounce_rate(session, mailbox)
+        if rate > BOUNCE_LIMIT:
+            pause_mailbox(mailbox, f"hard-bounce rate {rate:.0%} over its last {BOUNCE_WINDOW} sends")
+    session.flush()

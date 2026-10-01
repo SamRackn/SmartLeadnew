@@ -92,6 +92,7 @@ def ssm_campaign(session):
 def mailbox(session):
     session.add(Mailbox(email_address="sean.gough@getsearchsitemarketing.com",
                         display_name="Sean Gough", credential_ref="m1", min_spacing_seconds=0))
+    session.flush()
 
 
 def law_lead(session, campaign, *, email="louis@damelegal.com", domain="damelegal.com",
@@ -292,3 +293,77 @@ def test_zoominfo_rows_need_first_last_and_email():
         validate_row({"First Name": "Cher", "Email": "cher@x.com"})
     with pytest.raises(RowValidationError, match="email"):
         validate_row({"First Name": "A", "Last Name": "B"})
+
+
+# --------------------------------------------------------------------------
+# WP4 pacing
+# --------------------------------------------------------------------------
+
+
+def _sends(session, lead, box, n):
+    rows = [SentMessage(lead_id=lead.id, draft_id=h.make_draft(session, lead).id, mailbox_id=box.id,
+                        from_address=box.email_address, to_address=f"p{i}@x{i}.com",
+                        subject="s", body="b", sent_at=TUE - timedelta(minutes=n - i))
+            for i in range(n)]
+    session.add_all(rows)
+    session.flush()
+    return rows
+
+
+def test_hard_bounces_suppress_stop_and_pause_above_3_percent(session):
+    from mazz.models import MailboxStatus, SuppressionEntry
+    from mazz.pipeline.mailbox import record_bounce
+
+    campaign = ssm_campaign(session)
+    lead = law_lead(session, campaign, sequence_state="active")
+    mailbox(session)
+    box = session.execute(select(Mailbox)).scalar_one()
+    rows = _sends(session, lead, box, 50)
+
+    record_bounce(session, rows[-1], code="5.1.1")
+    assert box.status is MailboxStatus.ACTIVE  # 1/50 = 2%
+    assert lead.sequence_state == "stopped"
+    assert session.execute(select(SuppressionEntry).where(
+        SuppressionEntry.email == rows[-1].to_address)).scalar_one().workspace_id is None
+    record_bounce(session, rows[-2], code="5.1.1")
+    assert box.status is MailboxStatus.PAUSED  # 2/50 = 4%
+    assert "hard-bounce rate 4%" in box.last_error
+
+    box.status = MailboxStatus.ACTIVE
+    record_bounce(session, rows[0], code="5.7.1")  # policy rejection: at once
+    assert box.status is MailboxStatus.PAUSED and "5.7.x" in box.last_error
+
+
+def test_rotation_alternates_the_two_domains(session):
+    from mazz.pipeline.mailbox import select_mailbox
+
+    for addr in ("a@getsearchsitemarketing.com", "b@getsearchsitemarketing.com",
+                 "a@searchsitemarketinghub.com", "b@searchsitemarketinghub.com"):
+        session.add(Mailbox(email_address=addr, display_name="Sean Gough", credential_ref="m",
+                            min_spacing_seconds=0))
+    session.flush()
+    seen = []
+    for i in range(4):
+        box = select_mailbox(session, now=TUE)
+        seen.append(box.email_address.split("@")[1])
+        box.last_sent_at = TUE - timedelta(minutes=10 - i)
+        session.flush()
+    assert seen[0] != seen[1] != seen[2] != seen[3]
+
+
+def test_dashboard_shows_days_to_drain(session):
+    from fastapi.testclient import TestClient
+
+    from mazz.web.app import create_app
+    from test_web import ensure_account, login
+
+    campaign = ssm_campaign(session)
+    mailbox(session)
+    for n in "abcd":
+        law_lead(session, campaign, email=f"{n}@damelegal.com", status=LeadStatus.READY)
+    session.commit()
+    ensure_account("client")
+    resp = login(TestClient(create_app()), "client").get("/dashboard")
+    assert resp.status_code == 200
+    # 4 leads x 3 steps = 12 sends at the default cap of 30/day.
+    assert "Days to drain the list" in resp.text and "12 sends left" in resp.text

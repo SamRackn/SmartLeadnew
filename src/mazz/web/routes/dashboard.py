@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from mazz.db import get_session
@@ -46,11 +46,12 @@ from mazz.models import (
     MailboxStatus,
     ResearchCache,
     SentMessage,
+    SequenceStep,
     VerificationStatus,
 )
 from mazz.pipeline.mailbox import day_window, headroom, sent_today
 from mazz.pipeline.queue import DEFAULT_STALE_AFTER
-from mazz.pipeline.sequence import COMPANY_CAP_MARKER
+from mazz.pipeline.sequence import COMPANY_CAP_MARKER, LIVE_STATES
 from mazz.web.auth import current_user, require_operator
 from mazz.web.routes.leads import ALL_STATUSES
 
@@ -417,6 +418,33 @@ async def dashboard(
     else:
         backlog_days = None
 
+    # Whole-list drain at current caps, follow-ups included (WP4 pacing).
+    # A lead not yet started still owes every step; one mid-sequence owes the
+    # rest, plus the step sitting in review/outbox if it has not left yet.
+    seq_len = session.execute(
+        select(func.max(SequenceStep.step)).where(SequenceStep.enabled.is_(True))
+    ).scalar() or 1
+    not_started = session.execute(
+        select(func.count(Lead.id)).where(
+            Lead.sequence_state.is_(None),
+            Lead.status.notin_((LeadStatus.NO_ANGLE, LeadStatus.HELD)),
+        )
+    ).scalar_one()
+    in_flight = session.execute(
+        select(
+            func.coalesce(
+                func.sum(
+                    seq_len - Lead.sequence_step
+                    + case((Lead.status != LeadStatus.SENT, 1), else_=0)
+                ),
+                0,
+            )
+        ).where(Lead.sequence_state.in_(LIVE_STATES))
+    ).scalar_one()
+    sends_remaining = not_started * seq_len + int(in_flight)
+    drain_days = sends_remaining / daily_capacity if daily_capacity else None
+    new_leads_per_week = daily_capacity * 5 / seq_len if daily_capacity else 0
+
     show_sending_panel = bool(mailboxes) or total_sent > 0
 
     return templates.TemplateResponse(
@@ -434,6 +462,10 @@ async def dashboard(
             "remaining_capacity_today": remaining_capacity_today,
             "approved_waiting": approved_waiting,
             "backlog_days": backlog_days,
+            "seq_len": seq_len,
+            "sends_remaining": sends_remaining,
+            "drain_days": drain_days,
+            "new_leads_per_week": new_leads_per_week,
             "all_statuses": ALL_STATUSES,
             "status_counts": status_counts,
             "total_leads": total_leads,

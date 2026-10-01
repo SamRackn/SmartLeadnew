@@ -70,6 +70,7 @@ from mazz.pipeline.mailbox import (
     select_mailbox,
 )
 from mazz.pipeline.queue import JobContext, JobDeferred, PermanentJobError
+from mazz.pipeline.mailbox import pause_mailbox
 from mazz.pipeline.sequence import lead_timezone, next_window_open, schedule_next_step
 from mazz.pipeline.verify import is_approvable, latest_draft
 
@@ -465,6 +466,11 @@ def _record_mailbox_failure(session, mailbox: Mailbox, exc: ProviderError) -> No
 
     mailbox.consecutive_failures = (mailbox.consecutive_failures or 0) + 1
     mailbox.last_error = f"{exc.__class__.__name__}: {exc}"[:4000]
+    if re.search(r"\b5\.7\.\d+", str(exc)) and not isinstance(exc, ProviderAuthError):
+        # Policy/reputation refusal at submission: stop using it until a
+        # person has looked. Paused, not disabled -- the credential is fine.
+        pause_mailbox(mailbox, f"5.7.x rejection at send: {exc}")
+        log.error("mailbox %s auto-paused: %s", mailbox.email_address, exc)
     if isinstance(exc, ProviderAuthError):
         mailbox.status = MailboxStatus.DISABLED
         log.error(

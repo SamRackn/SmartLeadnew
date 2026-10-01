@@ -271,3 +271,17 @@ independent gate (WP9).
   Eastern). Outside it a send is deferred, not failed. Holidays not modelled.
 * Follow-ups sort ahead of new leads in review and the outbox. Caps are not
   reserved for them (both share the 15/mailbox/day).
+
+### WP4 pacing (done)
+* Caps count every send from `sent_messages`, follow-ups included; a
+  follow-up is pinned to the mailbox that owns its thread and waits on that
+  mailbox's cap.
+* `mailbox.record_bounce` (called by reply sync, WP5): hard bounce →
+  global suppression (email + sha256), sequence stopped; mailbox auto-paused
+  on any 5.7.x, or above 3% hard bounces over its last 50 sends (denominator
+  fixed at 50, so the 2nd bounce pauses). A 5.7.x at submission pauses too.
+  Un-pausing is a human action on /mailboxes. Dead credentials still disable.
+* Rotation alternates the two sending domains.
+* Dashboard: "Days to drain the list" = remaining sends (3 per unstarted
+  lead, the rest of each live sequence) ÷ daily capacity, plus new
+  leads/week the caps sustain. Caps were not raised.

@@ -63,6 +63,17 @@
       {% endif %}
     </span>
   </div>
+  <div class="kpi">
+    <span class="kpi-label">Days to drain the list</span>
+    {% if drain_days is none %}
+      <span class="kpi-value undefined">no capacity</span>
+    {% else %}
+      <span class="kpi-value">{{ "%.1f"|format(drain_days) }}</span>
+      <span class="kpi-note">business days &mdash; {{ sends_remaining }} sends left
+        ({{ seq_len }} per lead) at {{ daily_capacity }}/day;
+        sustains about {{ "%.0f"|format(new_leads_per_week) }} new leads/week</span>
+    {% endif %}
+  </div>
 </section>
 
 {% if show_sending_panel %}
