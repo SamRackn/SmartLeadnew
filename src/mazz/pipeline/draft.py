@@ -54,7 +54,7 @@ import hmac
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Callable
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -660,6 +660,11 @@ def persist_draft(session: "Session", lead: Lead, outcome: DraftOutcome) -> Draf
 
     if not outcome.drafted:
         lead.status = LeadStatus.NO_ANGLE
+        q = outcome.qualification
+        if q is not None and lead.skip_reason is None:
+            lead.skip_reason = (
+                "disqualified" if q.verdict.value == "disqualified" else "vertical_unconfirmed"
+            )
         session.flush()
         return None
 
@@ -671,9 +676,13 @@ def persist_draft(session: "Session", lead: Lead, outcome: DraftOutcome) -> Draf
         signals_used=list(outcome.content.signals_used),
         verification_status=VerificationStatus.PENDING,
         verification_notes=None,
+        step=1,
     )
     session.add(draft)
     lead.status = LeadStatus.RESEARCHING
+    lead.sequence_step = 1
+    lead.sequence_state = lead.sequence_state or "active"
+    lead.skip_reason = None
     session.flush()
     return draft
 
@@ -728,9 +737,17 @@ def outreach_for_lead(
             "offer to write and no default that would not be a guess"
         )
 
+    from mazz.pipeline.outreach import compose_from_step
+    from mazz.pipeline.sequence import step_for
+
     offer = offer_for_campaign(session, campaign)
     request = build_outreach_request(lead, offer, result)
-    content = compose_outreach(request)
+    step1 = step_for(session, campaign.id, 1)
+    content = (
+        compose_outreach(request)
+        if step1 is None
+        else compose_from_step(step1, request, lead, campaign)
+    )
 
     # The same check the composer's own structure already guarantees, kept
     # because it is the contract rather than the implementation: a draft may
@@ -757,6 +774,16 @@ def handle_draft(ctx: "JobContext") -> None:
     Chains to ``verify`` only when a draft was actually written. A `no_angle`
     lead has nothing to verify and is finished.
     """
+
+    from mazz.pipeline.queue import PermanentJobError
+    from mazz.pipeline.sequence import check_company_cap, thread_parent
+
+    if ctx.lead.sequence_step > 1 or thread_parent(ctx.session, ctx.lead) is not None:
+        # Email 1 exactly once per person, whatever queued this job.
+        raise PermanentJobError(
+            f"lead {ctx.lead.id} has already been emailed; refusing to write Email 1 again"
+        )
+    check_company_cap(ctx.session, ctx.lead, now=datetime.now(timezone.utc))
 
     outcome = outreach_for_lead(ctx.session, ctx.lead)
     draft = persist_draft(ctx.session, ctx.lead, outcome)

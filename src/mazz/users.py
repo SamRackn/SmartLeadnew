@@ -1,6 +1,6 @@
 """Accounts: create, set a password, grant a workspace, list.
 
-    python -m mazz.users seed-launch                  # Maaz + Sean, no passwords
+    python -m mazz.users seed-launch                  # Maaz + Sean (no passwords), V1 campaign
     python -m mazz.users set-password maaz@clientrise.io   # prompts, never echoes
     python -m mazz.users add someone@x.com "Some One" [--operator]
     python -m mazz.users grant someone@x.com <workspace-slug>
@@ -65,7 +65,10 @@ def ensure_workspace(session: Session, slug: str, name: str) -> Workspace:
 
 
 def seed_launch(session: Session) -> list[User]:
-    ensure_workspace(session, LAUNCH_WORKSPACE_SLUG, LAUNCH_WORKSPACE_NAME)
+    from mazz.launch_copy import ensure_launch_campaign
+
+    ws = ensure_workspace(session, LAUNCH_WORKSPACE_SLUG, LAUNCH_WORKSPACE_NAME)
+    ensure_launch_campaign(session, ws)
     users = []
     for email, name, operator, slugs in LAUNCH_USERS:
         user = ensure_user(session, email, name, operator=operator)

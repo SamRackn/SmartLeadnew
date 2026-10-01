@@ -175,6 +175,10 @@ __all__ = [
 ]
 
 
+#: Citation meaning "the lead row the client supplied" -- the only evidence a
+#: blocked-site qualification has. See `qualify.qualify_facts(lead=...)`.
+LEAD_RECORD_CITATION = "lead_record"
+
 #: Kept as a name for compatibility with anything that imported it. The
 #: hand-listed Phase 1 vocabulary is now the general-English floor in
 #: `lexicon.COMMON_ENGLISH`, which is where the admission policy is written
@@ -189,6 +193,7 @@ SAFE_VOCABULARY: frozenset[str] = COMMON_ENGLISH
 _WORD_RE = re.compile(r"[A-Za-z][A-Za-z'’]*(?:-[A-Za-z][A-Za-z'’]*)*")
 _SPLIT_RE = re.compile(r"[^A-Za-z0-9]+")
 _WS = re.compile(r"\s+")
+_REPLY_PREFIX = re.compile(r"^(?:\s*re:\s*)+", re.IGNORECASE)
 
 _MAGNITUDE_ALTS = "|".join(sorted(MAGNITUDES, key=len, reverse=True))
 #: The currency symbol is captured so the reviewer is shown "$15M" rather than
@@ -614,6 +619,8 @@ class CampaignCopy:
     #: vertical was confirmed, instead of being shown a confirmation that never
     #: happened.
     is_generic: bool = False
+    #: Sign-off lines, admitted as sender copy exactly like ``offer_line``.
+    signature: str = ""
 
 
 def build_grounding(
@@ -665,6 +672,13 @@ def build_grounding(
         if fact_id in seen:
             continue
         seen.add(fact_id)
+
+        if fact_id == LEAD_RECORD_CITATION:
+            # The client's own row (industry, company name). Always part of the
+            # corpus below; citing it is how a blocked-site qualification says
+            # that is ALL the copy rests on.
+            resolved[fact_id] = f"lead {lead.id} identity record"
+            continue
 
         if fact_id.startswith(PROOF_CITATION_PREFIX):
             proof = proofs_by_citation.get(fact_id)
@@ -764,6 +778,7 @@ def build_grounding(
         else:
             for text_, label in (
                 (campaign_copy.offer_line, "campaign offer line (the sender's own words)"),
+                (campaign_copy.signature, "campaign signature (the sender's own name)"),
                 (
                     campaign_copy.vertical,
                     "generic vertical (claims nothing about the recipient)"
@@ -1508,7 +1523,9 @@ def verify_content(
                 )
 
     # --- claims ---------------------------------------------------------
-    untraceable = extract_claims(subject or "", "subject", grounding)
+    # "Re: " on a follow-up is the mail client's threading convention, not a
+    # claim; the subject after it is checked like any other.
+    untraceable = extract_claims(_REPLY_PREFIX.sub("", subject or ""), "subject", grounding)
     untraceable += extract_claims(message, "body", grounding)
 
     if problems or untraceable:
@@ -1646,13 +1663,14 @@ def campaign_copy_for(
     # The SAME config the composer's side derives, from the same function. If
     # these were built separately, a draft could be written believing no
     # vertical was claimed and checked believing one was.
-    result = qualify_facts(facts, config=config_for_campaign(campaign))
+    result = qualify_facts(facts, config=config_for_campaign(campaign), lead=lead)
     return CampaignCopy(
         vertical=vertical,
         offer_line=(campaign.offer_line or "").strip(),
         qualified=result.qualified,
         rationale=result.rationale,
         is_generic=vertical_is_generic(campaign),
+        signature=(campaign.signature or "").strip(),
     )
 
 

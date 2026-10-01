@@ -188,6 +188,22 @@
       the earliest signal that research quality is degrading.
     {% endif %}
   </p>
+  <p>
+    <strong>Skipped:</strong>
+    {% for reason, n in skip_counts|dictsort %}
+      {{ reason }} {{ n }}{% if not loop.last %} · {% endif %}
+    {% else %}
+      <span class="undefined">none</span>
+    {% endfor %}
+    — <a href="/review?status=no_angle">list them</a>.
+  </p>
+  <p>
+    <strong>Held by the per-company cap:</strong> {{ company_cap_held }}
+    {% if company_cap_share is not none and company_cap_share > 10 %}
+      — <strong>{{ "%.1f"|format(company_cap_share) }}% of the list, above 10%</strong>:
+      the list is concentrated in few firms; raise the cap or source wider.
+    {% endif %}
+  </p>
 </section>
 
 <section class="dash-panel">

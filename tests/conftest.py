@@ -99,6 +99,8 @@ _SAFE_ENV: dict[str, str] = {
     # writes to a local file and has no network code. Tests of the switch
     # itself set it false explicitly.
     "SEND_ENABLED": "true",
+    # Tests run at any hour; the window has its own tests.
+    "SEND_WINDOW": "false",
     "ANTHROPIC_API_KEY": "",
     # Not a credential, but the same hazard: `DRAFT_COMPOSER=claude` in a
     # developer's `.env` would route every drafting test through a paid,

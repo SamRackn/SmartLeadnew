@@ -50,6 +50,7 @@ from mazz.models import (
 )
 from mazz.pipeline.mailbox import day_window, headroom, sent_today
 from mazz.pipeline.queue import DEFAULT_STALE_AFTER
+from mazz.pipeline.sequence import COMPANY_CAP_MARKER
 from mazz.web.auth import current_user, require_operator
 from mazz.web.routes.leads import ALL_STATUSES
 
@@ -173,6 +174,22 @@ async def dashboard(
     no_angle_share = (
         status_counts[LeadStatus.NO_ANGLE] / total_leads * 100 if total_leads else None
     )
+    # Why leads were declined (vertical_unconfirmed, disqualified, ...), and
+    # how many Email 1 drafts the per-company cap is holding back.
+    skip_counts = dict(
+        session.execute(
+            select(Lead.skip_reason, func.count(Lead.id))
+            .where(Lead.skip_reason.is_not(None))
+            .group_by(Lead.skip_reason)
+        ).all()
+    )
+    company_cap_held = session.execute(
+        select(func.count(Job.id)).where(
+            Job.status == JobStatus.PENDING,
+            Job.last_error.like(f"[deferred] {COMPANY_CAP_MARKER}%"),
+        )
+    ).scalar_one()
+    company_cap_share = company_cap_held / total_leads * 100 if total_leads else None
 
     # ----------------------------------------------------------------
     # Verification: drafts by verification_status. Hold rate excludes
@@ -421,6 +438,9 @@ async def dashboard(
             "status_counts": status_counts,
             "total_leads": total_leads,
             "no_angle_share": no_angle_share,
+            "skip_counts": skip_counts,
+            "company_cap_held": company_cap_held,
+            "company_cap_share": company_cap_share,
             "verification_counts": verification_counts,
             "total_drafts": total_drafts,
             "hold_rate": hold_rate,

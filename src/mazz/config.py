@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     # out/dryrun/ and sends nothing, whatever EMAIL_SENDER says. Only the
     # go-live gate sets it true.
     send_enabled: bool = False
+    # Hold each send to Mon-Fri 9:00-17:00 in the lead's timezone (deferred,
+    # not failed, outside it). Off only in tests.
+    send_window: bool = True
     # Host that serves the public unsubscribe page. Requests arriving on it may
     # reach /u/* and /health only; everything else is a 404 there. Blank = no
     # dedicated host (single-host dev).

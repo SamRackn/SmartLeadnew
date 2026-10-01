@@ -155,7 +155,11 @@ async def outbox(
         session.execute(
             select(Lead)
             .where(Lead.status == LeadStatus.APPROVED, account.lead_filter())
-            .order_by(Lead.approved_at.asc().nulls_last(), Lead.id.asc())
+            .order_by(
+                Lead.sequence_step.desc(),  # follow-ups ahead of new leads
+                Lead.approved_at.asc().nulls_last(),
+                Lead.id.asc(),
+            )
         )
         .scalars()
         .all()

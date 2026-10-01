@@ -456,6 +456,7 @@ def _default_handlers() -> dict[str, JobHandler]:
     from mazz.pipeline.enrich import handle_enrich
     from mazz.pipeline.qualify import handle_qualify
     from mazz.pipeline.send import handle_send
+    from mazz.pipeline.sequence import handle_followup
     from mazz.pipeline.verify import handle_verify
 
     return {
@@ -472,6 +473,9 @@ def _default_handlers() -> dict[str, JobHandler]:
         "verify": handle_verify,
         # Enqueued by the approve route only. See the docstring above.
         "send": handle_send,
+        # Scheduled by a send at the next step's due date. Writes a draft and
+        # chains to verify -- back to human review, never to send.
+        "followup": handle_followup,
     }
 
 

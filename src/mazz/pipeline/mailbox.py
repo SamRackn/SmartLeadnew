@@ -149,6 +149,7 @@ def select_mailbox(
     *,
     campaign_id: int | None = None,
     now: datetime | None = None,
+    only: int | None = None,
 ) -> Mailbox:
     """Pick the mailbox that should send the next message for this campaign.
 
@@ -166,7 +167,17 @@ def select_mailbox(
     """
 
     now = now or datetime.now(timezone.utc)
-    pool = _candidates(session, campaign_id=campaign_id)
+    if only is not None:
+        # A follow-up leaves from the mailbox that owns the thread, or not at all.
+        pool = [m for m in [session.get(Mailbox, only)] if m and m.status == MailboxStatus.ACTIVE]
+        if not pool:
+            raise NoMailboxConfigured(
+                f"mailbox {only}, which sent the earlier emails in this thread, is "
+                "not active. A follow-up must come from the same mailbox; "
+                "re-activate it or stop this lead's sequence."
+            )
+    else:
+        pool = _candidates(session, campaign_id=campaign_id)
     if not pool:
         raise NoMailboxConfigured(
             "no active mailbox serves "

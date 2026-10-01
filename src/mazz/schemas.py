@@ -226,6 +226,9 @@ class LeadBase(BaseModel):
 
     full_name: str
     email: str
+    first_name: str | None = None
+    last_name: str | None = None
+    state: str | None = None
     company_name: str | None = None
     website: str | None = None
     job_title: str | None = None

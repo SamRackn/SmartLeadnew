@@ -316,6 +316,17 @@ class Campaign(Base):
         Boolean, nullable=False, default=False, server_default=text("false")
     )
 
+    #: The sign-off lines ("Sean Gough" / "Search Site Marketing, Inc"), rendered
+    #: into step templates as ``{signature}``. Sender copy like ``offer_line``:
+    #: the verifier admits it as the sender's own words, so a digit in it is
+    #: refused for the same reason.
+    signature: Mapped[str | None] = mapped_column(Text)
+
+    #: Most leads at one company_domain with a sequence running at once.
+    max_active_per_company: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=2, server_default=text("2")
+    )
+
     created_at: Mapped[datetime] = _utcnow_column(
         nullable=False, server_default=func.now()
     )
@@ -323,6 +334,12 @@ class Campaign(Base):
         nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
+    steps: Mapped[list["SequenceStep"]] = relationship(
+        back_populates="campaign",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="SequenceStep.step",
+    )
     workspace: Mapped[Workspace] = relationship(back_populates="campaigns")
     leads: Mapped[list["Lead"]] = relationship(
         back_populates="campaign",
@@ -432,6 +449,39 @@ class ProofPoint(Base):
 # --------------------------------------------------------------------------
 
 
+class SequenceStep(Base):
+    """One email in a campaign's sequence. Step 1 is Email 1.
+
+    ``body_template`` fields: {first_name} {company_name} {vertical}
+    {offer_line} {signature}. Anything else stays literally in the copy and the
+    placeholder guard refuses it at approve and send. Template text is NOT
+    grounding: the verifier checks the rendered body like any other copy.
+    """
+
+    __tablename__ = "sequence_steps"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    campaign_id: Mapped[int] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=False
+    )
+    step: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: Days after the previous step was SENT (0 for step 1).
+    wait_days: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: Blank on a follow-up means "Re: <previous subject>", same thread.
+    subject: Mapped[str | None] = mapped_column(Text)
+    body_template: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+
+    campaign: Mapped[Campaign] = relationship(back_populates="steps")
+
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "step", name="uq_sequence_steps_campaign_step"),
+        CheckConstraint("step >= 1 AND wait_days >= 0", name="positive"),
+    )
+
+
 class Lead(Base):
     """A person the client intends to contact.
 
@@ -445,6 +495,10 @@ class Lead(Base):
 
     # --- identity, supplied by the client ------------------------------
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    first_name: Mapped[str | None] = mapped_column(String(128))
+    last_name: Mapped[str | None] = mapped_column(String(128))
+    #: US state (name or code). Picks the send-window timezone.
+    state: Mapped[str | None] = mapped_column(String(64))
     company_name: Mapped[str | None] = mapped_column(String(255))
     website: Mapped[str | None] = mapped_column(Text)
     job_title: Mapped[str | None] = mapped_column(String(255))
@@ -523,6 +577,19 @@ class Lead(Base):
     #: key: a deleted or renamed account must not erase or rewrite the record
     #: of what it approved. Every other human action is in ``audit_events``.
     approved_by: Mapped[str | None] = mapped_column(String(320))
+
+    # --- sequence -------------------------------------------------------
+    #: Why the pipeline declined or is holding this lead back, e.g.
+    #: ``vertical_unconfirmed``, ``disqualified``. NULL = nothing to say.
+    skip_reason: Mapped[str | None] = mapped_column(String(64), index=True)
+    #: Step of the newest draft (1 = Email 1).
+    sequence_step: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=text("1")
+    )
+    #: NULL (not started), active, paused, stopped, complete.
+    sequence_state: Mapped[str | None] = mapped_column(String(16), index=True)
+    #: When the next step's draft is due to enter review.
+    next_step_due_at: Mapped[datetime | None] = _utcnow_column()
 
     created_at: Mapped[datetime] = _utcnow_column(
         nullable=False, server_default=func.now()
@@ -628,6 +695,10 @@ class Draft(Base):
     )
     #: Why verification failed, for the reviewer and the auditor. Free text.
     verification_notes: Mapped[str | None] = mapped_column(Text)
+    #: Sequence step this draft is (1 = Email 1).
+    step: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=text("1")
+    )
 
     created_at: Mapped[datetime] = _utcnow_column(
         nullable=False, server_default=func.now()

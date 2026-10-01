@@ -284,6 +284,13 @@ def offer_for_campaign(session: "Session", campaign: Campaign) -> Offer:
             "running leads through it — this is a setup gap, not a lead outcome."
         )
 
+    if _DIGIT.search(campaign.signature or ""):
+        raise OfferCarriesUnattributedNumber(
+            f"campaign {campaign.id} ({campaign.name!r}) has a number in its "
+            "signature. The verifier admits the signature as sender copy, so it "
+            "may not carry a figure."
+        )
+
     if _DIGIT.search(offer_line):
         raise OfferCarriesUnattributedNumber(
             f"campaign {campaign.id} ({campaign.name!r}) has a number in its offer "
@@ -358,6 +365,28 @@ def build_outreach_request(
 def _first_name(full_name: str | None) -> str:
     parts = _clean(full_name).split()
     return parts[0] if parts else "there"
+
+
+def compose_from_step(step, request: OutreachRequest, lead: Lead, campaign: Campaign) -> "DraftContent":
+    """Email 1 from the campaign's step-1 template (the client's exact copy).
+
+    The template is operator-written, so it is NOT grounding: the verifier
+    checks the rendered body word by word. Only the vertical, offer line and
+    signature fields carry the campaign's admitted sender copy.
+    """
+
+    from mazz.pipeline.draft import DraftContent
+    from mazz.pipeline.sequence import render_template
+
+    if not request.qualification.qualified:
+        raise ValueError("compose_from_step called for a lead that is not qualified")
+    return DraftContent(
+        subject=(step.subject or SUBJECT).strip(),
+        body_text=render_template(
+            step.body_template, lead, campaign, vertical=request.offer.vertical
+        ),
+        signals_used=request.citations(),
+    )
 
 
 def compose_outreach(request: OutreachRequest) -> "DraftContent":

@@ -2,3 +2,5 @@
 *.sh text eol=lf
 *.pdf binary
 *.xlsx binary
+.githooks/* text eol=lf
+*.sh text eol=lf

@@ -334,3 +334,17 @@ def test_live_sending_refuses_an_unrouted_lead(session):
     session.commit()
     with pytest.raises(PermanentJobError, match="no campaign"):
         send_lead(session, lead, sender=_Live(), now=NOW)
+
+
+def test_secret_scan_refuses_a_staged_key_and_passes_clean_lines():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "secret_scan", Path(__file__).resolve().parents[1] / "scripts" / "secret_scan.py"
+    )
+    scan = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(scan)
+    fake = "sk" + "-ant-" + "a" * 40  # assembled so this test file is clean
+    diff = f"+++ b/.env\n+ANTHROPIC_API_KEY={fake}\n+++ b/x.py\n+x = 1\n-{fake}\n"
+    assert scan.scan(diff) == [(".env", "anthropic key")]
+    assert scan.scan("+++ b/a.md\n+postgresql+psycopg://postgres:***@localhost/x\n") == []

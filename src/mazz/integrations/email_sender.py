@@ -99,8 +99,11 @@ class OutgoingMessage:
     subject: str
     body: str
     to_name: str | None = None
-    #: Extra RFC 5322 headers. `List-Unsubscribe` lands here.
+    #: Extra RFC 5322 headers. `List-Unsubscribe` lands here, and on a
+    #: follow-up `In-Reply-To` / `References`.
     headers: Mapping[str, str] = field(default_factory=dict)
+    #: Gmail threadId of the conversation a follow-up belongs to.
+    thread_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -330,7 +333,10 @@ class GmailSender(EmailSender):
             result = (
                 service.users()
                 .messages()
-                .send(userId="me", body={"raw": raw})
+                .send(
+                    userId="me",
+                    body={"raw": raw, **({"threadId": message.thread_id} if message.thread_id else {})},
+                )
                 .execute()
             )
         except ProviderError:

@@ -243,6 +243,14 @@ class QualificationConfig:
     #: law"); raise it for one built from weaker words.
     min_vertical_matches: int = 1
 
+    #: Blocked/unreachable-site fallback. Used ONLY when the cache holds no
+    #: homepage/services/contact page at all, and only when BOTH match: a
+    #: term in the lead's industry fields AND a term in its company name
+    #: ("Legal Services" + "Smith Law PLLC"). Either set empty = no fallback,
+    #: which is the default -- a lead we could not read stays unconfirmed.
+    fallback_industry_terms: frozenset[str] = frozenset()
+    fallback_name_terms: frozenset[str] = frozenset()
+
     def __post_init__(self) -> None:
         if self.min_vertical_matches < 1:
             # Zero would mean "confirmed with no evidence", i.e. every domain
@@ -429,10 +437,40 @@ class QualificationResult:
         return sorted({m.term for m in self.vertical})
 
 
+def _lead_fallback(lead: Lead | None, config: QualificationConfig) -> QualificationResult | None:
+    """Qualify from the lead row alone, when the site could not be read."""
+
+    from mazz.pipeline.verify import LEAD_RECORD_CITATION
+
+    if lead is None or not config.fallback_industry_terms or not config.fallback_name_terms:
+        return None
+    industry = _normalize(f"{lead.industry_primary or ''} | {lead.industry_specific or ''}")
+    name = _normalize(lead.company_name or "")
+    ind = _term_pattern(config.fallback_industry_terms).search(industry)
+    nm = _term_pattern(config.fallback_name_terms).search(name)
+    if not (ind and nm):
+        return None
+    evidence = (
+        Match(LEAD_RECORD_CITATION, ind.group(0).lower(), industry),
+        Match(LEAD_RECORD_CITATION, nm.group(0).lower(), name),
+    )
+    if config.require_intake_signal:
+        return None  # nothing on a lead row can show intake
+    return QualificationResult(
+        verdict=Verdict.QUALIFIED,
+        vertical=evidence,
+        rationale=(
+            "site blocked or unreachable; qualified from the lead record: industry "
+            f"{ind.group(0)!r} and company name {nm.group(0)!r}"
+        ),
+    )
+
+
 def qualify_facts(
     facts: Iterable[Fact],
     *,
     config: QualificationConfig,
+    lead: Lead | None = None,
 ) -> QualificationResult:
     """Qualify one company's cached research against one campaign's vocabulary.
 
@@ -463,6 +501,9 @@ def qualify_facts(
         )
 
     if not considered:
+        fallback = _lead_fallback(lead, config)
+        if fallback is not None:
+            return fallback
         return QualificationResult(
             verdict=Verdict.UNCONFIRMED,
             rationale=(
@@ -541,6 +582,8 @@ _FROZENSET_FIELDS = (
     "service_terms",
     "intake_terms",
     "disqualifier_terms",
+    "fallback_industry_terms",
+    "fallback_name_terms",
 )
 
 
@@ -685,7 +728,7 @@ def qualify_lead(
     """
 
     resolved = config if config is not None else config_for_lead(session, lead)
-    return qualify_facts(facts_for_lead(session, lead), config=resolved)
+    return qualify_facts(facts_for_lead(session, lead), config=resolved, lead=lead)
 
 
 def handle_qualify(ctx: "JobContext") -> None:
@@ -702,6 +745,9 @@ def handle_qualify(ctx: "JobContext") -> None:
 
     if not result.qualified:
         ctx.lead.status = LeadStatus.NO_ANGLE
+        ctx.lead.skip_reason = (
+            "disqualified" if result.verdict is Verdict.DISQUALIFIED else "vertical_unconfirmed"
+        )
         ctx.session.flush()
         log.info(
             "lead %s -> no_angle (%s): %s",

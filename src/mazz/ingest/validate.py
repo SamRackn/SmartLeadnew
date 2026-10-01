@@ -65,6 +65,8 @@ ENRICH_JOB_KIND = "enrich"
 
 #: Canonical order, used when writing a template CSV and by the sample fixture.
 LEAD_COLUMNS: tuple[str, ...] = (
+    "first_name",
+    "last_name",
     "full_name",
     "company_name",
     "website",
@@ -73,6 +75,7 @@ LEAD_COLUMNS: tuple[str, ...] = (
     "employee_count",
     "revenue_range",
     "location",
+    "state",
     "industry_primary",
     "industry_specific",
     "linkedin_url",
@@ -87,6 +90,21 @@ _ALIASES: Mapping[str, str] = {
     "contact_name": "full_name",
     "lead_name": "full_name",
     "prospect_name": "full_name",
+    # first / last (ZoomInfo exports these, not a full name)
+    "first_name": "first_name",
+    "firstname": "first_name",
+    "given_name": "first_name",
+    "last_name": "last_name",
+    "lastname": "last_name",
+    "surname": "last_name",
+    "family_name": "last_name",
+    # state (picks the send-window timezone). Person before company only if
+    # the sheet lists it first; either is good enough for a 9-17 window.
+    "state": "state",
+    "person_state": "state",
+    "company_state": "state",
+    "state_province": "state",
+    "hq_state": "state",
     # company_name
     "company_name": "company_name",
     "company": "company_name",
@@ -151,13 +169,16 @@ _ALIASES: Mapping[str, str] = {
 #: Required for the row to be usable at all. ``full_name`` because the draft
 #: addresses a person; ``email`` because it is the unique key and the thing we
 #: would be contacting.
-REQUIRED_FIELDS: tuple[str, ...] = ("full_name", "email")
+REQUIRED_FIELDS: tuple[str, ...] = ("first_name", "last_name", "email")
 
 #: Mirrors the ``String(n)`` widths in ``mazz.models``. Over-length values are
 #: rejected with a reason rather than silently truncated -- quietly mangling a
 #: client's data is worse than telling him about it.
 MAX_LENGTHS: Mapping[str, int] = {
     "full_name": 255,
+    "first_name": 128,
+    "last_name": 128,
+    "state": 64,
     "company_name": 255,
     "job_title": 255,
     "email": 320,
@@ -352,6 +373,16 @@ def validate_row(raw: Mapping[str, Any]) -> ValidatedRow:
 
     row = normalize_row(raw)
 
+    # First + last are required. A sheet with only a full name is split on
+    # the first space; one with only first/last gets a joined full name.
+    if row.get("full_name") and not (row.get("first_name") and row.get("last_name")):
+        first, _, last = " ".join(row["full_name"].split()).partition(" ")
+        row.setdefault("first_name", first)
+        if last:
+            row.setdefault("last_name", last)
+    if not row.get("full_name") and row.get("first_name") and row.get("last_name"):
+        row["full_name"] = f"{row['first_name']} {row['last_name']}"
+
     for field in REQUIRED_FIELDS:
         if not row.get(field):
             raise RowValidationError(
@@ -375,6 +406,9 @@ def validate_row(raw: Mapping[str, Any]) -> ValidatedRow:
 
     lead = LeadCreate(
         full_name=row["full_name"],
+        first_name=row["first_name"],
+        last_name=row["last_name"],
+        state=row.get("state"),
         email=email,
         company_name=row.get("company_name"),
         website=row.get("website"),

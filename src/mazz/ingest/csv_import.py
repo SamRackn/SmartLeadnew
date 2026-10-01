@@ -331,6 +331,9 @@ class _ScopedSuppressed(Exception):
 
 _LEAD_FIELDS = (
     "full_name",
+    "first_name",
+    "last_name",
+    "state",
     "company_name",
     "website",
     "job_title",
@@ -385,7 +388,7 @@ def _admit(
 
     lead, created = _upsert_lead(session, validated)
 
-    if not created and lead.status in TERMINAL_STATUSES:
+    if not created and (lead.status in TERMINAL_STATUSES or lead.sequence_state is not None):
         # Details refreshed, but do not drag an approved/sent lead back into
         # research and generate a second draft behind the client's back.
         return LeadOutcome(

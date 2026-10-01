@@ -375,7 +375,16 @@ def handle_enrich(ctx) -> None:
         # queue; this is the company-level copy the review app can surface.
         ctx.session.rollback()
         _record_cache_error(session_scope, domain, exc)
-        raise
+        if not _give_up_on_site(ctx, exc):
+            raise
+        # Blocked (robots / 401 / 403), or still unreachable on the last
+        # attempt. Not retried past and not worked around: recorded above, and
+        # handed to qualify, whose lead-record fallback decides. With no
+        # fallback configured that is `no_angle` / vertical_unconfirmed.
+        log.info("lead %s: site %s not readable (%s); qualifying without it",
+                 ctx.lead.id, domain, exc.__class__.__name__)
+        ctx.enqueue_next(QUALIFY_JOB_KIND)
+        return
 
     if outcome.found_nothing:
         ctx.lead.status = LeadStatus.NO_ANGLE
@@ -388,6 +397,19 @@ def handle_enrich(ctx) -> None:
         return
 
     ctx.enqueue_next(QUALIFY_JOB_KIND)
+
+
+def _give_up_on_site(ctx, exc: BaseException) -> bool:
+    """A blocked site, or an unreachable one on its final queue attempt."""
+
+    from mazz.integrations.base import ProviderBlocked, ProviderUnavailable
+    from mazz.pipeline.queue import DEFAULT_RETRY
+
+    if isinstance(exc, ProviderBlocked):
+        return True
+    if isinstance(exc, ProviderUnavailable):
+        return (ctx.job.attempts or 0) + 1 >= DEFAULT_RETRY.max_attempts
+    return False
 
 
 def _record_cache_error(session_scope, domain: str, exc: BaseException) -> None:

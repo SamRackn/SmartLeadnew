@@ -235,3 +235,39 @@ independent gate (WP9).
 * ClientRise mailboxes, domains, subject line, postal address, claim
   attestation.
 * A plan for warmup if Smartlead is ever cancelled.
+
+---
+
+## Status as built
+
+### WP2 leftovers (done)
+* `scripts/secret_scan.py` + `.githooks/pre-commit`. Enable per clone:
+  `git config core.hooksPath .githooks`.
+* `.env.example` lists `SEND_ENABLED`, `UNSUBSCRIBE_BASE_URL`, `UNSUBSCRIBE_HOST`.
+
+### WP3 campaign gate and sequence (done)
+* `python -m mazz.users seed-launch` now also creates the campaign
+  "Search Site Marketing, law firms" (`mazz/launch_copy.py`): the exact V1
+  Email 1 / FU1 (+3 days) / FU2 (+4 days) as `sequence_steps`, zero proof
+  points, generic fallback off, and the own domains on the global never-contact list.
+* Vertical gate: confirmed by attorney / law firm / practice areas / LLP /
+  PLLC / P.C. on the prospect's own pages. Blocked (robots, 401/403) or still
+  unreachable on the last retry → qualify from the lead row only if industry
+  is legal AND the company name is law-firm-like; cited as `lead_record`.
+  Otherwise `no_angle` with `skip_reason=vertical_unconfirmed`, counted on
+  the dashboard and listed at `/review?status=no_angle`.
+* Import: first name, last name, email required (a full name is split if
+  that is all there is). ZoomInfo headers and state mapped. Dedupe on email.
+  A re-import of anyone with a sequence started queues nothing.
+* Email 1 at most once: the draft stage refuses any lead already emailed.
+* Per-company cap: `campaigns.max_active_per_company` (default 2). Email 1
+  for a third colleague is deferred a day; the dashboard shows how many are
+  held and flags it above 10% of the list.
+* Follow-ups: a send queues a `followup` job at its due date (business-day
+  rolled, lead's timezone). It writes a draft and returns the lead to review;
+  approval and release stay one human click per email. Same mailbox, same
+  Gmail thread, `In-Reply-To` / `References`, subject "Re: Quick Question".
+* Send window: Mon–Fri 9:00–17:00 in the lead's timezone (state, else
+  Eastern). Outside it a send is deferred, not failed. Holidays not modelled.
+* Follow-ups sort ahead of new leads in review and the outbox. Caps are not
+  reserved for them (both share the 15/mailbox/day).

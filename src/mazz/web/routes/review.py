@@ -132,7 +132,10 @@ def _search_rows(
         select(func.count()).select_from(base.subquery())
     ).scalar_one()
 
-    rows_query = base.order_by(Lead.updated_at.desc(), Lead.id.desc()).limit(limit)
+    # Follow-ups first: they are due now and a day late reads as a new email.
+    rows_query = base.order_by(
+        Lead.sequence_step.desc(), Lead.updated_at.desc(), Lead.id.desc()
+    ).limit(limit)
     rows = [
         _Row(lead=lead, verification=verification)
         for lead, verification in session.execute(rows_query).all()

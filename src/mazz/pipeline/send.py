@@ -70,6 +70,7 @@ from mazz.pipeline.mailbox import (
     select_mailbox,
 )
 from mazz.pipeline.queue import JobContext, JobDeferred, PermanentJobError
+from mazz.pipeline.sequence import lead_timezone, next_window_open, schedule_next_step
 from mazz.pipeline.verify import is_approvable, latest_draft
 
 log = logging.getLogger(__name__)
@@ -126,9 +127,17 @@ def _unsubscribe_link(lead: Lead, draft: Draft) -> str:
     return unsubscribe_url(lead)
 
 
-def _outgoing(lead: Lead, draft: Draft, mailbox: Mailbox) -> OutgoingMessage:
-    """Build the message. The body is used verbatim -- footer already attached."""
+def _outgoing(
+    lead: Lead, draft: Draft, mailbox: Mailbox, thread: list[SentMessage] | None = None
+) -> OutgoingMessage:
+    """Build the message. The body is used verbatim -- footer already attached.
 
+    ``thread`` is what was already sent to this lead, oldest first: a
+    follow-up replies to the last of them and lists them all in References.
+    """
+
+    ids = [m.rfc_message_id for m in (thread or []) if m.rfc_message_id]
+    threading = {"In-Reply-To": ids[-1], "References": " ".join(ids)} if ids else {}
     return OutgoingMessage(
         from_address=mailbox.email_address,
         from_name=mailbox.display_name,
@@ -139,7 +148,11 @@ def _outgoing(lead: Lead, draft: Draft, mailbox: Mailbox) -> OutgoingMessage:
         headers={
             "List-Unsubscribe": f"<{_unsubscribe_link(lead, draft)}>",
             "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+            **threading,
         },
+        thread_id=next(
+            (m.provider_thread_id for m in reversed(thread or []) if m.provider_thread_id), None
+        ),
     )
 
 
@@ -251,16 +264,46 @@ def send_lead(
         sender = sender or get_email_sender()
         check_live_send_ready(lead, draft, sender)
 
+    # -- the send window ----------------------------------------------------
+    if get_settings().send_window:
+        tz = lead_timezone(lead)
+        opening = next_window_open(now, tz)
+        if opening is not None:
+            raise JobDeferred(
+                f"outside lead {lead.id}'s send window (Mon-Fri 9-17 {tz.key}); "
+                f"opens {opening.isoformat()}",
+                retry_at=opening,
+            )
+
     # -- pick a mailbox ----------------------------------------------------
+    thread = (
+        session.execute(
+            select(SentMessage)
+            .where(SentMessage.lead_id == lead.id)
+            .order_by(SentMessage.sent_at, SentMessage.id)
+        ).scalars().all()
+        if (draft.step or 1) > 1
+        else []
+    )
+    if (draft.step or 1) > 1 and not thread:
+        raise PermanentJobError(
+            f"draft {draft.id} is follow-up step {draft.step} but nothing was ever "
+            f"sent to lead {lead.id}; refusing to send a follow-up with no thread"
+        )
     try:
-        mailbox = select_mailbox(session, campaign_id=lead.campaign_id, now=now)
+        mailbox = select_mailbox(
+            session,
+            campaign_id=lead.campaign_id,
+            now=now,
+            only=thread[-1].mailbox_id if thread else None,
+        )
     except MailboxUnavailable as exc:
         # Waiting on a cap or on spacing. Not a failure — come back later.
         raise JobDeferred(str(exc), retry_at=exc.retry_at) from exc
     except NoMailboxConfigured as exc:
         raise PermanentJobError(str(exc)) from exc
 
-    message = _outgoing(lead, draft, mailbox)
+    message = _outgoing(lead, draft, mailbox, thread)
 
     # -- the kill switch ----------------------------------------------------
     # Before the attempt marker and before any sender exists: with sending
@@ -345,6 +388,8 @@ def _book_sent(
     mailbox.last_error = None
 
     lead.status = LeadStatus.SENT
+    session.flush()
+    schedule_next_step(session, lead, draft, receipt.sent_at)
     session.flush()
     return sent
 
