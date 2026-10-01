@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Connect {{ mailbox.email_address }} — MazzSmartLead Review{% endblock %}
+{% block content %}
+<p><a href="/mailboxes">← back to mailboxes</a></p>
+<h1>Connect <code>{{ mailbox.email_address }}</code></h1>
+
+<p>
+  Status:
+  {% if mailbox.status.value == "needs_reconnect" %}
+    <span class="mailbox-tag mailbox-needs_reconnect">needs reconnect</span>
+    — its Google authorisation was revoked or expired. Nothing is sent from or read from it.
+  {% elif connected %}
+    <span class="mailbox-tag mailbox-active">connected</span>
+    since {{ mailbox.oauth_connected_at.strftime("%Y-%m-%d %H:%M UTC") if mailbox.oauth_connected_at else "—" }}
+  {% else %}
+    <span class="mailbox-tag mailbox-paused">not connected</span>
+  {% endif %}
+  {% if mailbox.last_synced_at %}
+    · last read {{ mailbox.last_synced_at.strftime("%Y-%m-%d %H:%M UTC") }}
+  {% endif %}
+</p>
+{% if mailbox.status.value == "needs_reconnect" and mailbox.last_error %}
+  <p class="error-cell">{{ mailbox.last_error }}</p>
+{% endif %}
+
+{% if problem %}
+  <p class="error">{{ problem }}. Set <code>GOOGLE_OAUTH_CLIENT_ID</code>,
+  <code>GOOGLE_OAUTH_CLIENT_SECRET</code>, <code>OAUTH_TOKEN_KEY</code> and
+  <code>APP_BASE_URL</code> first.</p>
+{% else %}
+  <h2>Authorisation link</h2>
+  <p class="hint">
+    Scopes requested: {% for s in scopes %}<code>{{ s.rsplit("/", 1)[-1] }}</code>{% if not loop.last %}, {% endif %}{% endfor %}.
+    Redirects to <code>{{ redirect_uri }}</code> (this must be an authorised
+    redirect URI on the Google OAuth app). Single use: it stops working once
+    the mailbox is connected, or when you generate a new one.
+  </p>
+  <textarea readonly rows="4" style="width:100%" onclick="this.select()">{{ link }}</textarea>
+  <p class="hint">
+    Give this link to Zapmail's Custom OAuth for this mailbox (it needs the
+    mailbox's Zapmail UUID). Zapmail limits that call to 3 per mailbox per 7 days,
+    so do not regenerate casually.
+  </p>
+  <form method="post" action="/mailboxes/{{ mailbox.id }}/connect/new">
+    <button type="submit">Generate a new link</button>
+  </form>
+{% endif %}
+{% endblock %}

@@ -25,6 +25,8 @@ from mazz.web.routes import leads as leads_routes
 from mazz.web.routes import mailboxes as mailboxes_routes
 from mazz.web.routes import outbox as outbox_routes
 from mazz.web.routes import public as public_routes
+from mazz.web.routes import oauth as oauth_routes
+from mazz.web.routes import inbox as inbox_routes
 from mazz.web.routes import removals as removals_routes
 from mazz.web.routes import review as review_routes
 
@@ -85,6 +87,8 @@ def create_app() -> FastAPI:
         return RedirectResponse(url="/leads", status_code=303)
 
     app.include_router(public_routes.router)
+    app.include_router(oauth_routes.router)
+    app.include_router(inbox_routes.router)
     app.include_router(removals_routes.router)
     app.include_router(auth_routes.router)
     # Before leads_routes: /leads/import would otherwise be matched by

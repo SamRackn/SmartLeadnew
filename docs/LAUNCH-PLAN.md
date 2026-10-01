@@ -297,3 +297,70 @@ dry-run `.eml` files; credential-shaped JSON files are gitignored.
 Open (low): outbox header lists every workspace's mailboxes to scoped users;
 outbox advisory text omits the placeholder check (send still refuses);
 `sent_outbox.jsonl` (stub sender, dev only) is not erased on delete.
+
+### WP5 reply sync and inbox (done, unverified against live Google)
+Built and tested against a faked Gmail. Nothing here has touched Google or
+Zapmail: gates 2 and 3 are what prove it.
+
+**Credentials.** The service-account / `GMAIL_SA_*` path is gone. Each mailbox
+has an encrypted OAuth refresh token (`OAUTH_TOKEN_KEY`, Fernet) on its row;
+the Gmail client refreshes access tokens itself. Scopes: `gmail.send` +
+`gmail.readonly` only. `EmailSender`, the stub and `service_factory` are
+unchanged. A revoked/expired grant (`invalid_grant`) marks the mailbox
+`needs_reconnect`, stops it sending and reading, and shows on `/mailboxes`;
+it can only be revived by actually reconnecting (the status button refuses).
+
+**Zapmail Custom OAuth (read from docs.zapmail.ai/custom-oauth, not guessed).**
+`POST https://api.zapmail.ai/api/v2/mailboxes/custom-oauth`, header
+`x-auth-zapmail`. Body: `{"google": {"appName", "clientId",
+"mailboxesPerDomain": {<domainId>: [{"mailboxId": <Zapmail UUID>,
+"oauthLink": <URL>}]}}}`. WE generate each `oauthLink` (our client id,
+redirect URI, per-mailbox single-use `state`); Zapmail carries the mailbox
+through consent and Google redirects to OUR callback, where we exchange the
+code and verify which account consented. `/mailboxes/<id>/connect` shows each
+mailbox's link. Zapmail rate-limits the call to 3 per mailbox per 7 days.
+Their example link requests `https://mail.google.com/`; ours does not.
+Still needed from a human: Zapmail API key, each mailbox's Zapmail UUID and
+domain id, the `appName` registered with Google, and Zapmail's confirmation
+(gate 2) that OAuth sends alongside Smartlead warmup are permitted.
+
+**Google OAuth app status (checked against Google's help page).** An External
+app in "Testing" issues refresh tokens that expire **7 days** after consent, so
+it must be set to **In production**. An unverified app shows the "unverified
+app" screen and is capped at **100 new users in total, for the life of the
+project** (we need 4). That page does not say which scope is "sensitive" vs
+"restricted"; my understanding is gmail.send is sensitive and gmail.readonly
+restricted, which only matters if the app is ever opened to more than the cap
+— confirm before relying on it. A Workspace admin can also block third-party
+apps outright, which is a Zapmail-tenant question (gate 2).
+
+**Sync.** `python -m mazz.pipeline.replies` or the worker (every 5 min, only
+when `EMAIL_SENDER=google`). Incremental via `users.history.list` (INBOX,
+messageAdded); first sync or an expired cursor (404) falls back to scanning
+threads sent in the last 14 days plus recent DSNs. Only mail on threads we
+started is stored. A token that reads as a different account is refused.
+
+**Rules (all deterministic, no model).** Bounce (DSN): matched to the sent
+message by Message-ID, else failed recipient; hard (5.x.x, not 5.2.2) →
+`record_bounce`. ooo (Auto-Submitted / X-Autoreply / Precedence: auto_reply /
+subject) → pause, resume 9:00 local the business day after the stated return
+date, else +7 days; max 2 pauses per lead. unsubscribe_request → global
+suppression at once, sequence stopped, flagged for a person to confirm.
+negative (short, clear "not interested") and everything else → sequence
+stopped; a follow-up in review/outbox is held. Quoted history and our own
+footer are stripped first, otherwise every reply "contains unsubscribe". The
+send step re-checks the sequence (stopped → held; paused → deferred) after
+approval.
+
+**Inbox** (`/inbox`, scoped to the user's workspaces): classification, age,
+human tags interested / qualified / meeting booked / meeting showed / client
+won (attributed, dated, reversible), handled, confirm-unsubscribe. An
+interested reply unhandled for >2 business hours (Mon–Fri 9–17 Eastern) is
+highlighted. The system never sets `interested`.
+
+**Not built.** Canned replies (the optional last item). Lifting a mistaken
+auto-unsubscribe (today: ask, or delete the suppression row by hand).
+Attachment-borne DSN parts are not fetched (Gmail's inline text + headers are
+enough for Google-hosted senders; a DSN we cannot match is logged, not
+suppressed). `/outbox` and `release` do not yet show a stopped/paused lead as
+blocked before the click; the send step refuses either way.

@@ -13,6 +13,7 @@
       <nav class="topbar-nav">
         <a href="/review" class="{{ 'active' if request.url.path.startswith('/review') else '' }}">review</a>
         <a href="/leads" class="{{ 'active' if request.url.path.startswith('/leads') and not request.url.path.startswith('/leads/import') else '' }}">leads</a>
+        <a href="/inbox" class="{{ 'active' if request.url.path.startswith('/inbox') else '' }}">inbox</a>
         <a href="/outbox" class="{{ 'active' if request.url.path.startswith('/outbox') else '' }}">outbox</a>
         <a href="/removals" class="{{ 'active' if request.url.path.startswith('/removals') else '' }}">removals</a>
         <a href="/leads/import" class="{{ 'active' if request.url.path.startswith('/leads/import') else '' }}">import</a>

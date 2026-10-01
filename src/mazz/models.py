@@ -109,6 +109,9 @@ class MailboxStatus(str, enum.Enum):
     ACTIVE = "active"
     PAUSED = "paused"
     DISABLED = "disabled"
+    #: Its OAuth grant is gone (revoked, expired, never completed). Nothing is
+    #: sent or read until a person re-authorises it from /mailboxes.
+    NEEDS_RECONNECT = "needs_reconnect"
 
 
 class JobStatus(str, enum.Enum):
@@ -936,6 +939,17 @@ class Mailbox(Base):
     )
     last_error: Mapped[str | None] = mapped_column(Text)
 
+    #: Fernet-encrypted OAuth refresh token (key: OAUTH_TOKEN_KEY). The one
+    #: secret that lives in the database. Never rendered, returned or logged.
+    oauth_refresh_token_enc: Mapped[str | None] = mapped_column(Text)
+    #: Single-use random token binding an authorization link to this mailbox.
+    oauth_state: Mapped[str | None] = mapped_column(String(64), index=True)
+    oauth_state_at: Mapped[datetime | None] = _utcnow_column()
+    oauth_connected_at: Mapped[datetime | None] = _utcnow_column()
+    #: Gmail history cursor for incremental reply sync.
+    gmail_history_id: Mapped[str | None] = mapped_column(String(32))
+    last_synced_at: Mapped[datetime | None] = _utcnow_column()
+
     notes: Mapped[str | None] = mapped_column(Text)
 
     created_at: Mapped[datetime] = _utcnow_column(
@@ -1118,6 +1132,66 @@ class AuditEvent(Base):
 # --------------------------------------------------------------------------
 # jobs
 # --------------------------------------------------------------------------
+
+
+class Reply(Base):
+    """An inbound message on a thread we started. Unmatched mail is not stored.
+
+    Personal data about the person who wrote it, so it cascades with the lead
+    (delete-by-person) and `privacy` lists it as a reference.
+    """
+
+    __tablename__ = "replies"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    lead_id: Mapped[int] = mapped_column(
+        ForeignKey("leads.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    mailbox_id: Mapped[int | None] = mapped_column(
+        ForeignKey("mailboxes.id", ondelete="SET NULL")
+    )
+    provider_message_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    provider_thread_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    from_address: Mapped[str] = mapped_column(String(320), nullable=False)
+    subject: Mapped[str | None] = mapped_column(Text)
+    #: The sender's own words: quoted history and our footer stripped.
+    body: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    received_at: Mapped[datetime] = _utcnow_column(nullable=False)
+    #: ooo | unsubscribe_request | negative | needs_review. Deterministic; the
+    #: system never decides "interested" -- that is a human tag.
+    classification: Mapped[str] = mapped_column(String(24), nullable=False)
+    #: An automatic action (e.g. an unsubscribe suppression) a person must confirm.
+    needs_confirmation: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    ooo_return_date: Mapped[date | None] = mapped_column(Date)
+    #: A person has dealt with it (answered, or decided no answer is needed).
+    handled_at: Mapped[datetime | None] = _utcnow_column()
+    handled_by: Mapped[str | None] = mapped_column(String(320))
+    created_at: Mapped[datetime] = _utcnow_column(nullable=False, server_default=func.now())
+
+    lead: Mapped["Lead"] = relationship()
+    tags: Mapped[list["ReplyTag"]] = relationship(
+        cascade="all, delete-orphan", passive_deletes=True, order_by="ReplyTag.tagged_at"
+    )
+
+
+class ReplyTag(Base):
+    """A human judgement on a reply: interested, qualified, meeting_booked,
+    meeting_showed, client_won. One row per (reply, tag), dated: the metric
+    counts a conversation in the month it was TAGGED."""
+
+    __tablename__ = "reply_tags"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    reply_id: Mapped[int] = mapped_column(
+        ForeignKey("replies.id", ondelete="CASCADE"), nullable=False
+    )
+    tag: Mapped[str] = mapped_column(String(32), nullable=False)
+    tagged_by: Mapped[str] = mapped_column(String(320), nullable=False)
+    tagged_at: Mapped[datetime] = _utcnow_column(nullable=False, server_default=func.now())
+
+    __table_args__ = (UniqueConstraint("reply_id", "tag", name="uq_reply_tags_reply_id_tag"),)
 
 
 class Job(Base):

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -120,8 +121,8 @@ def _validate(
         errors.append("display name is required — it is the From name recipients see")
     if not (credential_ref or "").strip():
         errors.append(
-            "credential ref is required: it names the Google service-account "
-            "credential (GMAIL_SA_<REF>) this mailbox sends with"
+            "credential ref is required (a label; the mailbox's own OAuth "
+            "authorisation is what it sends with)"
         )
     if daily_cap < 0:
         errors.append("daily cap cannot be negative")
@@ -351,6 +352,70 @@ async def edit_mailbox(
     return RedirectResponse(url="/mailboxes", status_code=303)
 
 
+@router.get("/mailboxes/{mailbox_id}/connect", response_class=HTMLResponse)
+async def connect_mailbox(
+    request: Request,
+    mailbox_id: int,
+    session: Session = Depends(get_session),
+):
+    """The per-mailbox Google authorisation link, and whether it is connected.
+
+    The link carries a single-use ``state``; opening this page does not use it
+    up. Zapmail's Custom OAuth takes this link (see docs/LAUNCH-PLAN.md).
+    """
+
+    from mazz.integrations import google_oauth
+
+    mailbox = session.get(Mailbox, mailbox_id)
+    if mailbox is None:
+        raise HTTPException(status_code=404, detail="mailbox not found")
+    now = datetime.now(timezone.utc)
+    if not mailbox.oauth_state or (
+        mailbox.oauth_state_at is None or now - mailbox.oauth_state_at > google_oauth.STATE_TTL
+    ):
+        mailbox.oauth_state = google_oauth.new_state()
+        mailbox.oauth_state_at = now
+        session.flush()
+    link, problem = None, None
+    try:
+        link = google_oauth.authorization_url(mailbox.email_address, mailbox.oauth_state)
+    except google_oauth.OAuthNotConfigured as exc:
+        problem = f"cannot build a link yet: {exc}"
+    return _templates(request).TemplateResponse(
+        request,
+        "mailbox_connect.html",
+        {
+            "mailbox": mailbox,
+            "link": link,
+            "problem": problem,
+            "redirect_uri": None if problem else google_oauth.redirect_uri(),
+            "connected": bool(mailbox.oauth_refresh_token_enc)
+            and mailbox.status is not MailboxStatus.NEEDS_RECONNECT,
+            "scopes": google_oauth.SCOPES,
+        },
+    )
+
+
+@router.post("/mailboxes/{mailbox_id}/connect/new", response_class=HTMLResponse)
+async def new_connect_link(
+    mailbox_id: int,
+    session: Session = Depends(get_session),
+    user: str = Depends(current_user),
+):
+    """Replace the link's state. The old link stops working at once."""
+
+    from mazz import audit
+    from mazz.integrations import google_oauth
+
+    mailbox = session.get(Mailbox, mailbox_id)
+    if mailbox is None:
+        raise HTTPException(status_code=404, detail="mailbox not found")
+    mailbox.oauth_state = google_oauth.new_state()
+    mailbox.oauth_state_at = datetime.now(timezone.utc)
+    audit.record(session, user, "oauth_link_regenerated", "mailbox", mailbox.id)
+    return RedirectResponse(url=f"/mailboxes/{mailbox_id}/connect", status_code=303)
+
+
 @router.post("/mailboxes/{mailbox_id}/status", response_class=HTMLResponse)
 async def set_mailbox_status(
     request: Request,
@@ -383,6 +448,12 @@ async def set_mailbox_status(
             ),
         ) from None
 
+    if mailbox.status is MailboxStatus.NEEDS_RECONNECT and new_status is MailboxStatus.ACTIVE:
+        raise HTTPException(
+            status_code=400,
+            detail="this mailbox's Google authorisation is gone; reconnect it "
+            "(the connect link), which re-activates it once Google confirms.",
+        )
     mailbox.status = new_status
     if new_status == MailboxStatus.ACTIVE:
         mailbox.consecutive_failures = 0

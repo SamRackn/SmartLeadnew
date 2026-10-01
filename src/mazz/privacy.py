@@ -50,7 +50,7 @@ from sqlalchemy.orm import Session
 
 from mazz.db import session_scope
 from mazz.ingest.csv_import import email_sha256
-from mazz.models import Draft, Job, Lead, ResearchCache, SentMessage, SuppressionEntry
+from mazz.models import Draft, Job, Lead, Reply, ResearchCache, SentMessage, SuppressionEntry
 
 __all__ = [
     "DeletionIncomplete",
@@ -104,6 +104,7 @@ class PersonReferences:
     draft_ids: list[int] = field(default_factory=list)
     job_ids: list[int] = field(default_factory=list)
     sent_ids: list[int] = field(default_factory=list)
+    reply_ids: list[int] = field(default_factory=list)
     #: ``(company_domain, fact_id, why)`` for each surviving person-specific fact.
     cache_facts: list[tuple[str, str, str]] = field(default_factory=list)
     #: Reported, not counted as a residual: a never-contact record is meant to
@@ -119,12 +120,13 @@ class PersonReferences:
             + len(self.draft_ids)
             + len(self.job_ids)
             + len(self.sent_ids)
+            + len(self.reply_ids)
             + len(self.cache_facts)
         )
 
     def describe(self) -> str:
         return (
-            f"leads={self.lead_ids} drafts={self.draft_ids} jobs={self.job_ids} sent={self.sent_ids} "
+            f"leads={self.lead_ids} drafts={self.draft_ids} jobs={self.job_ids} sent={self.sent_ids} replies={self.reply_ids} "
             f"cache_facts={self.cache_facts}"
         )
 
@@ -197,6 +199,17 @@ def find_person_references(
                 or_(
                     func.lower(SentMessage.to_address) == email,
                     SentMessage.lead_id.in_(refs.lead_ids or [-1]),
+                )
+            )
+        ).scalars()
+    )
+
+    refs.reply_ids = list(
+        session.execute(
+            select(Reply.id).where(
+                or_(
+                    func.lower(Reply.from_address) == email,
+                    Reply.lead_id.in_(refs.lead_ids or [-1]),
                 )
             )
         ).scalars()

@@ -110,6 +110,24 @@ def next_window_open(now: datetime, tz: ZoneInfo) -> datetime | None:
     return opening.astimezone(timezone.utc)
 
 
+def business_hours_between(start: datetime, end: datetime, tz: ZoneInfo = EASTERN) -> float:
+    """Hours of Mon-Fri 9:00-17:00 (in ``tz``) that fall between two instants."""
+
+    if end <= start:
+        return 0.0
+    total = 0.0
+    day = start.astimezone(tz).date()
+    last = end.astimezone(tz).date()
+    while day <= last:
+        if day.weekday() < 5:
+            lo = max(start, datetime.combine(day, WINDOW_START, tzinfo=tz))
+            hi = min(end, datetime.combine(day, WINDOW_END, tzinfo=tz))
+            if hi > lo:
+                total += (hi - lo).total_seconds() / 3600
+        day += timedelta(days=1)
+    return total
+
+
 # --------------------------------------------------------------------------
 # Steps
 # --------------------------------------------------------------------------
@@ -196,7 +214,16 @@ def handle_followup(ctx: "JobContext") -> None:
     from mazz.pipeline.outreach import effective_vertical
     from mazz.pipeline.qualify import qualify_lead
 
+    from mazz.pipeline.queue import JobDeferred
+
     session, lead = ctx.session, ctx.lead
+    if lead.sequence_state == "paused" and lead.status == LeadStatus.SENT:
+        # Out of office. Wait out the pause; resume when it has passed.
+        due = lead.next_step_due_at
+        now = datetime.now(timezone.utc)
+        if due is not None and due > now:
+            raise JobDeferred(f"paused until {due.isoformat()}", retry_at=due)
+        lead.sequence_state = "active"
     if lead.status != LeadStatus.SENT or lead.sequence_state != "active":
         log.info("lead %s: follow-up skipped (status=%s, sequence=%s)",
                  lead.id, lead.status.value, lead.sequence_state)

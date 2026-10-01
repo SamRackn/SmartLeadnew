@@ -69,6 +69,10 @@
       </td>
       <td class="mailbox-actions">
         <a href="/mailboxes/{{ row.mailbox.id }}/edit">edit</a>
+        <a href="/mailboxes/{{ row.mailbox.id }}/connect">
+          {% if row.mailbox.status.value == "needs_reconnect" %}<strong>reconnect</strong>
+          {% elif row.mailbox.oauth_refresh_token_enc %}connected
+          {% else %}connect{% endif %}</a>
         <form method="post" action="/mailboxes/{{ row.mailbox.id }}/status" class="inline-form">
           {% if row.mailbox.status.value == "active" %}
             <input type="hidden" name="status" value="paused">

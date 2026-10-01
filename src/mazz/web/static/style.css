@@ -135,6 +135,7 @@ th { background: var(--surface-sunken); }
 .mailbox-active { background: var(--success-bg); color: var(--success-fg); }
 .mailbox-paused { background: var(--surface-muted); color: var(--ink-muted); }
 .mailbox-disabled { background: var(--danger-bg); color: var(--danger-fg); }
+.mailbox-needs_reconnect { background: var(--danger-bg); color: var(--danger-fg); }
 .mailbox-table .muted { display: block; font-size: 0.8rem; }
 .mailbox-actions { white-space: nowrap; }
 .mailbox-actions form { display: inline; }

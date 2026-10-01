@@ -489,6 +489,8 @@ def run_service_worker(
     handlers: Mapping[str, JobHandler] | None = None,
     idle_sleep: float = 2.0,
     reclaim_every: float = 60.0,
+    sync_every: float = 300.0,
+    sync: Callable[[], object] | None = None,
     stale_after: timedelta = DEFAULT_STALE_AFTER,
     should_stop: Callable[[], bool] = lambda: False,
     clock: Callable[[], float] = time.monotonic,
@@ -506,6 +508,7 @@ def run_service_worker(
 
     stats = WorkerStats()
     last_reclaim: float | None = None
+    last_sync: float | None = None
     log.info("worker started (pid %s)", os.getpid())
 
     while not should_stop():
@@ -515,6 +518,13 @@ def run_service_worker(
             if reclaimed:
                 log.warning("reclaimed %d stale job(s)", len(reclaimed))
             last_reclaim = clock()
+
+        if sync is not None and (last_sync is None or clock() - last_sync >= sync_every):
+            last_sync = clock()
+            try:
+                sync()
+            except Exception:  # noqa: BLE001 - reading mail must never stop sending's worker
+                log.exception("reply sync failed")
 
         job = process_next(handlers=handlers, stats=stats)
         if job is None:
@@ -550,7 +560,13 @@ def _cmd_worker(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
     log.info("email sender: %s", get_settings().email_sender)
+    sync = None
+    if get_settings().email_sender == "google":
+        from mazz.pipeline.replies import sync_all
+
+        sync = sync_all  # reply + bounce sync only when mail is live
     run_service_worker(
+        sync=sync,
         idle_sleep=args.idle_sleep,
         reclaim_every=args.reclaim_every,
         stale_after=timedelta(minutes=args.stale_after_minutes),

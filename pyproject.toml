@@ -24,7 +24,7 @@ ai = ["anthropic"]
 # Live sending as the client's own Google Workspace mailboxes. Optional for the
 # same reason `ai` is: the stub sender must keep importing and testing with
 # nothing installed, which is what keeps GmailSender's lazy imports honest.
-google = ["google-api-python-client", "google-auth"]
+google = ["google-api-python-client", "google-auth", "cryptography"]
 # The client's lead lists arrive as spreadsheets. Optional like the others so a
 # CSV-only deployment stays lean, but the web import route declares it needed:
 # openpyxl for .xlsx/.xlsm, xlrd for the legacy .xls some CRMs still emit.

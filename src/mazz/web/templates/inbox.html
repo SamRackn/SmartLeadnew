@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}Inbox{% endblock %}
+
+{% block content %}
+<h1>Inbox</h1>
+<p class="lede">
+  Replies to our emails. The system sorts them and stops sequences; it never
+  decides "interested" &mdash; you tag that, and each later stage, by hand.
+  Showing:
+  <a href="/inbox" {% if show != "all" %}class="active"{% endif %}>needs attention</a> ·
+  <a href="/inbox?show=all" {% if show == "all" %}class="active"{% endif %}>everything</a>
+</p>
+
+{% if overdue_count %}
+<p class="dash-alert">
+  {{ overdue_count }} interested repl{{ "y has" if overdue_count == 1 else "ies have" }} waited
+  more than {{ "%.0f"|format(overdue_hours) }} business hours without being handled.
+</p>
+{% endif %}
+
+{% if not rows %}
+  <p class="empty">Nothing needs attention.</p>
+{% else %}
+<table class="lead-table">
+  <thead>
+    <tr><th>From</th><th>Kind</th><th>Reply</th><th>Waiting</th><th>Stage</th><th></th></tr>
+  </thead>
+  <tbody>
+    {% for r in rows %}
+    <tr {% if r.overdue %}class="dash-alert"{% endif %}>
+      <td>
+        <a href="/leads/{{ r.lead.id }}">{{ r.lead.full_name }}</a><br>
+        <span class="muted">{{ r.lead.company_name or r.lead.company_domain }}</span>
+      </td>
+      <td>
+        <span class="mailbox-tag">{{ r.reply.classification.replace("_", " ") }}</span>
+        {% if r.reply.needs_confirmation %}
+          <br><span class="dash-alert">suppressed automatically &mdash; confirm</span>
+          <form method="post" action="/inbox/{{ r.reply.id }}/confirm" class="inline-form">
+            <button type="submit" class="link-button">confirm</button>
+          </form>
+        {% endif %}
+        {% if r.reply.ooo_return_date %}<br><span class="muted">back {{ r.reply.ooo_return_date }}</span>{% endif %}
+      </td>
+      <td>
+        <details>
+          <summary>{{ (r.reply.body or "(empty)")[:90] }}</summary>
+          <pre style="white-space:pre-wrap">{{ r.reply.body }}</pre>
+        </details>
+      </td>
+      <td>
+        {% if r.age_hours < 1 %}{{ "%.0f"|format(r.age_hours * 60) }}m
+        {% elif r.age_hours < 48 %}{{ "%.0f"|format(r.age_hours) }}h
+        {% else %}{{ "%.0f"|format(r.age_hours / 24) }}d{% endif %}
+        {% if r.overdue %}<strong>overdue</strong>{% endif %}
+      </td>
+      <td>
+        {% for t in tags %}
+        <form method="post" action="/inbox/{{ r.reply.id }}/tag" class="inline-form">
+          <input type="hidden" name="tag" value="{{ t }}">
+          <input type="hidden" name="on" value="{{ '0' if t in r.tags else '1' }}">
+          <button type="submit" class="{{ 'mailbox-tag mailbox-active' if t in r.tags else 'link-button' }}"
+                  title="{{ 'remove' if t in r.tags else 'tag' }} {{ t.replace('_', ' ') }}">{{ t.replace("_", " ") }}</button>
+        </form>
+        {% endfor %}
+      </td>
+      <td>
+        {% if not r.reply.handled_at %}
+        <form method="post" action="/inbox/{{ r.reply.id }}/handled" class="inline-form">
+          <button type="submit" class="link-button">handled</button>
+        </form>
+        {% else %}<span class="muted">handled by {{ r.reply.handled_by }}</span>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

@@ -47,6 +47,7 @@ from mazz.integrations.base import (
 )
 from mazz.integrations.email_sender import (
     EmailSender,
+    MailboxNeedsReconnect,
     OutgoingMessage,
     get_email_sender,
 )
@@ -196,6 +197,21 @@ def send_lead(
             f"draft {draft.id} is not approvable "
             f"(verification_status={draft.verification_status.value}); it must "
             "have been re-drafted or rejected after approval. Refusing to send."
+        )
+
+    # -- the sequence must still be running --------------------------------
+    # A reply, bounce or unsubscribe can land between approve and send.
+    if lead.sequence_state == "stopped":
+        lead.status = LeadStatus.HELD
+        session.flush()
+        raise PermanentJobError(
+            f"lead {lead.id}'s sequence was stopped (reply, bounce or unsubscribe) "
+            "after this was approved; held, not sent."
+        )
+    if lead.sequence_state == "paused" and (lead.next_step_due_at or now) > now:
+        raise JobDeferred(
+            f"lead {lead.id} is paused (out of office) until {lead.next_step_due_at}",
+            retry_at=lead.next_step_due_at,
         )
 
     # -- a previous attempt must be resolved -------------------------------
@@ -478,7 +494,10 @@ def _record_mailbox_failure(session, mailbox: Mailbox, exc: ProviderError) -> No
         # person has looked. Paused, not disabled -- the credential is fine.
         pause_mailbox(mailbox, f"5.7.x rejection at send: {exc}")
         log.error("mailbox %s auto-paused: %s", mailbox.email_address, exc)
-    if isinstance(exc, ProviderAuthError):
+    if isinstance(exc, MailboxNeedsReconnect):
+        mailbox.status = MailboxStatus.NEEDS_RECONNECT
+        log.error("mailbox %s needs reconnect: %s", mailbox.email_address, exc)
+    elif isinstance(exc, ProviderAuthError):
         mailbox.status = MailboxStatus.DISABLED
         log.error(
             "mailbox %s disabled: authentication failed (%s)",

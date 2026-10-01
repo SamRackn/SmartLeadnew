@@ -54,6 +54,7 @@ from mazz.integrations.base import (
 __all__ = [
     "SENT_OUTBOX_FILENAME",
     "GMAIL_SEND_SCOPE",
+    "MailboxNeedsReconnect",
     "OutgoingMessage",
     "SendReceipt",
     "EmailSender",
@@ -72,6 +73,15 @@ GOOGLE_PROVIDER = "google"
 #: this scope can send mail as the mailbox; it cannot read the client's inbox.
 #: The unified inbox will need a read scope later — that is a separate grant.
 GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
+
+
+class MailboxNeedsReconnect(ProviderAuthError):
+    """This mailbox's OAuth grant is gone (revoked, expired, never completed).
+
+    Distinct from a bad credential on the platform side: the fix is a person
+    re-authorising THIS mailbox, so it is marked `needs_reconnect`, not
+    `disabled`, and surfaces on /mailboxes.
+    """
 
 
 class SenderNotConfigured(ProviderAuthError):
@@ -241,17 +251,15 @@ class StubEmailSender(EmailSender):
 class GmailSender(EmailSender):
     """Sends as a Workspace mailbox over the Gmail API.
 
-    Auth is a service account with domain-wide delegation, impersonating the
-    mailbox address (`credentials.with_subject`). Two reasons over SMTP with an
-    app password: the sent copy lands in the mailbox's own Sent folder, so the
-    client sees his outbound where he expects it and a reply threads against
-    something real; and there is no per-mailbox secret to rotate, get revoked,
-    or leak — burner domains usually mean several Workspace tenants, which is
-    why the key is resolved per `credential_ref` rather than once globally.
+    Auth is per-mailbox OAuth (`integrations.google_oauth`): each mailbox's
+    encrypted refresh token lives on its `mailboxes` row, and the Gmail client
+    refreshes its own access token on demand. Sends and reads go out of the
+    mailbox itself, so the sent copy lands in its Sent folder and a reply
+    threads against something real. A revoked or expired grant raises
+    `MailboxNeedsReconnect`, which marks the mailbox `needs_reconnect` and
+    stops it sending.
 
-    `credential_ref` resolves to `GMAIL_SA_<REF>` (uppercased, dashes to
-    underscores), falling back to `GMAIL_SA_DEFAULT`. The value is either a path
-    to the service-account JSON or the JSON itself.
+    `credential_ref` is vestigial: the mailbox address picks the token.
     """
 
     provider = GOOGLE_PROVIDER
@@ -262,60 +270,25 @@ class GmailSender(EmailSender):
         # without a Google account. Nothing else overrides it.
         self._service_factory = service_factory or self._build_service
 
-    # -- credential resolution --------------------------------------------
-
     @staticmethod
-    def _credential_env_name(credential_ref: str) -> str:
-        normalized = credential_ref.strip().upper().replace("-", "_").replace(".", "_")
-        return f"GMAIL_SA_{normalized}"
-
-    def _resolve_credential(self, credential_ref: str) -> str:
-        for name in (self._credential_env_name(credential_ref), "GMAIL_SA_DEFAULT"):
-            value = setting(name)
-            if value:
-                return str(value)
-        raise SenderNotConfigured(
-            f"no Google service-account credential for mailbox credential_ref "
-            f"{credential_ref!r}: set {self._credential_env_name(credential_ref)} "
-            "(or GMAIL_SA_DEFAULT) to the service-account JSON, or to a path to "
-            "it. The key is never stored on the mailbox row.",
-            provider=self.provider,
-            target=credential_ref,
-        )
-
-    def _build_service(self, *, credential_ref: str, mailbox_address: str):
+    def _build_service(*, credential_ref: str, mailbox_address: str):
         try:  # lazy: the stub path must import with nothing installed
-            from google.oauth2 import service_account  # type: ignore
-            from googleapiclient.discovery import build  # type: ignore
+            from mazz.integrations.google_oauth import (
+                OAuthNotConfigured,
+                service_for_mailbox,
+            )
+
+            return service_for_mailbox(mailbox_address)
         except ImportError as exc:  # pragma: no cover - needs the extra absent
             raise SenderNotConfigured(
                 "GmailSender needs the google extra: pip install -e '.[google]'",
-                provider=self.provider,
+                provider=GOOGLE_PROVIDER,
                 target=mailbox_address,
             ) from exc
-
-        raw = self._resolve_credential(credential_ref)
-        try:
-            if raw.lstrip().startswith("{"):
-                info = json.loads(raw)
-                creds = service_account.Credentials.from_service_account_info(
-                    info, scopes=[GMAIL_SEND_SCOPE]
-                )
-            else:
-                creds = service_account.Credentials.from_service_account_file(
-                    raw, scopes=[GMAIL_SEND_SCOPE]
-                )
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
+        except OAuthNotConfigured as exc:
             raise SenderNotConfigured(
-                f"service-account credential for {credential_ref!r} is unreadable "
-                f"or malformed: {exc}",
-                provider=self.provider,
-                target=mailbox_address,
+                str(exc), provider=GOOGLE_PROVIDER, target=mailbox_address
             ) from exc
-
-        # Domain-wide delegation: act as this mailbox, not as the robot.
-        delegated = creds.with_subject(mailbox_address)
-        return build("gmail", "v1", credentials=delegated, cache_discovery=False)
 
     # -- send --------------------------------------------------------------
 
@@ -376,6 +349,16 @@ class GmailSender(EmailSender):
         detail = f"{exc.__class__.__name__}: {exc}"
         target = message.to_address
 
+        from mazz.integrations.google_oauth import is_revoked
+
+        if is_revoked(exc):
+            return MailboxNeedsReconnect(
+                f"Google refused {message.from_address}'s refresh token: {detail}",
+                provider=self.provider,
+                target=target,
+                status_code=status,
+            )
+
         if status in (401, 403):
             # 403 is overloaded: quota exhaustion arrives here too, and that one
             # is worth retrying tomorrow rather than disabling the mailbox over.
@@ -387,9 +370,9 @@ class GmailSender(EmailSender):
                     status_code=status,
                 )
             return ProviderAuthError(
-                f"Gmail refused {message.from_address}: {detail}. Check the "
-                "service account's domain-wide delegation and that "
-                f"{GMAIL_SEND_SCOPE} is authorised for this Workspace.",
+                f"Gmail refused {message.from_address}: {detail}. Check that the "
+                f"mailbox authorised {GMAIL_SEND_SCOPE} and that the Workspace "
+                "admin allows this OAuth app.",
                 provider=self.provider,
                 target=target,
                 status_code=status,
