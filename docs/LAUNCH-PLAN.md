@@ -380,3 +380,23 @@ and the wire still leaves (closing it means holding a transaction across the
 Gmail call); a false-positive unsubscribe/negative has no reversal route (the
 keyword rule is broad, e.g. "please don't stop emailing me" suppresses);
 an `Auto-Submitted` header outranks "remove me" (classed OOO).
+
+### WP6 metric and dashboard (done)
+* `cost_entries` (migration `b9f6d7e8a0c1`): workspace, month (first day,
+  DB-checked), category, amount (≥ 0, DB-checked), note, `entered_by`.
+  Categories: mailboxes/SmartSenders, Google Workspace seats, domains,
+  Smartlead subscription, ZoomInfo allocation, hosting, other.
+* `/costs` (operator only): add / delete entries per month, both attributed
+  in `audit_events`. Amounts parsed to cents, 0–10M.
+* `mazz/metrics.py`: cost per qualified conversation = month's costs ÷ leads
+  tagged `qualified` in that month (by tag date). Secondary: sent, contacted,
+  reply rate (OOO excluded; DSNs are never replies), bounce rate, qualified,
+  booked, showed, won, skipped-unconfirmed, cost per contacted lead. A
+  missing denominator or no costs entered prints "—", never $0.
+* `/dashboard` (operator only) leads with that panel, filterable by month and
+  workspace, beside the client's Smartlead baseline (133 contacted, 6 replies,
+  3 bounces, 0 positive, 0 deals). No open or click tracking.
+* Workspace-scoped users (Sean) reach neither `/costs` nor `/dashboard`.
+* Tests: `tests/test_metrics.py` (by-tag-date counting, undefined-not-zero,
+  workspace scope, month and amount parsing, DB constraints, the costs screen
+  incl. audit, dashboard rendering).

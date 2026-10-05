@@ -1,0 +1,56 @@
+{# Needs: metrics (MonthMetrics), baseline (metrics.BASELINE), categories. Every
+   ratio with no denominator prints an em dash, never an optimistic zero. #}
+{% macro money(v) %}{% if v is none %}&mdash;{% else %}${{ "{:,.2f}".format(v) }}{% endif %}{% endmacro %}
+{% macro pct(v) %}{% if v is none %}&mdash;{% else %}{{ "%.1f"|format(v * 100) }}%{% endif %}{% endmacro %}
+
+<section class="dash-panel metrics-panel">
+  <h2>Cost per qualified conversation &mdash; {{ metrics.month.strftime("%B %Y") }}</h2>
+  <div class="kpi-row">
+    <div class="kpi">
+      <span class="kpi-label">Cost per qualified conversation</span>
+      {% if not metrics.has_costs %}
+        <span class="kpi-value undefined">&mdash;</span>
+        <span class="kpi-note">no costs entered for this month &mdash; <a href="/costs?month={{ metrics.month.strftime('%Y-%m') }}">enter them</a></span>
+      {% elif metrics.cost_per_qualified is none %}
+        <span class="kpi-value undefined">&mdash;</span>
+        <span class="kpi-note">${{ "{:,.2f}".format(metrics.cost_total) }} spent, no conversation tagged qualified yet</span>
+      {% else %}
+        <span class="kpi-value">{{ money(metrics.cost_per_qualified) }}</span>
+        <span class="kpi-note">${{ "{:,.2f}".format(metrics.cost_total) }} &divide; {{ metrics.qualified }} qualified (by date tagged)</span>
+      {% endif %}
+    </div>
+    <div class="kpi">
+      <span class="kpi-label">Cost per contacted lead</span>
+      <span class="kpi-value">{{ money(metrics.cost_per_contacted) }}</span>
+      <span class="kpi-note">secondary &mdash; {{ metrics.contacted }} contacted</span>
+    </div>
+  </div>
+
+  <table class="dash-table">
+    <thead><tr><th></th><th>This month</th><th>{{ baseline.label }}</th></tr></thead>
+    <tbody>
+      <tr><td>Contacted leads</td><td>{{ metrics.contacted }}</td><td>{{ baseline.contacted }}</td></tr>
+      <tr><td>Emails sent</td><td>{{ metrics.sent }}</td><td>&mdash;</td></tr>
+      <tr><td>Unique replies (genuine, not out-of-office)</td><td>{{ metrics.unique_replies }} ({{ pct(metrics.reply_rate) }})</td><td>{{ baseline.unique_replies }} ({{ pct(baseline.reply_rate) }})</td></tr>
+      <tr><td>Bounces</td><td>{{ metrics.bounces }} ({{ pct(metrics.bounce_rate) }})</td><td>{{ baseline.bounces }} ({{ pct(baseline.bounce_rate) }})</td></tr>
+      <tr><td>Interested (tagged by a person)</td><td>{{ metrics.stages.get("interested", 0) }}</td><td>{{ baseline.positive }}</td></tr>
+      <tr><td>Qualified conversations</td><td>{{ metrics.stages.get("qualified", 0) }}</td><td>&mdash;</td></tr>
+      <tr><td>Meetings booked</td><td>{{ metrics.stages.get("meeting_booked", 0) }}</td><td>&mdash;</td></tr>
+      <tr><td>Meetings showed</td><td>{{ metrics.stages.get("meeting_showed", 0) }}</td><td>&mdash;</td></tr>
+      <tr><td>Clients won</td><td>{{ metrics.stages.get("client_won", 0) }}</td><td>{{ baseline.deals }}</td></tr>
+      <tr><td>Skipped: vertical unconfirmed (to date)</td><td>{{ metrics.skipped_unconfirmed }}</td><td>&mdash;</td></tr>
+    </tbody>
+  </table>
+  <p class="hint">
+    Qualified = a genuine response from a law-firm decision-maker showing enough
+    interest to discuss the services; a person tags it, the system never does.
+    Counted in the month it was tagged. {{ baseline.note }}
+  </p>
+
+  {% if metrics.has_costs %}
+  <p class="hint">
+    Costs this month:
+    {% for key, total in metrics.cost_by_category.items() %}{{ categories.get(key, key) }} {{ money(total) }}{% if not loop.last %} · {% endif %}{% endfor %}.
+  </p>
+  {% endif %}
+</section>

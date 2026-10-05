@@ -48,7 +48,9 @@ from mazz.models import (
     SentMessage,
     SequenceStep,
     VerificationStatus,
+    Workspace,
 )
+from mazz.metrics import BASELINE, COST_CATEGORIES, month_metrics, parse_month
 from mazz.pipeline.mailbox import day_window, headroom, sent_today
 from mazz.pipeline.queue import DEFAULT_STALE_AFTER
 from mazz.pipeline.sequence import COMPANY_CAP_MARKER, LIVE_STATES
@@ -156,10 +158,19 @@ def _error_excerpt(last_error: str | None) -> str:
 @router.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(
     request: Request,
+    month: str | None = None,
+    workspace: str | None = None,
     session: Session = Depends(get_session),
     user: str = Depends(current_user),
 ):
     templates = _templates(request)
+
+    # The client's own metric first: cost per qualified conversation for the
+    # chosen month (default this one) and workspace (default all).
+    metrics_month = parse_month(month)
+    workspace_id = int(workspace) if (workspace or '').isdigit() else None  # '' = all
+    metrics = month_metrics(session, metrics_month, workspace_id=workspace_id)
+    workspaces = list(session.execute(select(Workspace).order_by(Workspace.name)).scalars())
 
     # ----------------------------------------------------------------
     # Pipeline: leads by status. Always rendered, even at zero — an empty
@@ -462,6 +473,12 @@ async def dashboard(
             "remaining_capacity_today": remaining_capacity_today,
             "approved_waiting": approved_waiting,
             "backlog_days": backlog_days,
+            "metrics": metrics,
+            "baseline": BASELINE,
+            "categories": COST_CATEGORIES,
+            "metrics_month": f"{metrics_month:%Y-%m}",
+            "metrics_workspace": workspace_id,
+            "workspaces": workspaces,
             "seq_len": seq_len,
             "sends_remaining": sends_remaining,
             "drain_days": drain_days,

@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}Costs — MazzSmartLead Review{% endblock %}
+{% block content %}
+<h1>Costs</h1>
+<p class="lede">
+  What the client actually spends, by month. These are the numerator of cost per
+  qualified conversation; the denominator is the conversations a person tags
+  <em>qualified</em> in the inbox. Nothing here is estimated.
+</p>
+
+<form method="get" action="/costs" class="inline-form">
+  <label>Month <input type="month" name="month" value="{{ month_value }}"></label>
+  <button type="submit">show</button>
+</form>
+
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+{% include "partials/metrics_panel.html" %}
+
+<section class="dash-panel">
+  <h2>Entries for {{ month.strftime("%B %Y") }}</h2>
+  {% if entries %}
+  <table class="dash-table">
+    <thead><tr><th>Workspace</th><th>Category</th><th>Amount</th><th>Note</th><th>Entered by</th><th></th></tr></thead>
+    <tbody>
+      {% for e in entries %}
+      <tr>
+        <td>{{ workspace_names.get(e.workspace_id, e.workspace_id) }}</td>
+        <td>{{ categories.get(e.category, e.category) }}</td>
+        <td>${{ "{:,.2f}".format(e.amount) }}</td>
+        <td>{{ e.note or "" }}</td>
+        <td>{{ e.entered_by }}</td>
+        <td>
+          <form method="post" action="/costs/{{ e.id }}/delete" class="inline-form">
+            <button type="submit" class="link-button">delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <p class="empty">No costs entered for this month.</p>
+  {% endif %}
+</section>
+
+<section class="dash-panel">
+  <h2>Add a cost</h2>
+  <form method="post" action="/costs" class="entity-form">
+    <input type="hidden" name="month" value="{{ month_value }}">
+    <label>Workspace
+      <select name="workspace_id" required>
+        {% for w in workspaces %}<option value="{{ w.id }}">{{ w.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Category
+      <select name="category" required>
+        {% for key, label in categories.items() %}<option value="{{ key }}">{{ label }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Amount (USD)
+      <input type="text" name="amount" inputmode="decimal" placeholder="70.00" required>
+    </label>
+    <label>Note
+      <input type="text" name="note" placeholder="invoice, allocation basis, ...">
+    </label>
+    <button type="submit">Add</button>
+  </form>
+  <p class="hint">
+    The Smartlead subscription still counts: it hosts warmup and the SmartSenders
+    mailboxes, which cannot be moved. Enter it; "keep paying the third party" is
+    a valid answer only if it is reported honestly.
+  </p>
+</section>
+{% endblock %}

@@ -40,6 +40,7 @@ Tenancy boundary:
 from __future__ import annotations
 
 import enum
+from decimal import Decimal
 from datetime import date, datetime
 
 from sqlalchemy import (
@@ -1192,6 +1193,35 @@ class ReplyTag(Base):
     tagged_at: Mapped[datetime] = _utcnow_column(nullable=False, server_default=func.now())
 
     __table_args__ = (UniqueConstraint("reply_id", "tag", name="uq_reply_tags_reply_id_tag"),)
+
+
+class CostEntry(Base):
+    """A real cost the client reports for one workspace and month.
+
+    Manual on purpose: the costs that matter (mailboxes, Workspace seats,
+    domains, ZoomInfo allocation, hosting, the Smartlead subscription that
+    still hosts warmup) live on other people's invoices. `month` is the first
+    day of the month the cost belongs to. Together with the human tags on
+    replies this is all cost per qualified conversation is made of.
+    """
+
+    __tablename__ = "cost_entries"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    month: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    category: Mapped[str] = mapped_column(String(32), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    note: Mapped[str | None] = mapped_column(Text)
+    entered_by: Mapped[str] = mapped_column(String(320), nullable=False)
+    created_at: Mapped[datetime] = _utcnow_column(nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("amount >= 0", name="amount_not_negative"),
+        CheckConstraint("extract(day from month) = 1", name="month_is_first_day"),
+    )
 
 
 class Job(Base):

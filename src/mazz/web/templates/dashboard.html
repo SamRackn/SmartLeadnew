@@ -3,9 +3,23 @@
 {% block content %}
 <h1>Dashboard</h1>
 <p class="rationale">
-  Read-only. Leads with cost per usable lead, because it is the primary objective —
-  everything else here is where that cost is coming from.
+  Read-only. Leads with cost per qualified conversation (the client's measure);
+  cost per usable lead is the secondary number further down, and everything else
+  here is where those costs come from.
 </p>
+
+<form method="get" action="/dashboard" class="inline-form">
+  <label>Month <input type="month" name="month" value="{{ metrics_month }}"></label>
+  <label>Workspace
+    <select name="workspace">
+      <option value="">all</option>
+      {% for w in workspaces %}<option value="{{ w.id }}" {% if w.id == metrics_workspace %}selected{% endif %}>{{ w.name }}</option>{% endfor %}
+    </select>
+  </label>
+  <button type="submit">show</button>
+  · <a href="/costs?month={{ metrics_month }}">enter costs</a>
+</form>
+{% include "partials/metrics_panel.html" %}
 
 {# Headline numbers. Each one is also explained by a panel below; these exist
    so the four questions asked most often do not need scrolling. Every value
