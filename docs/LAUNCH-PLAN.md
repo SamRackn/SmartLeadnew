@@ -400,3 +400,96 @@ an `Auto-Submitted` header outranks "remove me" (classed OOO).
 * Tests: `tests/test_metrics.py` (by-tag-date counting, undefined-not-zero,
   workspace scope, month and amount parsing, DB constraints, the costs screen
   incl. audit, dashboard rendering).
+
+### WP7 cutover from Smartlead (built; not run against real exports)
+`python -m mazz.ingest.smartlead` (CLI only). Every command is a dry run
+unless given `--commit`; it does the work in a transaction and rolls it back.
+
+| Command | Export | Effect |
+|---|---|---|
+| `suppression <csv>` | (a) unsubscribes + bounces | global email suppression (`public.suppress_email`) |
+| `exclusions <csv> --workspace <slug>` | (c) Sean's clients, named companies | suppression scoped to that workspace; a row with a company name but no domain/email is listed, not guessed |
+| `leads <csv> --campaign <id>` | (b) campaign lead export | see below; prints counts, flags a mismatch with 864 / 133 / 731 / 124 / 7 / 2 |
+| `adopt` | — | adopts each live legacy lead's Gmail thread (read-only search), then queues its follow-up |
+
+**Run order at cutover:** `suppression` → `exclusions` → `leads` (each dry,
+then `--commit`) → Maaz detaches the mailboxes from the Smartlead campaign
+(gate 6) → mailboxes connected (gate 3) → `adopt --commit`.
+
+**Lead mapping** (`smartlead.NEXT_STEP_AFTER`, one dict Maaz can edit):
+not started → the normal import path (suppression gate, routing pinned to the
+campaign, enrich job). Contacted → lead at `sent` with a `legacy`
+`sent_messages` row and **no job**: received 1 → next is FU1 (+3 days from the
+last send), 2 → FU2 (+4 days), 3+ → `complete`; replied or blocked →
+`stopped`; contacted with no sent count → `stopped`, `legacy_step_unknown`.
+Suppressed (global or workspace) → not imported. Unknown status with no sent
+count → not imported (it may have been emailed). A contacted row that fails
+validation is printed as `MUST_FIX`: a later ZoomInfo import could otherwise
+give that person Email 1. Re-running is idempotent.
+
+Deviation from the plan: the plan said `sequence_step = N + 1` to make the
+draft guard refuse Email 1. The code's meaning of `sequence_step` is "step of
+the newest email", and `handle_followup` adds one, so N + 1 would skip a
+step. It is set to the step already sent; the guard is the legacy sent row,
+which `draft.persist_draft` already refuses on (`thread_parent`).
+
+**Threads.** Smartlead sent from our four mailboxes, so we hold no Gmail ids.
+`adopt` searches each connected mailbox `in:sent to:<email>
+subject:"Quick Question"` with `gmail.readonly`, records every message of the
+newest thread as legacy `sent_messages` (thread id, Message-ID, mailbox),
+reads the thread once so a reply that landed before cutover stops the
+sequence, then queues the follow-up at its due date. Not found, or found in
+two mailboxes → `held` with `skip_reason` `legacy_thread_not_found` /
+`legacy_thread_ambiguous`. Independently, `send.send_lead` refuses and holds
+any follow-up whose parent has no thread id or Message-ID, so no unthreaded
+"Re: Quick Question" can leave by any path. After adoption, reply sync sees
+replies on those threads like any other.
+
+**Research.** Legacy leads were never enriched. `handle_followup` now
+researches the company first when it has no cache row (an outage retries; a
+blocked site falls to the lead-record fallback), so the vertical gate applies
+to follow-ups exactly as before.
+
+Legacy sends are excluded from `metrics` (they are Smartlead's baseline).
+
+**Unconfirmed until the real exports arrive** (`smartlead.COLUMNS`, one dict):
+status `status` / `lead_status`; sent count `last_email_sequence_sent` /
+`emails_sent` / `sequence_step` / `sent_count`; last sent `last_sent_time` /
+`last_email_sent_at` / `last_sent_at` / `last_sent` (ISO 8601; adoption
+replaces it with Gmail's date); replied `reply_count` / `replied` /
+`is_replied` / `replies`; exclusion domain `domain` / `company_domain` /
+`website` / `company_url`. Status values assumed: `NOT_STARTED` / `NOT_YET_CONTACTED`
+(the only "fresh" ones), `INPROGRESS`/`PAUSED`, `COMPLETED`,
+`BLOCKED`/`STOPPED`; anything else is legacy with a sent count, refused
+without one. Lead fields (name,
+email, company, website) go through the existing alias table. Run each
+command dry against the real file first; a mismatch in the counts is the
+signal a header is wrong.
+
+**Audit of WP7 (compliance-auditor, 2026-10-05).** No critical. Fixed:
+(HIGH) an ambiguous status ("Started") was treated as not started, and the
+CLI committed regardless of mismatches. Now only an unambiguous "not
+started" is fresh; an export with no recognisable status or sent-count
+column aborts; `--commit` refuses (exit 2) on any count mismatch,
+`MUST_FIX`, `refused` or `unknown_status` row unless `--accept-mismatch` is
+given. (MEDIUM) the send step now refuses Email 1 for any lead with a sent
+row on record, so an Email 1 drafted before the import can't leave; `adopt`
+re-checks suppression and stops a lead suppressed since import instead of
+queueing it; a contacted row that fails validation blocks the commit.
+(LOW) the suppression read is in a savepoint; an out-of-office found at
+adoption pauses and resumes instead of stopping; a blocked site found on a
+follow-up is recorded on the cache row; Smartlead sends and replies to them
+are kept out of our sent / reply-rate / dashboard numbers; the held message
+names `ops resolve-send` rows too.
+Open (low): `NEXT_STEP_AFTER` is a dict in code, as the plan asked, not a
+DB setting.
+
+Tests: `tests/test_smartlead_cutover.py` (state mapping, zero legacy leads
+reach Email 1, suppressed/replied never queued, idempotent re-run, scoped
+exclusions, an unadopted follow-up is held not sent, adoption threads FU1
+under the Smartlead Message-ID from the same mailbox, holds the lost, stops
+on a pre-cutover reply, a reply on an adopted thread stops the sequence,
+an unresearched legacy follow-up is researched and fails closed, legacy sends
+not counted in metrics, "Started" / missing headers never look fresh, the
+commit gate, a workspace block keeps a contacted lead out, suppression after
+import stops at adoption, an old Email 1 draft cannot be sent).

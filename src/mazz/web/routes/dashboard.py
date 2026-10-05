@@ -391,11 +391,12 @@ async def dashboard(
     # ----------------------------------------------------------------
     day_start, _day_end = day_window(now)
 
+    ours = SentMessage.legacy.is_(False)  # Smartlead's sends are not ours
     total_sent = session.execute(
-        select(func.count(SentMessage.id))
+        select(func.count(SentMessage.id)).where(ours)
     ).scalar_one()
     sent_today_total = session.execute(
-        select(func.count(SentMessage.id)).where(SentMessage.sent_at >= day_start)
+        select(func.count(SentMessage.id)).where(ours, SentMessage.sent_at >= day_start)
     ).scalar_one()
 
     mailboxes = (

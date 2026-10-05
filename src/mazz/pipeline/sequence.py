@@ -18,7 +18,15 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 
-from mazz.models import Campaign, Draft, Lead, LeadStatus, SentMessage, SequenceStep
+from mazz.models import (
+    Campaign,
+    Draft,
+    Lead,
+    LeadStatus,
+    ResearchCache,
+    SentMessage,
+    SequenceStep,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from sqlalchemy.orm import Session
@@ -237,6 +245,21 @@ def handle_followup(ctx: "JobContext") -> None:
         lead.sequence_state = "complete"
         lead.next_step_due_at = None
         return
+
+    # A lead first emailed by Smartlead was never researched here; the premise
+    # check below needs its own pages, exactly as Email 1 would have.
+    if lead.company_domain and session.get(ResearchCache, lead.company_domain) is None:
+        from mazz.integrations.base import ProviderBlocked
+        from mazz.pipeline.enrich import enrich_lead
+
+        try:
+            enrich_lead(session, lead)  # an outage raises: the job retries
+        except ProviderBlocked as exc:
+            # Refused us: recorded as blocked, and qualify's lead-record
+            # fallback decides, as for Email 1.
+            cache = session.get(ResearchCache, lead.company_domain)
+            if cache is not None:
+                cache.last_error = f"{exc.__class__.__name__}: {exc}"[:4000]
 
     # Same premise as Email 1: if the lead no longer qualifies, stop.
     result = qualify_lead(session, lead)

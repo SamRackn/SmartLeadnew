@@ -1005,8 +1005,15 @@ class SentMessage(Base):
     lead_id: Mapped[int] = mapped_column(
         ForeignKey("leads.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    draft_id: Mapped[int] = mapped_column(
-        ForeignKey("drafts.id", ondelete="CASCADE"), nullable=False, index=True
+    #: NULL only on a ``legacy`` row: Smartlead sent it, not one of our drafts.
+    draft_id: Mapped[int | None] = mapped_column(
+        ForeignKey("drafts.id", ondelete="CASCADE"), index=True
+    )
+    #: Sent by Smartlead before cutover (`mazz.ingest.smartlead`). It exists so
+    #: Email 1 is never sent twice and, once its Gmail thread is adopted, so
+    #: follow-ups thread and reply sync sees the replies. Not counted in metrics.
+    legacy: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
     )
     #: SET NULL, not CASCADE: removing a mailbox from the roster must not
     #: erase the evidence of what it sent while it was on it.
@@ -1035,7 +1042,7 @@ class SentMessage(Base):
     )
 
     lead: Mapped["Lead"] = relationship()
-    draft: Mapped["Draft"] = relationship()
+    draft: Mapped["Draft | None"] = relationship()
     mailbox: Mapped[Mailbox | None] = relationship(back_populates="sent_messages")
 
     __table_args__ = (

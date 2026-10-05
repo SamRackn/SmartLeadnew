@@ -309,19 +309,34 @@ def send_lead(
             )
 
     # -- pick a mailbox ----------------------------------------------------
-    thread = (
-        session.execute(
-            select(SentMessage)
-            .where(SentMessage.lead_id == lead.id)
-            .order_by(SentMessage.sent_at, SentMessage.id)
-        ).scalars().all()
-        if (draft.step or 1) > 1
-        else []
-    )
+    thread = session.execute(
+        select(SentMessage)
+        .where(SentMessage.lead_id == lead.id)
+        .order_by(SentMessage.sent_at, SentMessage.id)
+    ).scalars().all()
+    if (draft.step or 1) == 1 and thread:
+        # Email 1 exactly once, here too: the draft stage refuses it, but a
+        # draft written before the lead was recorded as emailed (a Smartlead
+        # import, a hand-resolved send) can still be approved.
+        _hold(session, lead)
+        raise PermanentJobError(
+            f"lead {lead.id} has already been emailed ({len(thread)} message(s) on "
+            "record); refusing to send Email 1 again. Held."
+        )
     if (draft.step or 1) > 1 and not thread:
         raise PermanentJobError(
             f"draft {draft.id} is follow-up step {draft.step} but nothing was ever "
             f"sent to lead {lead.id}; refusing to send a follow-up with no thread"
+        )
+    if thread and not (thread[-1].provider_thread_id and thread[-1].rfc_message_id):
+        # A Smartlead send whose Gmail thread was never adopted: an unthreaded
+        # "Re: Quick Question" reads as spam and its replies would go unseen.
+        _hold(session, lead)
+        raise PermanentJobError(
+            f"lead {lead.id}'s last email has no Gmail thread on record: a Smartlead "
+            "send not yet adopted (`python -m mazz.ingest.smartlead adopt`), or a send "
+            "resolved by hand with `ops resolve-send`, whose thread must be continued "
+            "by hand from the mailbox. Held."
         )
     try:
         mailbox = select_mailbox(

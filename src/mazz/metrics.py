@@ -147,8 +147,9 @@ def month_metrics(
         m.cost_by_category[category] = Decimal(total)
     m.cost_total = sum(m.cost_by_category.values(), Decimal("0"))
 
+    # Smartlead's own sends are its baseline, not ours.
     in_month = (SentMessage.sent_at >= start, SentMessage.sent_at < end,
-                SentMessage.lead_id.in_(leads))
+                SentMessage.lead_id.in_(leads), SentMessage.legacy.is_(False))
     m.sent = session.execute(select(func.count(SentMessage.id)).where(*in_month)).scalar_one()
     m.contacted = session.execute(
         select(func.count(distinct(SentMessage.lead_id))).where(*in_month)
@@ -156,14 +157,16 @@ def month_metrics(
     m.bounces = session.execute(
         select(func.count(SentMessage.id)).where(
             SentMessage.bounced_at >= start, SentMessage.bounced_at < end,
-            SentMessage.lead_id.in_(leads),
+            SentMessage.lead_id.in_(leads), SentMessage.legacy.is_(False),
         )
     ).scalar_one()
-    # Genuine replies only: an out-of-office is not a response.
+    # Genuine replies only: an out-of-office is not a response. And only from
+    # someone we emailed, so a reply to Smartlead's mail has no denominator here.
     m.unique_replies = session.execute(
         select(func.count(distinct(Reply.lead_id))).where(
             Reply.received_at >= start, Reply.received_at < end,
             Reply.classification != "ooo", Reply.lead_id.in_(leads),
+            Reply.lead_id.in_(select(SentMessage.lead_id).where(SentMessage.legacy.is_(False))),
         )
     ).scalar_one()
 
