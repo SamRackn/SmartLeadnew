@@ -493,3 +493,51 @@ an unresearched legacy follow-up is researched and fails closed, legacy sends
 not counted in metrics, "Started" / missing headers never look fresh, the
 commit gate, a workspace block keeps a contacted lead out, suppression after
 import stops at adoption, an old Email 1 draft cannot be sent).
+
+### WP8 deploy and verification (built)
+**DNS** — `python scripts/verify_dns.py <domain>... [--selector X]`: exactly one
+SPF record including `_spf.google.com`; a DKIM key at selector `google` (or
+any `--selector`; reported per selector); a DMARC record, policy printed.
+Exit 1 on any failure. Uses `nslookup -type=TXT`, no new dependency
+(`dnspython` not added). **Run 2026-10-05: both getsearchsitemarketing.com
+and searchsitemarketinghub.com pass** — SPF `include:_spf.google.com ~all`,
+DKIM `google` key present, DMARC `p=reject` (aspf/adkim relaxed). That is
+half of gate 5; the rehearsal headers are the other half.
+
+**Rehearsal** — `python scripts/rehearsal.py --seeds a@x,b@y [--wait 120]`.
+Refuses unless `SEND_ENABLED=true`, `EMAIL_SENDER=google` and seeds are
+given. Sends one message per active connected mailbox (seeds round-robin,
+never a mailbox to itself), then reads each copy back through the Gmail
+reader and prints `Authentication-Results` when the seed is one of our
+connected mailboxes; for an outside seed it says what to check by hand. No
+lead, draft, job or `sent_messages` row is touched (these few messages are not
+counted against the cap). Only the refusals are tested; it cannot run before
+gates 2 and 3.
+
+**Hosting: Render** (Fly.io would work the same way: two process groups in
+`fly.toml`). The app is one FastAPI web process plus one long-running worker;
+Vercel-style serverless cannot host the worker. `render.yaml` replaces
+`scripts/launchd.sh` (deleted):
+
+| Service | Start command |
+|---|---|
+| web | `uvicorn mazz.web.app:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips "*"`, pre-deploy `alembic upgrade head`, health check `/health` |
+| worker | `python -m mazz.ops worker` (confirmed in `ops.py`: SIGTERM finishes the current job; reply sync runs inside it only when `EMAIL_SENDER=google`) — exactly ONE instance |
+| database | Render managed Postgres; `DATABASE_URL` from the database (`config.py` now maps `postgres://` to the psycopg 3 driver) |
+
+Secrets are `sync: false` and entered in the Render dashboard. Sending ships
+off (`SEND_ENABLED=false`, `EMAIL_SENDER=stub`). Point
+`outreach.getsearchsitemarketing.com` at the web service and set
+`UNSUBSCRIBE_HOST` to it (that host then serves only `/u/*` and `/health`);
+`APP_BASE_URL` is the app's own host, and the Google OAuth redirect URI is
+`<APP_BASE_URL>/oauth/google/callback`.
+Not carried over from launchd: `ops backup` writes `pg_dump` to local disk,
+which is ephemeral on Render. Use Render's managed Postgres backups instead,
+and run `ops health --no-backup-check`. `health --notify` is a macOS
+notification, so on a host the alerts have no channel yet (open: wire it to
+email when it matters). Not verified against a Render account (no hosting
+account yet — an input still needed).
+
+Tests: `tests/test_deploy_scripts.py` (TXT parsing on recorded Windows and
+Linux output, split DKIM strings, SPF/DKIM/DMARC failure cases, any-selector
+pass, rehearsal refusals, no self-send, host database URL mapping).

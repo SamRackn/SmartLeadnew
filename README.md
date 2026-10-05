@@ -143,8 +143,10 @@ whose name does not end in `_test`.
 .venv/bin/python -m mazz.ops health --notify   # exit 1 + macOS notification if anything needs a human
 .venv/bin/python -m mazz.ops backup            # pg_dump, verified with pg_restore --list, keeps 14
 .venv/bin/python -m mazz.ops resolve-send LEAD_ID --sent | --not-sent
-scripts/launchd.sh install                     # all three on a schedule, as LaunchAgents
 ```
+
+Hosted: `render.yaml` (Render blueprint) runs the web app and ONE worker
+against managed Postgres; see `docs/LAUNCH-PLAN.md` "WP8".
 
 `health` reports, most urgent first: a send that may have gone out with no
 record, a mailbox the system disabled, a queue no worker is draining, jobs

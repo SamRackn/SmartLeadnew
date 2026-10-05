@@ -17,8 +17,10 @@ change the environment should call ``reload_settings()`` afterwards.
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_DATABASE_URL = "postgresql+psycopg://localhost/mazz_dev"
@@ -36,6 +38,13 @@ class Settings(BaseSettings):
 
     # --- Postgres -------------------------------------------------------
     database_url: str = DEFAULT_DATABASE_URL
+
+    @field_validator("database_url")
+    @classmethod
+    def _psycopg3(cls, url: str) -> str:
+        # Hosts (Render, Fly) hand out postgres:// or postgresql://, which
+        # SQLAlchemy maps to psycopg2; only psycopg 3 is installed.
+        return re.sub(r"^postgres(?:ql)?://", "postgresql+psycopg://", url)
 
     # --- Review app -----------------------------------------------------
     session_secret: str = "changeme"
