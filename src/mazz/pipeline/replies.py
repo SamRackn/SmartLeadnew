@@ -125,11 +125,12 @@ def is_auto_reply(headers: dict[str, str], subject: str) -> bool:
 
 
 def classify(headers: dict[str, str], subject: str, own_text: str) -> Classification:
+    # An opt-out outranks the auto-reply headers: "remove me" sent from a
+    # client that stamps Auto-Submitted is still a person asking to stop.
+    if _UNSUB.search(own_text[:600]):
+        return Classification(UNSUBSCRIBE, needs_confirmation=True)
     if is_auto_reply(headers, subject):
         return Classification(OOO)
-    head = own_text[:600]
-    if _UNSUB.search(head):
-        return Classification(UNSUBSCRIBE, needs_confirmation=True)
     if len(own_text) <= NEGATIVE_MAX_CHARS and _NEGATIVE.search(own_text):
         return Classification(NEGATIVE)
     return Classification(NEEDS_REVIEW)
@@ -233,6 +234,11 @@ def _stop(lead: Lead) -> None:
         lead.status = LeadStatus.HELD
 
 
+#: `added_by` on a suppression this module made from a reply's wording. The
+#: only kind the inbox's "lift" may remove: a keyword rule can be wrong.
+AUTO_SUPPRESSED_BY = "system:reply-sync"
+
+
 def _suppress(session, email: str, reason: str) -> None:
     from mazz.ingest.csv_import import email_sha256
 
@@ -245,7 +251,7 @@ def _suppress(session, email: str, reason: str) -> None:
         session.add(
             SuppressionEntry(
                 email=address, email_sha256=email_sha256(address), reason=reason,
-                added_by="system:reply-sync",
+                added_by=AUTO_SUPPRESSED_BY,
             )
         )
 

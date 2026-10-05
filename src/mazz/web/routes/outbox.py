@@ -114,6 +114,18 @@ def _roster(session: Session, *, now: datetime) -> list[RosterRow]:
     ]
 
 
+def _sequence_block(lead: Lead, *, now: datetime | None = None) -> str | None:
+    """A reply, bounce or unsubscribe stopped the sequence, or an out-of-office
+    paused it, since approval. The send step refuses either; say so first."""
+
+    now = now or datetime.now(timezone.utc)
+    if lead.sequence_state == "stopped":
+        return "sequence stopped since approval (a reply, bounce or unsubscribe)"
+    if lead.sequence_state == "paused" and (lead.next_step_due_at or now) > now:
+        return f"paused (out of office) until {lead.next_step_due_at:%Y-%m-%d %H:%M} UTC"
+    return None
+
+
 def _blocked_reason(session: Session, lead: Lead, draft: Draft | None) -> str | None:
     """The first reason this message cannot go out, or None."""
 
@@ -124,6 +136,9 @@ def _blocked_reason(session: Session, lead: Lead, draft: Draft | None) -> str | 
             f"verification is {draft.verification_status.value}, not passed — "
             "it was re-drafted or rejected after approval"
         )
+    stopped = _sequence_block(lead)
+    if stopped:
+        return stopped
     try:
         match = SuppressionChecker(session).check_lead(lead)
         if match is not None:
@@ -248,6 +263,13 @@ async def release_one(
     # lead sitting in /outbox as approved-but-blocked, to be retried forever.
     # The hold is the durable half of the refusal, so it is committed before
     # the exception is raised, not flushed and hoped for.
+    blocked = _sequence_block(lead)
+    if blocked:
+        if lead.sequence_state == "stopped":
+            lead.status = LeadStatus.HELD  # as the send step would; committed, see below
+            session.commit()
+        raise HTTPException(status_code=409, detail=f"lead {lead_id}: {blocked}. Not released.")
+
     try:
         match = SuppressionChecker(session).check_lead(lead)
     except SuppressionUnavailable as exc:

@@ -40,6 +40,14 @@
             <button type="submit" class="link-button">confirm</button>
           </form>
         {% endif %}
+        {% if operator and r.reply.classification == "unsubscribe_request" %}
+          <details><summary class="muted">wrong? lift suppression</summary>
+            <form method="post" action="/inbox/{{ r.reply.id }}/lift" class="inline-form">
+              <input name="confirm" placeholder="type LIFT" autocomplete="off" required size="8">
+              <button type="submit" class="link-button">lift</button>
+            </form>
+          </details>
+        {% endif %}
         {% if r.reply.ooo_return_date %}<br><span class="muted">back {{ r.reply.ooo_return_date }}</span>{% endif %}
       </td>
       <td>

@@ -381,6 +381,20 @@ Gmail call); a false-positive unsubscribe/negative has no reversal route (the
 keyword rule is broad, e.g. "please don't stop emailing me" suppresses);
 an `Auto-Submitted` header outranks "remove me" (classed OOO).
 
+### WP5 audit items closed (2026-10-05)
+* An opt-out outranks auto-reply headers: "remove me" from a client that
+  stamps `Auto-Submitted` is classed `unsubscribe_request` and suppresses.
+* Lifting a false-positive auto-unsubscribe: operator only, on the inbox
+  item, typed `LIFT` to confirm, audited as `lift_suppression`. It removes
+  only the global row reply sync made from that reply's wording (`added_by =
+  system:reply-sync`); a row a person, an import, a bounce or the unsubscribe
+  link added is never lifted, nor this one if the person also used the link.
+  The sequence stays stopped.
+* `/outbox` shows a stopped or paused lead as blocked, and release refuses it
+  (stopped: held; paused: left approved until the pause ends).
+* Still open (low, accepted): outbox mailbox header visible to scoped users,
+  `sent_outbox.jsonl` not erased on delete, the attempt-to-wire race.
+
 ### WP6 metric and dashboard (done)
 * `cost_entries` (migration `b9f6d7e8a0c1`): workspace, month (first day,
   DB-checked), category, amount (≥ 0, DB-checked), note, `entered_by`.

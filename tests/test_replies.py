@@ -141,6 +141,9 @@ QUOTED = (
         ({}, "Re: Quick Question", "Please unsubscribe me.", R.UNSUBSCRIBE),
         ({}, "Re: Quick Question", "Remove me from your list\n" + QUOTED, R.UNSUBSCRIBE),
         ({}, "Re: Quick Question", "stop emailing me", R.UNSUBSCRIBE),
+        # an opt-out outranks auto-reply headers: still a person asking to stop
+        ({"auto-submitted": "auto-replied"}, "Automatic reply: Quick Question",
+         "Remove me from your list.", R.UNSUBSCRIBE),
         ({}, "Re: Quick Question", "Not interested, thanks.", R.NEGATIVE),
         ({}, "Re: Quick Question", "We're all set.\n" + QUOTED, R.NEGATIVE),
         # long: a conversation, not a brush-off
@@ -786,3 +789,64 @@ def test_send_sees_a_stop_committed_by_another_session(session, tmp_path):
         other.commit()
     with pytest.raises(PermanentJobError, match="stopped"):
         send_lead(session, lead, sender=Recording(tmp_path), now=TUE)  # stale copy says active/None
+
+
+# --------------------------------------------------------------------------
+# Open WP5 audit items closed in the launch plan's Task 4
+# --------------------------------------------------------------------------
+
+
+def test_only_an_operator_can_lift_an_automatic_unsubscribe_and_only_that_kind(session, tmp_path):
+    lead, box, sent = sent_lead(session, tmp_path)
+    inbound(session, box, sent, lead, "Please don't stop emailing me, this is useful")
+    session.commit()
+    reply = session.execute(select(Reply)).scalar_one()
+    assert reply.classification == R.UNSUBSCRIBE  # the broad keyword rule, wrong here
+    auto = select(SuppressionEntry).where(SuppressionEntry.email == lead.email)
+    assert session.execute(auto).scalar_one().added_by == R.AUTO_SUPPRESSED_BY
+
+    ensure_account("maaz@example.test")
+    ensure_account("sean@example.test", operator=False, workspace_ids=(lead.campaign.workspace_id,))
+    sean = login(TestClient(create_app()), "sean@example.test")
+    assert sean.post(f"/inbox/{reply.id}/lift", data={"confirm": "LIFT"}).status_code == 403
+    maaz = login(TestClient(create_app()), "maaz@example.test")
+    assert "lift suppression" in maaz.get("/inbox").text
+    assert maaz.post(f"/inbox/{reply.id}/lift", data={"confirm": ""}).status_code == 400
+    resp = maaz.post(f"/inbox/{reply.id}/lift", data={"confirm": "LIFT"}, follow_redirects=False)
+    assert resp.status_code == 303
+    session.expire_all()
+    assert session.execute(auto).first() is None
+    event = session.execute(select(AuditEvent).where(AuditEvent.action == "lift_suppression")).scalar_one()
+    assert event.user_email == "maaz@example.test"
+    assert session.get(Lead, lead.id).sequence_state == "stopped"  # a human answers them
+
+    # A suppression a person added is never lifted from here.
+    session.add(SuppressionEntry(email=lead.email, reason="removal request", added_by="maaz@example.test"))
+    session.commit()
+    assert maaz.post(f"/inbox/{reply.id}/lift", data={"confirm": "LIFT"}).status_code == 409
+    session.expire_all()
+    assert session.execute(auto).scalar_one().added_by == "maaz@example.test"
+
+
+def test_outbox_shows_a_stopped_or_paused_lead_as_blocked_and_release_refuses(session):
+    campaign = ssm_campaign(session)
+    mailbox(session)
+    lead = drafted_and_approved(session, campaign)
+    ensure_account("maaz@example.test")
+    maaz = login(TestClient(create_app()), "maaz@example.test")
+
+    lead.sequence_state, lead.next_step_due_at = "paused", h.utcnow() + timedelta(days=3)
+    session.commit()
+    assert "paused (out of office)" in maaz.get("/outbox").text
+    assert maaz.post(f"/outbox/{lead.id}/send").status_code == 409
+    session.expire_all()
+    assert session.get(Lead, lead.id).status is LeadStatus.APPROVED  # waits, not held
+
+    lead = session.get(Lead, lead.id)
+    lead.sequence_state = "stopped"
+    session.commit()
+    assert "sequence stopped since approval" in maaz.get("/outbox").text
+    assert maaz.post(f"/outbox/{lead.id}/send").status_code == 409
+    session.expire_all()
+    assert session.get(Lead, lead.id).status is LeadStatus.HELD
+    assert session.execute(select(Job).where(Job.kind == "send")).first() is None
