@@ -15,7 +15,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from mazz.config import get_settings
+from contextlib import asynccontextmanager
+
+from mazz.config import deployment_problems, get_settings
 from mazz.web.auth import AuthRequired, Forbidden
 from mazz.web.routes import auth as auth_routes
 from mazz.web.routes import campaigns as campaigns_routes
@@ -34,10 +36,20 @@ from mazz.web.routes import review as review_routes
 BASE_DIR = Path(__file__).resolve().parent
 
 
+@asynccontextmanager
+async def _refuse_unsafe_boot(app: FastAPI):
+    # At server start, not at import: a public session secret would let
+    # anyone forge an operator login on a host the internet can reach.
+    problems = deployment_problems(get_settings())
+    if problems:
+        raise RuntimeError("refusing to start: " + "; ".join(problems))
+    yield
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
 
-    app = FastAPI(title="MazzSmartLead Review")
+    app = FastAPI(title="MazzSmartLead Review", lifespan=_refuse_unsafe_boot)
 
     app.add_middleware(
         SessionMiddleware,

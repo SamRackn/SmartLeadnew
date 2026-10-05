@@ -91,6 +91,44 @@ def test_a_host_supplied_database_url_uses_psycopg3():
         assert Settings(database_url=url).database_url == "postgresql+psycopg://u:p@h/db"
 
 
+STRONG = "s" * 40
+
+
+@pytest.mark.parametrize("secret, sending, env, expected", [
+    ("changeme", False, {}, ["SESSION_SECRET"]),
+    ("", False, {}, ["SESSION_SECRET"]),
+    ("short-but-not-default", False, {}, ["SESSION_SECRET"]),
+    (STRONG, False, {}, []),
+    (STRONG, True, {"SEND_ENABLED": "true", "EMAIL_SENDER": "stub"}, ["EMAIL_SENDER"]),
+    (STRONG, True, {"SEND_ENABLED": "false", "EMAIL_SENDER": "stub"}, []),
+    (STRONG, True, {"SEND_ENABLED": "true", "EMAIL_SENDER": "google"}, []),
+])
+def test_deployment_problems(monkeypatch, secret, sending, env, expected):
+    from mazz.config import Settings, deployment_problems
+
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    problems = deployment_problems(Settings(session_secret=secret), sending=sending)
+    assert [next(w for w in ("SESSION_SECRET", "EMAIL_SENDER") if w in p) for p in problems] == expected
+
+
+def test_the_app_and_worker_refuse_to_start_unsafe(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from mazz import ops
+    from mazz.web.app import create_app
+
+    monkeypatch.setenv("SESSION_SECRET", "changeme")
+    reload_settings()
+    with pytest.raises(RuntimeError, match="SESSION_SECRET"):
+        with TestClient(create_app()):
+            pass
+    # conftest runs SEND_ENABLED=true on the stub: fine for tests, fatal for a worker.
+    monkeypatch.setenv("SESSION_SECRET", STRONG)
+    reload_settings()
+    assert ops.main(["worker"]) == 2
+
+
 def test_rehearsal_never_sends_a_mailbox_to_itself():
     assert rehearsal.pairs(["a@x.com", "b@y.com"], ["a@x.com", "s@z.com"]) == [
         ("a@x.com", "s@z.com"), ("b@y.com", "s@z.com")]

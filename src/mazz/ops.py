@@ -36,7 +36,7 @@ from sqlalchemy import exists, func, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
-from mazz.config import get_settings
+from mazz.config import deployment_problems, get_settings
 from mazz.db import session_scope
 from mazz.models import (
     Draft,
@@ -550,6 +550,11 @@ def _configure_logging() -> None:
 
 
 def _cmd_worker(args: argparse.Namespace) -> int:
+    problems = deployment_problems(get_settings(), sending=True)
+    if problems:
+        for problem in problems:
+            log.error("refusing to start the worker: %s", problem)
+        return 2
     stopping = False
 
     def request_stop(signum, _frame):

@@ -555,3 +555,62 @@ account yet — an input still needed).
 Tests: `tests/test_deploy_scripts.py` (TXT parsing on recorded Windows and
 Linux output, split DKIM strings, SPF/DKIM/DMARC failure cases, any-selector
 pass, rehearsal refusals, no self-send, host database URL mapping).
+
+### WP9 audit gate (compliance-auditor, 2026-10-05)
+First pass (static read of the whole tree at `16fae95`): 0 critical, 1 high,
+7 medium, 12 low. Fixed in this commit: **H1** — `SESSION_SECRET` defaulted to
+the public "changeme" with nothing stopping boot (a forged cookie = operator);
+the web app (lifespan) and the worker now refuse to start on a blank, default
+or <32-character secret. **M6** — `SEND_ENABLED=true` on the stub sender
+would book leads as sent and follow them up; the worker now refuses to start
+unless `EMAIL_SENDER=google` (`config.deployment_problems`). Re-check: both
+closed for every `render.yaml` entrypoint; residual L16 below.
+
+Auditor's final summary, verbatim:
+
+> No critical or high findings remain. All six CLAUDE.md guardrails and every
+> WP9 item pass on the code. Suppression precedes the queue and fails closed.
+> Unverifiable claims, unfilled placeholders and an empty subject are refused
+> server-side at approve and again at send. Exactly one call site creates a
+> send job, and the pipeline stops at verify. `SEND_ENABLED` defaults false
+> and is checked before any sender exists. Delete-by-person is complete and
+> leaves a tombstone. `/u/*` is isolated. Sean is scoped on every lead-bearing
+> route. The rehearsal script is operator-run, gated and touches no lead, so it
+> is not an auto-send path. The web app and the worker now refuse to start
+> with a blank, default or short `SESSION_SECRET`, and the worker also refuses
+> `SEND_ENABLED=true` on the stub sender. Six MEDIUMs remain: suppression added
+> after ingest is enforced only at send time, because pipeline stages and
+> follow-ups never re-check it and unsubscribe or removal does not stop a sent
+> lead's sequence (M1); the "law firms" vocabulary confirms from a single weak
+> term such as P.C. or LLP (M2); the blocked-site fallback needs Sam's
+> ratification in CLAUDE.md (M3); unsubscribe tokens are tied to the session
+> secret, so rotation kills links already sent (M4); host isolation depends on
+> a blank `UNSUBSCRIBE_HOST` that nothing requires (M5); and the mailbox pool
+> falls through to unpinned mailboxes and the login has no throttle or Secure
+> cookie flag (M7). Thirteen LOWs are listed in the audit report. Recommended
+> before go-live: fix M1 and M5 or accept them explicitly. The human gates
+> remain open.
+
+**Open, not fixed here (decision needed):** M1–M5, M7 as above. Lows: L1
+rehearsal is an uncounted second `sender.send` site and does not check seeds
+against suppression; L2 the one-send-site test misses a `"send"` literal,
+`Job(kind=…)` and scripts; L3 release does not pre-check placeholders/footer;
+L4 cross-workspace leaks to Sean (outbox mailbox roster, "N held" count on a
+removal, person facts at a shared domain); L5 approve/reject have no status
+guards; L6 placeholder regex misses >40-char or multi-line braces, a CR/LF
+subject fails after the attempt marker; L7 opt-out keyword gaps ("delete my
+data", "leave me alone"); L8 delete-by-person residue in audit free text,
+`research_cache.last_error`, the Gmail folders, `sent_outbox.jsonl`; L9 the
+Smartlead `replied` column is optional; L10 send jobs released while
+`SEND_ENABLED=false` go live when it flips — **go-live checklist: no pending
+send jobs before flipping**; L11 `/docs` public, O(n) `/u/` lookup, no CSRF
+token, htmx without SRI; L12 "Approved — queued to send" banner and "one
+click" footer wording; L13 dev seed scripts bypass the gate; L14 edited drafts
+skip the entailment judge; L15 `render.yaml` Postgres IP allow-list
+unverified; L16 `send_lead` itself has no stub+enabled refusal (left out on
+purpose: the test suite runs that combination by design; the worker guard
+covers production). Standing: the attempt-to-wire race; `NEXT_STEP_AFTER` in
+code.
+
+Tests: `tests/test_deploy_scripts.py::test_deployment_problems`,
+`::test_the_app_and_worker_refuse_to_start_unsafe`.

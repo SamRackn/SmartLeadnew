@@ -116,6 +116,29 @@ class Settings(BaseSettings):
     linkedin_api_key: str = ""
 
 
+def deployment_problems(settings: Settings, *, sending: bool = False) -> list[str]:
+    """Why a long-running process must refuse to start with these settings.
+
+    Checked when the web app starts serving and when the worker starts, not at
+    import, so tests and one-off scripts are unaffected. ``sending`` adds the
+    checks that only matter to the process that puts mail on the wire.
+    """
+
+    problems = []
+    secret = (settings.session_secret or "").strip()
+    if secret in ("", "changeme") or len(secret) < 32:
+        problems.append(
+            "SESSION_SECRET is unset, the public default or under 32 characters: "
+            "it signs logins and unsubscribe links, so anyone could forge an operator session"
+        )
+    if sending and settings.send_enabled and settings.email_sender != "google":
+        problems.append(
+            f"SEND_ENABLED is true but EMAIL_SENDER is {settings.email_sender!r}: leads "
+            "would be booked as sent (and followed up) with nothing sent"
+        )
+    return problems
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Return the process-wide settings singleton."""
