@@ -33,7 +33,7 @@ from sqlalchemy import select  # noqa: E402
 from mazz.config import reload_settings  # noqa: E402
 from mazz.ingest.csv_import import import_csv_file  # noqa: E402
 from mazz.models import Campaign, Draft, Job, Lead, LeadStatus, ResearchCache, Workspace  # noqa: E402
-from mazz.pipeline.queue import DEFAULT_HANDLERS, run_worker  # noqa: E402
+from mazz.pipeline.queue import default_handlers, run_worker  # noqa: E402
 from mazz.pipeline.draft import render_body  # noqa: E402
 from mazz.pipeline.score import facts_for_lead, score_lead  # noqa: E402
 from mazz.pipeline.verify import (  # noqa: E402
@@ -76,7 +76,7 @@ def main() -> int:
 
     rule("4. DRAIN THE QUEUE (enrich -> score -> draft -> verify)")
     stats = run_worker(
-        handlers=DEFAULT_HANDLERS, session_factory=h.db_session, run_until_empty=True
+        handlers=default_handlers(), session_factory=h.db_session, run_until_empty=True
     )
     print(f"claimed={stats.claimed} done={stats.done} failed={stats.failed} retried={stats.retried}")
     print(f"by stage: {stats.kinds}")

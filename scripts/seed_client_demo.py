@@ -53,7 +53,7 @@ from mazz.models import (  # noqa: E402
     SuppressionEntry,
     Workspace,
 )
-from mazz.pipeline.queue import DEFAULT_HANDLERS, run_worker  # noqa: E402
+from mazz.pipeline.queue import default_handlers, run_worker  # noqa: E402
 from mazz.pipeline.routing import PinnedRoutingPolicy  # noqa: E402
 from mazz.schemas import Fact, FactKind, stable_fact_id  # noqa: E402
 
@@ -271,7 +271,7 @@ def main() -> int:
             print(f"re-queued : {requeued} lead(s) now pinned to the campaign")
 
         print("draining the queue (enrich -> qualify -> draft -> verify)...")
-        run_worker(handlers=DEFAULT_HANDLERS, max_jobs=200, run_until_empty=True)
+        run_worker(handlers=default_handlers(), max_jobs=200, run_until_empty=True)
 
         # --- what landed -------------------------------------------------
         session.expire_all()  # the worker used its own sessions; do not print stale rows

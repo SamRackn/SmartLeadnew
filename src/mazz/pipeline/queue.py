@@ -35,12 +35,14 @@ hand the client a verdict we never actually reached.
 
 from __future__ import annotations
 
+import functools
 import logging
 import time
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from types import MappingProxyType
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -49,7 +51,7 @@ from mazz.db import session_scope
 from mazz.models import Job, JobStatus, Lead, LeadStatus
 
 __all__ = [
-    "DEFAULT_HANDLERS",
+    "default_handlers",
     "JobContext",
     "JobDeferred",
     "JobHandler",
@@ -438,12 +440,15 @@ class JobContext:
 JobHandler = Callable[[JobContext], None]
 
 
-def _default_handlers() -> dict[str, JobHandler]:
+@functools.cache
+def default_handlers() -> Mapping[str, JobHandler]:
     """The pipeline chain, in the order a lead moves through it.
 
     Each handler calls ``ctx.enqueue_next(...)`` for the following stage, so
     registering them is what makes ingest -> verify actually run end to end.
-    Imported lazily so importing the queue does not drag in the adapters.
+    A function, not a constant, so importing the queue does not drag in the
+    adapters. Extend it by passing your own mapping to ``run_worker`` /
+    ``process_next``, e.g. ``{**default_handlers(), "send": handle_send}``.
 
     **The chain stops at verify.** ``send`` is registered here so the worker can
     run it, but NOTHING enqueues it: a send job exists only because a human
@@ -459,16 +464,9 @@ def _default_handlers() -> dict[str, JobHandler]:
     from mazz.pipeline.sequence import handle_followup
     from mazz.pipeline.verify import handle_verify
 
-    return {
+    return MappingProxyType({
         "enrich": handle_enrich,
         "qualify": handle_qualify,
-        # Jobs queued before the qualification cutover, drained rather than
-        # dead-lettered. `score` ranked event facts by "reason to reach out
-        # right now"; `qualify` asks whether the premise of the copy holds.
-        # Different questions, same position in the chain, and a lead sitting
-        # in a queue is better re-asked than failed. Delete this alias once no
-        # `score` rows remain.
-        "score": handle_qualify,
         "draft": handle_draft,
         "verify": handle_verify,
         # Enqueued by the approve route only. See the docstring above.
@@ -476,34 +474,7 @@ def _default_handlers() -> dict[str, JobHandler]:
         # Scheduled by a send at the next step's due date. Writes a draft and
         # chains to verify -- back to human review, never to send.
         "followup": handle_followup,
-    }
-
-
-class _HandlerRegistry(Mapping[str, JobHandler]):
-    """Lazy default registry, so importing the queue does not import adapters."""
-
-    def __init__(self) -> None:
-        self._loaded: dict[str, JobHandler] | None = None
-
-    def _load(self) -> dict[str, JobHandler]:
-        if self._loaded is None:
-            self._loaded = _default_handlers()
-        return self._loaded
-
-    def __getitem__(self, key: str) -> JobHandler:
-        return self._load()[key]
-
-    def __iter__(self):
-        return iter(self._load())
-
-    def __len__(self) -> int:
-        return len(self._load())
-
-
-#: The Phase 1 registry. Other agents extend it by passing their own mapping to
-#: ``run_worker`` / ``process_next`` -- e.g. ``{**DEFAULT_HANDLERS,
-#: "qualify": handle_qualify}``.
-DEFAULT_HANDLERS: Mapping[str, JobHandler] = _HandlerRegistry()
+    })
 
 
 # --------------------------------------------------------------------------
@@ -550,7 +521,7 @@ def process_next(
        already rolled back and the error must be recorded regardless.
     """
 
-    registry = DEFAULT_HANDLERS if handlers is None else handlers
+    registry = default_handlers() if handlers is None else handlers
     stats = stats or WorkerStats()
 
     with session_factory() as session:

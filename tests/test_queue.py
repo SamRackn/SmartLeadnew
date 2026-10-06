@@ -31,7 +31,7 @@ from mazz.models import (
 )
 from mazz.pipeline.enrich import enrich_lead, handle_enrich
 from mazz.pipeline.queue import (
-    DEFAULT_HANDLERS,
+    default_handlers,
     JobContext,
     PermanentJobError,
     RetrySettings,
@@ -461,7 +461,7 @@ def test_enrich_handler_chains_to_qualify_only_when_one_is_registered(session):
 def test_worker_drains_the_queue_end_to_end(monkeypatch):
     """Two colleagues, from `enrich` all the way through `verify`.
 
-    `DEFAULT_HANDLERS` registers all four stages and each one chains to the next
+    `default_handlers()` registers all four stages and each one chains to the next
     via `ctx.enqueue_next`, so a single enqueued `enrich` job per lead fans out
     into the whole pipeline. That is what makes Phase 1 an end-to-end pipe
     rather than four functions that happen to exist.
@@ -487,7 +487,7 @@ def test_worker_drains_the_queue_end_to_end(monkeypatch):
         enqueue_job(setup, marcus.id, "enrich")
 
     stats = run_worker(
-        handlers=DEFAULT_HANDLERS, session_factory=h.db_session, run_until_empty=True
+        handlers=default_handlers(), session_factory=h.db_session, run_until_empty=True
     )
 
     # 2 leads x 4 stages. Anything less means the chain broke partway.
@@ -525,7 +525,7 @@ def test_worker_failure_path_records_the_error_and_holds_the_lead():
         lead_id = lead.id
 
     process_next(
-        handlers=DEFAULT_HANDLERS,
+        handlers=default_handlers(),
         session_factory=h.db_session,
         settings=RetrySettings(max_attempts=1),
     )

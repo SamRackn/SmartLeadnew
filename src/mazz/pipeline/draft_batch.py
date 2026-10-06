@@ -70,7 +70,7 @@ from mazz.pipeline.draft import (
     render_body,
 )
 from mazz.pipeline.queue import (
-    DEFAULT_HANDLERS,
+    default_handlers,
     complete_job,
     enqueue_job,
     fail_job,
@@ -350,7 +350,7 @@ def poll_batch(
     """
 
     client = client or get_client()
-    handlers = DEFAULT_HANDLERS if handlers is None else handlers
+    handlers = default_handlers() if handlers is None else handlers
     report = RunReport(batch_id=row.batch_id, submitted=row.request_count)
 
     batch = client.messages.batches.retrieve(row.batch_id)

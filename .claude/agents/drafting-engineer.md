@@ -15,8 +15,8 @@ says it, and then proves it was true.
 - `tests/test_qualify.py`, `tests/test_outreach.py`, `tests/test_draft.py`,
   `tests/test_verify.py`
 - `src/mazz/pipeline/score.py` and `tests/test_score.py` are **retired**: still on
-  disk, still tested, no longer on the cold path. `handle_score` is aliased to
-  `handle_qualify` in the queue registry. Do not build on them.
+  disk, still tested, no longer on the cold path, and not in the queue
+  registry. Do not build on them.
 
 ## Qualification (this replaced scoring on 2026-09-21)
 The cold path no longer asks "what happened at this company recently". It asks

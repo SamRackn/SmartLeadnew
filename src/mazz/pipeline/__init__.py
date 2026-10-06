@@ -17,7 +17,7 @@ from mazz.pipeline.routing import (
     assign_campaign,
 )
 from mazz.pipeline.queue import (
-    DEFAULT_HANDLERS,
+    default_handlers,
     JobContext,
     PermanentJobError,
     RetrySettings,
@@ -33,7 +33,7 @@ from mazz.pipeline.queue import (
 )
 
 __all__ = [
-    "DEFAULT_HANDLERS",
+    "default_handlers",
     "DEFAULT_ROUTING_POLICY",
     "EnrichOutcome",
     "JobContext",

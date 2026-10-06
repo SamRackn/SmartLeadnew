@@ -61,7 +61,7 @@ from mazz.pipeline.mailbox import (
     sent_today,
 )
 from mazz.pipeline.queue import (
-    DEFAULT_HANDLERS,
+    default_handlers,
     JobDeferred,
     PermanentJobError,
     enqueue_job,
@@ -775,7 +775,7 @@ def test_worker_runs_a_queued_send_end_to_end(session, monkeypatch, outbox):
         lambda: StubEmailSender(outbox_path=outbox, clock=lambda: NOW),
     )
 
-    job = process_next(handlers={**DEFAULT_HANDLERS, "send": handle_send})
+    job = process_next(handlers={**default_handlers(), "send": handle_send})
     assert job is not None
 
     session.expire_all()
@@ -812,7 +812,7 @@ def test_a_deferred_send_does_not_spend_an_attempt(session, monkeypatch, outbox)
         lambda: StubEmailSender(outbox_path=outbox, clock=lambda: now),
     )
 
-    process_next(handlers={**DEFAULT_HANDLERS, "send": handle_send})
+    process_next(handlers={**default_handlers(), "send": handle_send})
 
     session.expire_all()
     refreshed = session.get(Job, job_id)
@@ -852,7 +852,7 @@ def _use_sender(monkeypatch, sender):
 
 
 def _run_send():
-    return process_next(handlers={**DEFAULT_HANDLERS, "send": handle_send})
+    return process_next(handlers={**default_handlers(), "send": handle_send})
 
 
 def test_a_failure_after_the_wire_is_never_retried_into_a_second_send(
