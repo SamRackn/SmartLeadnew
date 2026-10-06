@@ -177,8 +177,9 @@ of this file for what is actually live.
   mailboxes (not advisable for burner domains), or **12 mailboxes at 15/day**,
   or **9 at 20/day**. Caps are NOT raised to hit 300; that is a buying
   decision (more mailboxes), not a config change.
-* 864-lead list, 731 not started: at ~100 new/week that is **~7.3 weeks** to
-  start everyone, plus ~1.5 weeks for the last follow-ups to drain.
+* 864-lead list, 641 not started (2026-10-06, and falling while Smartlead
+  still sends): at ~100 new/week that is **~6.4 weeks** to start everyone,
+  plus ~1.5 weeks for the last follow-ups to drain.
   The dashboard computes "days to drain" live from the queue.
 
 ---
@@ -217,24 +218,50 @@ independent gate (WP9).
 
 ---
 
-## Inputs still needed (not guessed)
+## Client answers (launch checklist, returned 2026-10-06)
 
-* Postal address for Search Site Marketing — candidate "Search Site Marketing,
-  Inc, 137 Erie St W, Blauvelt, NY 10913" from live Smartlead mail, **needs
-  Maaz or Sean to confirm**; and for ClientRise.
-* Google OAuth client ID and secret (Maaz creates the app).
-* Zapmail per-mailbox authorization for the four mailboxes.
-* The three Smartlead exports (global unsubscribes + bounces; campaign lead
-  export with status/step; Sean's clients and named companies).
-* Sean's client list and named exclusions.
-* Hosting account and DNS access for the unsubscribe host.
-* Decision on volume vs intake (see pacing).
-* A named client plus permission for any proof point, with one reconciled
-  figure (32 / 41 / 42 / 50+ currently disagree).
-* Monthly costs for the dashboard.
-* ClientRise mailboxes, domains, subject line, postal address, claim
-  attestation.
-* A plan for warmup if Smartlead is ever cancelled.
+Settled, and matching what is built:
+* **Postal address:** "Search Site Marketing, Inc, 6 Rockford Drive, West
+  Nyack, NY 10994" — Sean's new address, NOT the Blauvelt one on the live
+  Smartlead mail. Confirmed by Maaz Nadeem. Enter it on the workspace screen
+  after deploy (the confirmation is recorded against whoever is logged in, so
+  Maaz should press confirm himself).
+* **Hosting** under ClientRise. DNS record for
+  `outreach.getsearchsitemarketing.com`: yes, Maaz adds it.
+* **Pacing:** 15/mailbox/day × 4 = 60/day, max 2 per company, Mon–Fri
+  business hours in the lead's timezone, Eastern if unknown. Don't raise caps.
+* **Proof points:** none at launch. 32 / 41 / 42@$70 / 50+ / "1–3 clients a
+  month" are all barred until Sean verifies one.
+* **Reply rules** approved exactly as built: Maaz owns the inbox and the
+  software never marks anyone interested; a genuine reply stops the sequence;
+  OOO pauses until the return date, else +7 days; bounce and unsubscribe
+  suppress at once. Removals go to maaz@clientrise.io, and Sean forwards any
+  he gets.
+* **Logins:** maaz@clientrise.io (all workspaces), sean@searchsitemarketing.com
+  (Search Site Marketing only) — matches `users.LAUNCH_USERS`.
+* **Never-contact domains:** the five own domains, nothing more.
+* **Smartlead, verified 2026-10-06, campaign still ACTIVE:** 864 total, 223
+  contacted, 641 not started, 120 in progress, 101 completed, 2 blocked, 3
+  bounced, 11 unique replies, 0 positive, 606 of 3,420 sends (≈4 steps per
+  lead in Smartlead; ours is 3, and 3+ received maps to complete). Now in
+  `smartlead.EXPECTED` and `metrics.BASELINE`; both move until the pause.
+
+Still open:
+* Zapmail written confirmation (not asked yet).
+* Google OAuth app — nothing created yet. Steps 1–4 (project, External
+  consent screen, the two scopes, In production) do not need the redirect
+  URI; only the client ID does, and Google lets it be added later.
+* Render account (ClientRise's card) → deploy → redirect URI
+  `<APP_BASE_URL>/oauth/google/callback` and the DNS record go to Maaz.
+* Where DNS for getsearchsitemarketing.com is managed.
+* Smartlead files A, B, C; Sean's client / never-contact list.
+* Sean's test inbox (Maaz's: maaz@clientrise.io); Sean's final copy approval.
+* Monthly costs — client says enter nothing until billed amounts are
+  verified. Dashboard shows "—" meanwhile.
+* No cutover date until authorization, test sends, auth checks and import
+  validation pass. Replacement warmup must exist before Smartlead warmup
+  is ever turned off.
+* ClientRise: blocked until Search Site Marketing is live.
 
 ---
 
@@ -423,12 +450,20 @@ unless given `--commit`; it does the work in a transaction and rolls it back.
 |---|---|---|
 | `suppression <csv>` | (a) unsubscribes + bounces | global email suppression (`public.suppress_email`) |
 | `exclusions <csv> --workspace <slug>` | (c) Sean's clients, named companies | suppression scoped to that workspace; a row with a company name but no domain/email is listed, not guessed |
-| `leads <csv> --campaign <id>` | (b) campaign lead export | see below; prints counts, flags a mismatch with 864 / 133 / 731 / 124 / 7 / 2 |
+| `leads <csv> --campaign <id>` | (b) campaign lead export | see below; prints counts, flags a mismatch with `smartlead.EXPECTED` (864 / 223 / 641 / 120 / 101 / 2 as of 2026-10-06) |
 | `adopt` | — | adopts each live legacy lead's Gmail thread (read-only search), then queues its follow-up |
 
-**Run order at cutover:** `suppression` → `exclusions` → `leads` (each dry,
-then `--commit`) → Maaz detaches the mailboxes from the Smartlead campaign
-(gate 6) → mailboxes connected (gate 3) → `adopt --commit`.
+**Run order at cutover:** Maaz **pauses the Smartlead campaign first** →
+exports file B and reads the counts off the paused campaign (update
+`EXPECTED`) → `suppression` → `exclusions` → `leads` (each dry, then
+`--commit`) → Maaz detaches the mailboxes from the campaign (gate 6) →
+mailboxes connected (gate 3) → `adopt --commit`.
+
+Pause before export, not after. The campaign was still sending on
+2026-10-06 (contacted went 133 → 223 in a week). Anyone Smartlead emails
+between the export and the pause is imported as "not started" and gets
+Email 1 again, and `adopt` schedules from the step in the export, not from
+what is in the thread. Use an early file B for a dry run only.
 
 **Lead mapping** (`smartlead.NEXT_STEP_AFTER`, one dict Maaz can edit):
 not started → the normal import path (suppression gate, routing pinned to the

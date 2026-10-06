@@ -190,6 +190,6 @@ def test_dashboard_leads_with_the_primary_metric_and_the_baseline(session):
     maaz = login(TestClient(create_app()), "maaz@example.test")
     page = maaz.get("/dashboard?month=2026-10&workspace=").text  # "" = all workspaces
     assert page.index("Cost per qualified conversation") < page.index("Hold rate")
-    assert "$200.00" in page and "133" in page and "0.9%" in page and "4.5%" in page
+    assert "$200.00" in page and "223" in page and "0.5%" in page and "4.9%" in page
     assert maaz.get("/dashboard?month=nonsense").status_code == 200
     assert "no costs entered for this month" in maaz.get("/dashboard?month=2020-01").text

@@ -92,9 +92,11 @@ STATUSES = {
 #: not listed (3 or more) means the sequence is complete. Maaz may change it.
 NEXT_STEP_AFTER: dict[int, int] = {1: 2, 2: 3}
 
-#: The client's figures for the live campaign, for the sanity check.
-EXPECTED = {"total": 864, "contacted": 133, "not_started": 731,
-            "in_progress": 124, "completed": 7, "blocked": 2}
+#: The client's figures for the live campaign, for the sanity check (read off
+#: the Smartlead screen 2026-10-06). The campaign was still sending then, so
+#: re-read them after pausing it on cutover day and update this line.
+EXPECTED = {"total": 864, "contacted": 223, "not_started": 641,
+            "in_progress": 120, "completed": 101, "blocked": 2}
 
 
 def _key(text: str) -> str:

@@ -47,16 +47,17 @@ COST_CATEGORIES: dict[str, str] = {
 #: The human funnel, in order. `interested` is a precondition, not a goal.
 STAGES = ("interested", "qualified", "meeting_booked", "meeting_showed", "client_won")
 
-#: The client's own Smartlead numbers before this system, from his screenshot.
-#: Shown beside ours so "better or worse" is a comparison, not a feeling.
+#: The client's own Smartlead numbers before this system, verified 2026-10-06
+#: (606 sends processed). Shown beside ours so "better or worse" is a
+#: comparison, not a feeling. Re-read when the campaign is paused at cutover.
 BASELINE = {
-    "label": "Smartlead (client's screenshot, before cutover)",
-    "contacted": 133,
-    "unique_replies": 6,
-    "reply_rate": 6 / 133,
+    "label": "Smartlead (verified 2026-10-06, before cutover)",
+    "contacted": 223,
+    "unique_replies": 11,
+    "reply_rate": 11 / 223,
     "positive": 0,
     "bounces": 3,
-    "bounce_rate": 0.009,
+    "bounce_rate": 3 / 606,  # same denominator as ours: bounces / sends
     "deals": 0,
     "note": "Open tracking was off (0 opens), so there is nothing to compare there.",
 }
