@@ -19,7 +19,7 @@
       {% for r in roster %}
       <tr>
         <td>{{ r.mailbox.email_address }}</td>
-        <td><span class="mailbox-tag {{ r.mailbox.status.value }}">{{ r.mailbox.status.value }}</span></td>
+        <td><span class="mailbox-tag mailbox-{{ r.mailbox.status.value }}">{{ r.mailbox.status.value|replace("_", " ") }}</span></td>
         <td>{{ r.headroom }} of {{ r.mailbox.daily_cap }}</td>
         <td>
           {% if r.next_eligible_at > now %}{{ r.next_eligible_at.strftime("%H:%M UTC") }}{% else %}now{% endif %}
@@ -66,12 +66,12 @@
         </td>
         <td>
           {% if row.queued %}
-            <span class="job-tag pending">queued</span>
+            <span class="job-tag job-pending">queued</span>
           {% elif row.blocked_reason %}
-            <span class="verification-tag failed">blocked</span>
+            <span class="verification-tag verification-failed">blocked</span>
             <span class="muted block-reason">{{ row.blocked_reason }}</span>
           {% else %}
-            <span class="verification-tag passed">ready</span>
+            <span class="verification-tag verification-passed">ready</span>
           {% endif %}
         </td>
         <td class="row-action">

@@ -6,7 +6,7 @@
 <nav class="status-filter">
   <a href="/leads" class="{% if active_status is none %}active{% endif %}">all</a>
   {% for s in all_statuses %}
-    <a href="/leads?status={{ s.value }}" class="{% if active_status == s %}active{% endif %} status-tag status-{{ s.value }}">{{ s.value }}</a>
+    <a href="/leads?status={{ s.value }}" class="{% if active_status == s %}active{% endif %} status-tag status-{{ s.value }}">{{ s.value|replace("_", " ") }}</a>
   {% endfor %}
 </nav>
 
@@ -29,7 +29,7 @@
     <tr class="row-status-{{ lead.status.value }}">
       <td>{{ lead.full_name }}</td>
       <td>{{ lead.company_name or "—" }}</td>
-      <td><span class="status-tag status-{{ lead.status.value }}">{{ lead.status.value }}</span></td>
+      <td><span class="status-tag status-{{ lead.status.value }}">{{ lead.status.value|replace("_", " ") }}</span></td>
       <td>
         {% if draft %}
           <span class="verification-tag verification-{{ draft.verification_status.value }}">{{ draft.verification_status.value }}</span>

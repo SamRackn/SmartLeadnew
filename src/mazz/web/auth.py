@@ -34,6 +34,7 @@ __all__ = [
     "verify_password",
     "authenticate",
     "current_account",
+    "load_account",
     "current_user",
     "require_operator",
     "login_user",
@@ -149,10 +150,19 @@ def current_account(request: Request, session: Session = Depends(get_session)) -
     handle = request.session.get(SESSION_USER_KEY)
     if not handle:
         raise AuthRequired("no active session")
-    user = session.execute(select(User).where(User.email == handle)).scalar_one_or_none()
-    if user is None or not user.active:
+    account = load_account(session, handle)
+    if account is None:
         request.session.pop(SESSION_USER_KEY, None)
         raise AuthRequired("account no longer active")
+    return account
+
+
+def load_account(session: Session, handle: str) -> Account | None:
+    """The active account for a login handle, or None. Reads only; no side effects."""
+
+    user = session.execute(select(User).where(User.email == handle)).scalar_one_or_none()
+    if user is None or not user.active:
+        return None
     workspace_ids = frozenset(
         session.execute(
             select(UserWorkspace.workspace_id).where(UserWorkspace.user_id == user.id)

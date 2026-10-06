@@ -58,7 +58,7 @@
           <span class="dash-alert">capped</span>
         {% endif %}
       </td>
-      <td><span class="mailbox-tag mailbox-{{ row.mailbox.status.value }}">{{ row.mailbox.status.value }}</span></td>
+      <td><span class="mailbox-tag mailbox-{{ row.mailbox.status.value }}">{{ row.mailbox.status.value|replace("_", " ") }}</span></td>
       <td>
         {% if row.mailbox.consecutive_failures %}
           <span class="dash-alert">{{ row.mailbox.consecutive_failures }} consecutive failures</span>

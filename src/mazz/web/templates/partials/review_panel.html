@@ -23,12 +23,12 @@
   <header class="review-panel-header">
     <div>
       <h2>{{ lead.full_name }}</h2>
-      <span class="status-tag status-{{ lead.status.value }}">{{ lead.status.value }}</span>
+      <span class="status-tag status-{{ lead.status.value }}">{{ lead.status.value|replace("_", " ") }}</span>
       <span class="muted">{{ lead.company_name or "—" }}</span>
     </div>
     {% if draft %}
     <details class="email-preview">
-      <summary>👁 Preview Email</summary>
+      <summary>Preview email</summary>
       <div class="email-preview-body">
         <dl>
           <dt>To</dt><dd>{{ lead.email }}</dd>
@@ -48,9 +48,9 @@
   {% if draft is none %}
     <p class="empty">No draft for this lead.
       {% if lead.status.value == "no_angle" %}
-        No qualifying signal was confirmed on the prospect's own site (or the
-        site disqualified them) — see CLAUDE.md guardrail 2. No draft was
-        written on purpose; there is no fallback to generic filler.
+        Their own website didn't confirm they're in this campaign's vertical
+        (or it ruled them out), so no email was written. That's on purpose:
+        there is no generic fallback.
       {% endif %}
     </p>
   {% else %}
@@ -77,7 +77,7 @@
       </label>
       <p class="muted hint">
         Shown without the compliance footer — that is appended automatically
-        and appears in Preview Email above.
+        and appears in "Preview email" above.
       </p>
       <button type="submit">Save edit &amp; re-verify</button>
     </form>

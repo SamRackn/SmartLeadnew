@@ -3,7 +3,7 @@
 {% block content %}
 <p><a href="/leads">← back to leads</a></p>
 
-<h1>{{ lead.full_name }} <span class="status-tag status-{{ lead.status.value }}">{{ lead.status.value }}</span></h1>
+<h1>{{ lead.full_name }} <span class="status-tag status-{{ lead.status.value }}">{{ lead.status.value|replace("_", " ") }}</span></h1>
 
 <section class="lead-identity">
   <dl>

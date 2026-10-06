@@ -17,8 +17,12 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from contextlib import asynccontextmanager
 
+from sqlalchemy import func, select
+
 from mazz.config import deployment_problems, get_settings
-from mazz.web.auth import AuthRequired, Forbidden
+from mazz.db import session_scope
+from mazz.models import Lead, LeadStatus, Reply
+from mazz.web.auth import SESSION_USER_KEY, AuthRequired, Forbidden, load_account
 from mazz.web.routes import auth as auth_routes
 from mazz.web.routes import campaigns as campaigns_routes
 from mazz.web.routes import dashboard as dashboard_routes
@@ -34,6 +38,34 @@ from mazz.web.routes import removals as removals_routes
 from mazz.web.routes import review as review_routes
 
 BASE_DIR = Path(__file__).resolve().parent
+
+
+def nav_state(request: Request) -> dict | None:
+    """What the sidebar needs: who is looking, whether they see the operator
+    screens, and how much waits on the three daily screens. None when nobody
+    is logged in. Counts use the same scoping as the pages they link to."""
+
+    handle = request.session.get(SESSION_USER_KEY)
+    if not handle:
+        return None
+    with session_scope() as session:
+        account = load_account(session, handle)
+        if account is None:
+            return None
+        leads = select(func.count(Lead.id)).where(account.lead_filter())
+        replies = (
+            select(func.count(Reply.id))
+            .join(Lead, Lead.id == Reply.lead_id)
+            .where(account.lead_filter(), Reply.handled_at.is_(None), Reply.classification != "ooo")
+        )
+        return {
+            "operator": account.all_workspaces,
+            "name": account.display_name or account.email,
+            "email": account.email,
+            "review": session.scalar(leads.where(Lead.status == LeadStatus.READY)),
+            "outbox": session.scalar(leads.where(Lead.status == LeadStatus.APPROVED)),
+            "inbox": session.scalar(replies),
+        }
 
 
 @asynccontextmanager
@@ -59,10 +91,14 @@ def create_app() -> FastAPI:
     )
 
     templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+    templates.env.globals["nav_state"] = nav_state
     app.state.templates = templates
 
     static_dir = BASE_DIR / "static"
     static_dir.mkdir(parents=True, exist_ok=True)
+    # Busts browser caches whenever the stylesheet changes, so a deploy never
+    # pairs new markup with yesterday's CSS.
+    templates.env.globals["css_version"] = int((static_dir / "style.css").stat().st_mtime)
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
     @app.exception_handler(AuthRequired)

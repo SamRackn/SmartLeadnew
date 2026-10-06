@@ -18,7 +18,7 @@
   <a href="/review?status={{ s.value }}{{ '&q=' ~ q if q else '' }}"
      class="status-tag status-{{ s.value }} {{ 'active' if active_status == s else '' }}"
      hx-get="/review/list" hx-target="#review-list-dynamic" hx-swap="innerHTML"
-     hx-include="#review-q" hx-vals='{"status": "{{ s.value }}"}'>{{ s.value }}</a>
+     hx-include="#review-q" hx-vals='{"status": "{{ s.value }}"}'>{{ s.value|replace("_", " ") }}</a>
   {% endfor %}
 </nav>
 
@@ -41,7 +41,7 @@
       <span class="review-row-name">{{ row.lead.full_name }}</span>
       <span class="review-row-email muted">{{ row.lead.email }}</span>
     </span>
-    <span class="status-tag status-{{ row.lead.status.value }}">{{ row.lead.status.value }}</span>
+    <span class="status-tag status-{{ row.lead.status.value }}">{{ row.lead.status.value|replace("_", " ") }}</span>
   </li>
   {% endfor %}
 </ul>
