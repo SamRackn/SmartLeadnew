@@ -28,12 +28,13 @@ from mazz.db import get_session
 from mazz.ingest.csv_import import email_sha256
 from mazz.models import Lead, LeadStatus, SuppressionEntry
 from mazz.pipeline.draft import unsubscribe_token
+from mazz.pipeline.sequence import LIVE_STATES
 
 router = APIRouter()
 
 #: Statuses an unsubscribe pulls back out of the send path. A lead already
-#: `sent` keeps its status (it records what happened); its follow-ups stop
-#: because every later step re-checks suppression.
+#: `sent` keeps its status (it records what happened); its sequence is
+#: stopped, and the follow-up and send steps re-check suppression anyway.
 _STOPPABLE = (LeadStatus.RESEARCHING, LeadStatus.READY, LeadStatus.APPROVED)
 
 _DEAD_LINK = (
@@ -120,6 +121,8 @@ def unsubscribe(token: str, session: Session = Depends(get_session)):
     entry = suppress_email(session, lead.email, reason="unsubscribe link", actor=audit.SYSTEM)
     if lead.status in _STOPPABLE:
         lead.status = LeadStatus.HELD
+    if lead.sequence_state in LIVE_STATES:
+        lead.sequence_state, lead.next_step_due_at = "stopped", None
     audit.record(
         session, audit.SYSTEM, "unsubscribe", "lead", lead.id,
         source="recipient_link", suppression_id=entry.id,

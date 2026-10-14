@@ -3,6 +3,7 @@ one manual repair the send step can ask a human for.
 
     python -m mazz.ops worker              # drain the queue, forever
     python -m mazz.ops health [--notify]   # exit 1 if anything needs a human
+    python -m mazz.ops preflight           # exit 1 if a go-live gate is unmet
     python -m mazz.ops backup              # pg_dump, verified, rotated
     python -m mazz.ops resolve-send LEAD_ID --sent | --not-sent
 
@@ -39,6 +40,7 @@ from sqlalchemy.orm import Session
 from mazz.config import deployment_problems, get_settings
 from mazz.db import session_scope
 from mazz.models import (
+    Campaign,
     Draft,
     Job,
     JobStatus,
@@ -46,8 +48,10 @@ from mazz.models import (
     LeadStatus,
     Mailbox,
     MailboxStatus,
+    ProofPoint,
     SentMessage,
     VerificationStatus,
+    Workspace,
 )
 from mazz.pipeline.queue import (
     DEFAULT_STALE_AFTER,
@@ -63,6 +67,7 @@ __all__ = [
     "Alert",
     "HealthThresholds",
     "check_health",
+    "check_preflight",
     "prune_backups",
     "resolve_send",
     "run_backup",
@@ -268,6 +273,77 @@ def check_health(
 
     order = {CRITICAL: 0, WARNING: 1}
     return sorted(alerts, key=lambda a: order[a.severity])
+
+
+# ==========================================================================
+# Go-live preflight
+# ==========================================================================
+
+
+def check_preflight(session: Session, *, settings=None) -> list[Alert]:
+    """The go-live gates the code can see, judged as if sending were on.
+
+    Run before flipping ``SEND_ENABLED``. The human gates it cannot see
+    (Zapmail's written OK, rehearsal headers, the Smartlead pause and detach,
+    Sam's go) stay on the checklist in docs/LAUNCH-PLAN.md.
+    """
+
+    from mazz.launch_copy import CAMPAIGN_NAME, DAILY_CAP, MAILBOXES
+    from mazz.pipeline.draft import placeholder_marker_in
+    from mazz.pipeline.send import SEND_JOB_KIND
+
+    live = (settings or get_settings()).model_copy(
+        update={"send_enabled": True, "email_sender": "google"}
+    )
+    alerts = [Alert(CRITICAL, "config", p) for p in deployment_problems(live, sending=True)]
+
+    senders = select(Workspace).where(exists().where(Campaign.workspace_id == Workspace.id))
+    for ws in session.execute(senders).scalars():
+        address = (ws.postal_address or "").strip()
+        if not address or ws.postal_address_confirmed_at is None:
+            alerts.append(Alert(CRITICAL, "postal_address",
+                                f"{ws.name}: no confirmed postal address (confirm it on /campaigns)"))
+        elif marker := placeholder_marker_in(address):
+            alerts.append(Alert(CRITICAL, "postal_address",
+                                f"{ws.name}: address contains placeholder {marker!r}"))
+
+    roster = {m.email_address: m for m in session.execute(select(Mailbox)).scalars()}
+    for address in MAILBOXES:
+        mailbox = roster.get(address)
+        if mailbox is None:
+            alerts.append(Alert(CRITICAL, "mailbox_missing",
+                                f"{address} is not on the roster (python -m mazz.users seed-launch)"))
+        elif mailbox.status != MailboxStatus.ACTIVE or not mailbox.oauth_refresh_token_enc:
+            alerts.append(Alert(CRITICAL, "mailbox_not_connected",
+                                f"{address} is {mailbox.status.value}, "
+                                f"{'connected' if mailbox.oauth_refresh_token_enc else 'never connected'}"))
+    for mailbox in (roster[a] for a in MAILBOXES if a in roster):
+        if mailbox.daily_cap > DAILY_CAP:
+            alerts.append(Alert(CRITICAL, "mailbox_cap",
+                                f"{mailbox.email_address} caps at {mailbox.daily_cap}/day; "
+                                f"the launch decision is {DAILY_CAP}"))
+
+    # Released while sending was off and deferred (window, cap): these go out
+    # for real the moment the switch flips.
+    pending = session.execute(
+        select(Job.lead_id).where(Job.kind == SEND_JOB_KIND, Job.status == JobStatus.PENDING)
+    ).scalars().all()
+    if pending:
+        alerts.append(Alert(CRITICAL, "send_jobs_pending",
+                            f"{len(pending)} send job(s) released during the dry run are still "
+                            f"pending (lead {', '.join(map(str, pending))}); they go live when "
+                            "SEND_ENABLED flips. Let them run dry first, or reject those leads."))
+
+    stats = session.execute(
+        select(func.count(ProofPoint.id))
+        .join(Campaign, Campaign.id == ProofPoint.campaign_id)
+        .where(Campaign.name == CAMPAIGN_NAME, ProofPoint.active.is_(True))
+    ).scalar_one()
+    if stats:
+        alerts.append(Alert(CRITICAL, "proof_points",
+                            f"{stats} active proof point(s) on {CAMPAIGN_NAME!r}; the client "
+                            "launches with no performance statistics (2026-10-14)"))
+    return alerts
 
 
 def _minutes(delta: timedelta) -> int:
@@ -598,6 +674,15 @@ def _cmd_health(args: argparse.Namespace) -> int:
     return 1
 
 
+def _cmd_preflight(args: argparse.Namespace) -> int:
+    with session_scope() as session:
+        alerts = check_preflight(session)
+    for alert in alerts:
+        print(alert)
+    print("ready to flip SEND_ENABLED" if not alerts else f"{len(alerts)} gate(s) unmet")
+    return 1 if alerts else 0
+
+
 def _cmd_backup(args: argparse.Namespace) -> int:
     path = run_backup(Path(args.backup_dir).expanduser(), keep=args.keep)
     print(path)
@@ -639,6 +724,9 @@ def build_parser() -> argparse.ArgumentParser:
     health.add_argument("--backup-dir", default=str(default_backup_dir()))
     health.add_argument("--no-backup-check", action="store_true")
     health.set_defaults(func=_cmd_health)
+
+    preflight = sub.add_parser("preflight", help="check the go-live gates the code can see")
+    preflight.set_defaults(func=_cmd_preflight)
 
     backup = sub.add_parser("backup", help="pg_dump the database, verified and rotated")
     backup.add_argument("--backup-dir", default=str(default_backup_dir()))

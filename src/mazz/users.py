@@ -65,10 +65,10 @@ def ensure_workspace(session: Session, slug: str, name: str) -> Workspace:
 
 
 def seed_launch(session: Session) -> list[User]:
-    from mazz.launch_copy import ensure_launch_campaign
+    from mazz.launch_copy import ensure_launch_campaign, ensure_launch_mailboxes
 
     ws = ensure_workspace(session, LAUNCH_WORKSPACE_SLUG, LAUNCH_WORKSPACE_NAME)
-    ensure_launch_campaign(session, ws)
+    ensure_launch_mailboxes(session, ensure_launch_campaign(session, ws))
     users = []
     for email, name, operator, slugs in LAUNCH_USERS:
         user = ensure_user(session, email, name, operator=operator)

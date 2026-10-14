@@ -63,6 +63,7 @@ from mazz.pipeline.draft import (
     split_body,
     unresolved_placeholders,
     unsubscribe_base_url,
+    unsubscribe_token,
     unsubscribe_url,
 )
 from mazz.pipeline.mailbox import (
@@ -577,6 +578,13 @@ def check_live_send_ready(lead: Lead, draft: Draft, sender: EmailSender) -> None
             "postal address; live sending refuses unrouted leads."
         )
     link = _unsubscribe_link(lead, draft)
+    if not link.endswith(f"/u/{unsubscribe_token(lead)}"):
+        # Drafted under another key (UNSUBSCRIBE_SECRET set or changed since):
+        # /u/ can no longer match it, so the recipient could not opt out.
+        raise PermanentJobError(
+            f"draft {draft.id}'s unsubscribe link no longer resolves under the current "
+            "UNSUBSCRIBE_SECRET; re-draft it before sending live."
+        )
     if not link.startswith("https://") or ".example" in link.split("/u/")[0]:
         raise PermanentJobError(
             f"draft {draft.id}'s unsubscribe link is {link!r}, which is not a live "

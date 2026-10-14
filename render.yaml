@@ -29,6 +29,8 @@ envVarGroups:
         sync: false
       - key: UNSUBSCRIBE_HOST
         sync: false
+      - key: UNSUBSCRIBE_SECRET
+        sync: false
 
 services:
   - type: web

@@ -145,11 +145,13 @@ def test_v1_sequence_end_to_end_exact_copy_same_thread(session, tmp_path):
     assert (d1.step, d1.subject, split_body(d1.body)[0]) == (1, "Quick Question", EMAIL_1)
     assert d1.verification_status is VerificationStatus.PASSED
 
+    # Real clock, not TUE: the stub sender stamps sent_at with it, and a pinned
+    # past `now` puts each later send before the last and spacing refuses it.
     sender = Recording(tmp_path)
     for step, wait, expected in ((2, 3, FU_1), (3, 4, FU_2)):
         lead.status = LeadStatus.APPROVED
         session.commit()
-        sent = send_lead(session, lead, sender=sender, now=TUE)
+        sent = send_lead(session, lead, sender=sender)
         session.commit()
         job = session.execute(select(Job).where(
             Job.kind == "followup", Job.status == JobStatus.PENDING)).scalar_one()
@@ -163,7 +165,7 @@ def test_v1_sequence_end_to_end_exact_copy_same_thread(session, tmp_path):
 
     lead.status = LeadStatus.APPROVED
     session.commit()
-    send_lead(session, lead, sender=sender, now=TUE)
+    send_lead(session, lead, sender=sender)
     session.commit()
 
     first, fu1, fu2 = session.execute(select(SentMessage).order_by(SentMessage.id)).scalars().all()
@@ -420,7 +422,7 @@ def test_delete_by_person_erases_sent_rows_and_dry_run_mime(session, monkeypatch
     reload_settings()
     other = drafted_and_approved(session, campaign, email="ann@damelegal.com")
     with pytest.raises(SendDisabled) as exc:
-        send_lead(session, other, now=TUE)
+        send_lead(session, other)  # real clock: the stub stamped the first send with it
     assert exc.value.path.exists()
 
     for email in (lead.email, other.email):
@@ -428,3 +430,31 @@ def test_delete_by_person_erases_sent_rows_and_dry_run_mime(session, monkeypatch
     session.commit()
     assert not exc.value.path.exists()
     assert session.execute(select(SentMessage)).first() is None
+
+
+def test_a_lead_suppressed_mid_sequence_gets_no_follow_up_drafted(session, tmp_path):
+    campaign = ssm_campaign(session)
+    mailbox(session)
+    lead = drafted_and_approved(session, campaign)
+    send_lead(session, lead, sender=Recording(tmp_path), now=TUE)
+    session.commit()
+    h.suppress(session, email=lead.email)  # e.g. a removal request
+    job = session.execute(select(Job).where(Job.kind == "followup")).scalar_one()
+    job.run_after = h.utcnow() - timedelta(minutes=1)
+    session.commit()
+    run_jobs(session)
+
+    lead = session.get(Lead, lead.id)
+    assert (lead.sequence_state, lead.skip_reason) == ("stopped", "suppressed")
+    assert latest_draft(session, lead).step == 1 and lead.status is LeadStatus.SENT
+
+
+def test_one_weak_term_does_not_confirm_a_law_firm(session):
+    campaign = ssm_campaign(session)
+    fact = Fact.build(kind="homepage", content="Smith & Jones LLP, certified public accountants.",
+                      source_url="https://smithjones.com/", retrieved_at=h.utcnow())
+    session.add(ResearchCache(company_domain="smithjones.com", facts=[fact.model_dump(mode="json")],
+                              fetched_at=h.utcnow()))
+    lead = law_lead(session, campaign, email="a@smithjones.com", domain="smithjones.com",
+                    company_name="Smith & Jones LLP", facts=False)
+    assert not qualify_lead(session, lead).qualified

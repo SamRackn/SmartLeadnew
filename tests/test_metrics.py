@@ -150,7 +150,7 @@ def test_costs_screen_adds_attributes_audits_and_deletes(session):
     session.commit()
     ensure_account("maaz@example.test")
     ensure_account("sean@example.test", operator=False, workspace_ids=(campaign.workspace_id,))
-    maaz = login(TestClient(create_app()), "maaz@example.test")
+    maaz = login(TestClient(create_app(), base_url="https://testserver"), "maaz@example.test")
 
     def post(**kw):
         data = {"month": "2026-10", "workspace_id": campaign.workspace_id,
@@ -173,7 +173,7 @@ def test_costs_screen_adds_attributes_audits_and_deletes(session):
     actions = [a for (a,) in session.execute(select(AuditEvent.action).order_by(AuditEvent.id)).all()]
     assert actions == ["cost_add", "cost_delete"]
 
-    sean = login(TestClient(create_app()), "sean@example.test")
+    sean = login(TestClient(create_app(), base_url="https://testserver"), "sean@example.test")
     assert sean.get("/costs").status_code == 403
     assert sean.post("/costs", data={"month": "2026-10", "workspace_id": campaign.workspace_id,
                                      "category": "other", "amount": "1"}).status_code == 403
@@ -187,7 +187,7 @@ def test_dashboard_leads_with_the_primary_metric_and_the_baseline(session):
     cost(session, campaign.workspace_id, "mailboxes", "200")
     session.commit()
     ensure_account("maaz@example.test")
-    maaz = login(TestClient(create_app()), "maaz@example.test")
+    maaz = login(TestClient(create_app(), base_url="https://testserver"), "maaz@example.test")
     page = maaz.get("/dashboard?month=2026-10&workspace=").text  # "" = all workspaces
     assert page.index("Cost per qualified conversation") < page.index("Hold rate")
     assert "$200.00" in page and "223" in page and "0.5%" in page and "4.9%" in page

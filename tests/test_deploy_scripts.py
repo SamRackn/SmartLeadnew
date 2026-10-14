@@ -101,7 +101,12 @@ STRONG = "s" * 40
     (STRONG, False, {}, []),
     (STRONG, True, {"SEND_ENABLED": "true", "EMAIL_SENDER": "stub"}, ["EMAIL_SENDER"]),
     (STRONG, True, {"SEND_ENABLED": "false", "EMAIL_SENDER": "stub"}, []),
-    (STRONG, True, {"SEND_ENABLED": "true", "EMAIL_SENDER": "google"}, []),
+    # Live sending's own settings are covered in test_launch_readiness.py.
+    (STRONG, True, {"SEND_ENABLED": "true", "EMAIL_SENDER": "google",
+                    "UNSUBSCRIBE_BASE_URL": "https://outreach.example.com",
+                    "UNSUBSCRIBE_HOST": "outreach.example.com", "UNSUBSCRIBE_SECRET": STRONG,
+                    "APP_BASE_URL": "https://app.example.com", "GOOGLE_OAUTH_CLIENT_ID": "i",
+                    "GOOGLE_OAUTH_CLIENT_SECRET": "s", "OAUTH_TOKEN_KEY": "k"}, []),
 ])
 def test_deployment_problems(monkeypatch, secret, sending, env, expected):
     from mazz.config import Settings, deployment_problems

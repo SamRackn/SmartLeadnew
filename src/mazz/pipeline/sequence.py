@@ -237,6 +237,17 @@ def handle_followup(ctx: "JobContext") -> None:
                  lead.id, lead.status.value, lead.sequence_state)
         return
 
+    # Suppressed since the last send (link, reply, removal, import): stop here
+    # rather than draft a follow-up the send step would refuse anyway. An
+    # unreadable list raises and the job retries; it never drafts.
+    from mazz.ingest.csv_import import SuppressionChecker
+
+    match = SuppressionChecker(session).check_lead(lead)
+    if match is not None:
+        lead.sequence_state, lead.skip_reason, lead.next_step_due_at = "stopped", "suppressed", None
+        log.info("lead %s: sequence stopped, suppressed (%s)", lead.id, match)
+        return
+
     step_no = (lead.sequence_step or 1) + 1
     campaign = session.get(Campaign, lead.campaign_id) if lead.campaign_id else None
     step = step_for(session, lead.campaign_id, step_no)

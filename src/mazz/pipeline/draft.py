@@ -193,8 +193,8 @@ def placeholder_marker_in(address: str) -> str | None:
 def unsubscribe_token(lead: Lead | str) -> str:
     """Deterministic, unguessable one-click unsubscribe token for a lead.
 
-    HMAC of the lead's email under `SESSION_SECRET`. Deterministic so the same
-    lead always gets the same link (re-drafting must not orphan a link already
+    HMAC of the lead's email under `UNSUBSCRIBE_SECRET` (else
+    `SESSION_SECRET`). Deterministic so the same lead always gets the same link (re-drafting must not orphan a link already
     in someone's inbox) and so Phase 1 output is reproducible; keyed so the
     token cannot be derived from the address by a third party.
 
@@ -202,7 +202,8 @@ def unsubscribe_token(lead: Lead | str) -> str:
     """
 
     email = lead if isinstance(lead, str) else (lead.email or "")
-    secret = (get_settings().session_secret or "").encode("utf-8")
+    settings = get_settings()
+    secret = (settings.unsubscribe_secret or settings.session_secret or "").encode("utf-8")
     return hmac.new(secret, email.strip().lower().encode("utf-8"), hashlib.sha256).hexdigest()[:32]
 
 

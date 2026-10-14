@@ -110,6 +110,8 @@ _SAFE_ENV: dict[str, str] = {
     # optional entailment judge on, and `handle_verify` reads it from settings,
     # so a developer's `.env` could route queue tests through a paid model call.
     "VERIFY_JUDGE": "off",
+    # Token key: tests derive unsubscribe tokens from SESSION_SECRET alone.
+    "UNSUBSCRIBE_SECRET": "",
 }
 
 
@@ -119,6 +121,11 @@ def _no_live_providers(monkeypatch: pytest.MonkeyPatch):
     for key, value in _SAFE_ENV.items():
         monkeypatch.setenv(key, value)
     reload_settings()
+    # The login throttle is process memory; one test's bad passwords must not
+    # lock the next test out.
+    from mazz.web.routes import auth as auth_routes
+
+    auth_routes._failures.clear()
     yield
     # Re-clamp rather than trusting monkeypatch's own teardown ordering: this
     # leaves the settings cache pinned safe no matter what runs next, even if

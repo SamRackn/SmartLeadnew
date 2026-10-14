@@ -27,6 +27,7 @@ from mazz import audit
 from mazz.db import get_session
 from mazz.ingest.csv_import import email_sha256
 from mazz.models import Lead, LeadStatus, SuppressionEntry, Workspace
+from mazz.pipeline.sequence import LIVE_STATES
 from mazz.privacy import delete_person
 from mazz.web.auth import Account, current_account, current_user
 
@@ -82,9 +83,12 @@ def removals(
 def stop_matching_leads(
     session: Session, *, email: str | None, domain: str | None, actor: str
 ) -> int:
-    """Pull every not-yet-sent lead a new GLOBAL entry covers out of the send path."""
+    """Pull every not-yet-sent lead a new GLOBAL entry covers out of the send
+    path, and stop the sequence of any it covers mid-sequence."""
 
-    query = select(Lead).where(Lead.status.in_(_STOPPABLE))
+    query = select(Lead).where(
+        or_(Lead.status.in_(_STOPPABLE), Lead.sequence_state.in_(LIVE_STATES))
+    )
     if email:
         query = query.where(Lead.email == email)
     else:
@@ -98,7 +102,10 @@ def stop_matching_leads(
         )
     held = 0
     for lead in session.execute(query).scalars():
-        lead.status = LeadStatus.HELD
+        if lead.status in _STOPPABLE:
+            lead.status = LeadStatus.HELD
+        if lead.sequence_state in LIVE_STATES:
+            lead.sequence_state, lead.next_step_due_at = "stopped", None
         audit.record(session, actor, "hold_suppressed", "lead", lead.id)
         held += 1
     return held
@@ -161,7 +168,7 @@ def add_removal(
         leads_held=held,
     )
     return _render(request, session, account, user,
-                   message=f"Added {email or domain}. {held} pending lead(s) held.")
+                   message=f"Added {email or domain}. {held} lead(s) held or stopped.")
 
 
 @router.post("/removals/delete-person", response_class=HTMLResponse)

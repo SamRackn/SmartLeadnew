@@ -109,7 +109,7 @@ of this file for what is actually live.
 
 ---
 
-## Proposed CLAUDE.md patch (NOT applied — Sam decides)
+## CLAUDE.md patch (applied 2026-10-14 on Sam's go, with the launch answers folded in)
 
 ```diff
 -## Primary constraint: COST PER USABLE LEAD
@@ -453,7 +453,7 @@ unless given `--commit`; it does the work in a transaction and rolls it back.
 | `leads <csv> --campaign <id>` | (b) campaign lead export | see below; prints counts, flags a mismatch with `smartlead.EXPECTED` (864 / 223 / 641 / 120 / 101 / 2 as of 2026-10-06) |
 | `adopt` | — | adopts each live legacy lead's Gmail thread (read-only search), then queues its follow-up |
 
-**Run order at cutover:** Maaz **pauses the Smartlead campaign first** →
+**Run order at cutover** (superseded 2026-10-14: see "Cutover run order" at the end; mailboxes are connected and rehearsed BEFORE the pause): Maaz **pauses the Smartlead campaign first** →
 exports file B and reads the counts off the paused campaign (update
 `EXPECTED`) → `suppression` → `exclusions` → `leads` (each dry, then
 `--commit`) → Maaz detaches the mailboxes from the campaign (gate 6) →
@@ -649,3 +649,150 @@ code.
 
 Tests: `tests/test_deploy_scripts.py::test_deployment_problems`,
 `::test_the_app_and_worker_refuse_to_start_unsafe`.
+
+---
+
+## Client answers, round 2 (Maaz, 2026-10-14)
+
+Unchanged from 2026-10-06 and already built: postal address Search Site
+Marketing, Inc, 6 Rockford Drive, West Nyack, NY 10994 (reconfirmed; the
+Blauvelt address is dead); 15/mailbox/day = 60/day, about 100 new leads/week,
+**no extra mailboxes** until there is deliverability data; **no performance
+statistics** in the copy (32 / 41 / 42 / 50+ barred until Sean names one
+client with permission); Maaz replies as himself, "working with Sean at Search
+Site Marketing", never as Sean, and Sean takes the qualified meetings;
+ClientRise deferred, and its "1 - 3 more clients every month" claim must not
+send (it cannot: there is no ClientRise campaign, and a digit in an offer line
+is refused by guardrail 3).
+
+New:
+* Mailboxes confirmed: sean.gough@ and gough@ on getsearchsitemarketing.com
+  and searchsitemarketinghub.com.
+* OAuth client type **Web application**, In production, scopes gmail.send +
+  gmail.readonly. Maaz finishes it once he has the redirect URI; the ID and
+  secret come by restricted share.
+* Zapmail written confirmation: asked, waiting.
+* Smartlead stays live until cutover. Maaz detaches and pauses **immediately
+  before** we switch, warmup stays ON. Authorising the mailboxes happens
+  before that (see run order).
+* `outreach.getsearchsitemarketing.com` approved; Maaz is checking whether he
+  or Zapmail controls that DNS.
+* Postmaster Tools for both domains: Maaz, before launch.
+
+### Code changes from this round (and audit items closed)
+
+| Item | Change |
+|---|---|
+| Launch cap | `seed-launch` now creates the four mailboxes, display name "Sean Gough", pinned to the launch campaign, **cap 15**. Insert-only: a cap a person changed survives a re-seed. `DEFAULT_DAILY_CAP` 30 → 15, so a mailbox added by hand with the cap blank no longer runs at double the client's number. |
+| M1 | `handle_followup` re-checks suppression before drafting (stops the sequence, `skip_reason=suppressed`; an unreadable list raises and retries). The `/u/` POST and a global removal also stop a live sequence. |
+| M2 | Launch vocabulary needs **2 distinct terms** (`min_vertical_matches: 2`): "LLP" or "P.C." alone no longer confirms a law firm. Sam's decision. |
+| M3 | Blocked-site fallback ratified in CLAUDE.md guardrail 2. |
+| M4 | `UNSUBSCRIBE_SECRET` keys the footer token (falls back to `SESSION_SECRET`), so rotating the session secret no longer kills links already sent. **Set once; never rotate.** |
+| M5 | Live sending (`SEND_ENABLED=true` + `EMAIL_SENDER=google`) refuses to boot, web and worker both, unless `UNSUBSCRIBE_BASE_URL` is https, `UNSUBSCRIBE_HOST` equals its host, `UNSUBSCRIBE_SECRET` is 32+ characters, `APP_BASE_URL` is https and the three OAuth settings are set. |
+| M7 | Session cookie is `Secure` whenever `APP_BASE_URL` is https. Login throttle: 5 failures per username per 15 minutes → 429 (per-process; fine for the one web instance). Pinned seeded mailboxes remove the fall-through to unpinned ones in practice. |
+| L10 | `python -m mazz.ops preflight`: exit 1 listing every go-live gate the code can see (boot settings as if live, confirmed non-placeholder postal address per sending workspace, the four mailboxes present + active + connected, no cap above 15, **no pending send jobs from the dry run**, no active proof points on the launch campaign). |
+
+Also fixed: two `test_sequence` tests pinned `now` to 2026-10-06 while the stub
+sender stamps the real clock, so once that date passed the second send looked
+earlier than the first and spacing refused it. They now send on the real
+clock.
+
+Still open (low, accepted): outbox mailbox header visible to scoped users,
+`sent_outbox.jsonl` not erased on delete, the attempt-to-wire race, rehearsal
+as an uncounted second `sender.send` site (L1), L2–L9, L11–L16 as listed
+under WP9.
+
+### Audit of this round (compliance-auditor, 2026-10-14)
+Guardrails 1-7 hold; no new send-job site; preflight only reads. Fixed:
+(MEDIUM) a draft written before `UNSUBSCRIBE_SECRET` was set carries a token
+`/u/` can no longer match; a live send now refuses any draft whose footer
+link does not resolve under the current key (held; re-draft it). (MEDIUM) the
+login throttle let anyone lock Maaz out by guessing his address; it is now
+keyed on (username, client IP) and drops empty buckets. (LOW) seeded
+mailboxes start `needs_reconnect`, so none can be picked to send before the
+OAuth callback connects it; preflight judges only the launch roster's caps.
+Accepted (low): a scoped workspace block stops a live sequence at its next
+follow-up job rather than at once; an unsubscribe stops only the lead row
+the token names (global suppression still blocks the rest at follow-up and
+send); a follow-up job that cannot read suppression fails after 5 retries
+and leaves the lead `sent` (surfaced by `ops health` as `jobs_failed`).
+Open question for Zapmail, alongside gate 2: does granting our OAuth app
+leave Smartlead's existing authorisation on the mailboxes intact?
+
+### For Maaz: DNS and OAuth (fill in once the host exists)
+
+There is no hosting account yet. Once the Render web service exists it has a
+hostname like `mazz-web-XXXX.onrender.com` (shown on the service page).
+
+| Record | Type | Name | Value |
+|---|---|---|---|
+| Unsubscribe host | CNAME | `outreach` (in getsearchsitemarketing.com) | `<render-web-host>.onrender.com` |
+| App host (recommended) | CNAME | `app` (same zone) | `<render-web-host>.onrender.com` |
+
+Add both hostnames as custom domains on the Render web service; Render issues
+the certificates. Then set:
+
+```
+APP_BASE_URL=https://app.getsearchsitemarketing.com
+UNSUBSCRIBE_BASE_URL=https://outreach.getsearchsitemarketing.com
+UNSUBSCRIBE_HOST=outreach.getsearchsitemarketing.com
+```
+
+**Authorized redirect URI** on the Google OAuth Web client:
+`https://app.getsearchsitemarketing.com/oauth/google/callback`
+(always `<APP_BASE_URL>/oauth/google/callback`). Add
+`getsearchsitemarketing.com` to the consent screen's authorized domains.
+Google asks for the domain to be verified in Search Console first, which
+Maaz can do with one more TXT record. If DNS turns out to be Zapmail's and
+they will not add records, pick a subdomain of a domain Maaz controls and
+change the three values and the redirect URI to match. Nothing in the code
+names the host.
+
+### Cutover run order (replaces the WP7 order above)
+
+1. Deploy (Render). Sending stays off: `SEND_ENABLED=false`, `EMAIL_SENDER=stub`.
+2. `python -m mazz.users seed-launch`, then set passwords. Maaz confirms the
+   postal address on `/campaigns` while logged in as himself.
+3. Maaz adds the redirect URI, sends the client ID and secret; set them along
+   with `OAUTH_TOKEN_KEY` and `UNSUBSCRIBE_SECRET` (new, 32+ characters,
+   never rotated). Any draft written before this step is refused at live
+   send (its unsubscribe token used the old key): re-draft it.
+4. Zapmail's written OK arrives (gate 2), then all four mailboxes are
+   authorised through Zapmail Custom OAuth from `/mailboxes/<id>/connect`
+   (gate 3). This is safe while Smartlead still sends from them: nothing
+   here sends while `SEND_ENABLED=false`, and reply sync only stores mail on
+   threads we started.
+5. Rehearsal (gate 5): run `scripts/rehearsal.py --seeds ...` in a one-off
+   shell with `SEND_ENABLED=true EMAIL_SENDER=google` set **on that command
+   only**. The worker's own env stays off. Check the headers;
+   `scripts/verify_dns.py` already passes for both domains.
+6. `python -m mazz.ops preflight`: everything but the config gate should be
+   met here (the config gate passes once step 3's values are all set).
+7. Maaz **pauses the Smartlead campaign**, exports file B (and A, C) from the
+   paused campaign. Update `smartlead.EXPECTED` from its counts.
+8. `python -m mazz.ingest.smartlead suppression | exclusions | leads`, each
+   dry, then `--commit` (gate 4).
+9. Maaz **detaches the four mailboxes** from the campaign; warmup stays ON
+   (gate 6).
+10. `EMAIL_SENDER=google` on both services; `adopt --commit`.
+11. `ops preflight` exits 0, and Sam says go (gate 7): `SEND_ENABLED=true` on
+    both services. Start at 15/mailbox/day.
+
+### Go-live gates
+
+| # | Gate | State | Owner |
+|---|---|---|---|
+| 1 | Postal address confirmed in the workspace row | address known; **confirm on `/campaigns` after deploy** | Maaz |
+| 2 | Google OAuth app (Web, In production) + Zapmail written OK | unmet: waiting on the redirect URI (needs the host) and on Zapmail | Maaz (Sam: host) |
+| 3 | Four mailboxes connected, one test send + read each | unmet | Maaz |
+| 4 | Smartlead exports A, B, C imported | unmet | Maaz → Sam |
+| 5 | `verify_dns.py` passes (met 2026-10-05) + rehearsal headers pass | half met | Sam |
+| 6 | Mailboxes detached from the Smartlead campaign, warmup on | unmet (deliberately last) | Maaz |
+| 7 | `ops preflight` clean and Sam says go | unmet | Sam |
+
+Inputs still needed: a hosting account (Render; ClientRise's card), DNS
+control for the unsubscribe and app hosts, OAuth client ID and secret, each
+mailbox's Zapmail UUID and domain id (or Maaz pastes the links into
+Zapmail's UI), Zapmail's written OK, Smartlead exports A/B/C, Sean's client
+and never-contact list, seed inboxes for the rehearsal (Maaz's:
+maaz@clientrise.io; Sean's: not given), monthly costs once billed.

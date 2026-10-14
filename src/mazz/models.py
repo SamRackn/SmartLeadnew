@@ -878,7 +878,8 @@ class Mailbox(Base):
 
     ``daily_cap`` is the deliverability control, and it is deliberately small.
     Google Workspace itself permits ~2000 recipients/day; cold outreach from a
-    burner domain does not survive anything near that. The default is 30.
+    burner domain does not survive anything near that. New rows from the
+    form default to ``DEFAULT_DAILY_CAP`` (15, the client's launch cap).
 
     ``campaign_id`` is CLAUDE.md's "one-campaign-per-mailbox must remain
     possible without a migration": leave it NULL and the mailbox serves every

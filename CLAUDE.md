@@ -9,16 +9,21 @@ Supersedes the original brief, which scoped this as a research/personalization
 layer feeding Smartlead as the sending rail. That brief is in git history
 (commit 66fd0be) if the earlier reasoning is ever needed.
 
-**Sending is ours now.** As of 2026-09-21 the Smartlead client is deleted, not
-flagged off, and approved mail goes out of the client's own Google Workspace
-mailboxes over the Gmail API (`docs/DECISIONS.md`). Smartlead remains a
-reference for capabilities we have not built yet — sequences, unified inbox,
-reply classification — and nothing else.
+**Sending is ours; Smartlead is still paid for.** Approved mail goes out of
+the client's own Google Workspace mailboxes over the Gmail API, authorised per
+mailbox with OAuth (Zapmail Custom OAuth), not a service account. The Smartlead
+subscription stays: it hosts warmup and the SmartSenders mailboxes, which
+cannot be transferred. Report it in costs; it is not zero. Launch state,
+client answers and the go-live gates live in `docs/LAUNCH-PLAN.md`.
 
-## Primary constraint: COST PER USABLE LEAD
-Cost is the stated primary objective — not feature parity, not eliminating
-subscriptions for their own sake. Every build-vs-buy call gets made on measured
-cost per usable lead, and "keep paying the third party" is a valid answer.
+## Primary metric: COST PER QUALIFIED CONVERSATION (client's choice, 2026-09-29)
+Qualified = a genuine response from a decision-maker in the campaign's
+vertical showing enough interest to discuss the services, tagged by a human.
+Cost per qualified conversation = month's recorded costs ÷ conversations tagged
+qualified that month (`mazz/metrics.py`, `/dashboard`). Cost per usable lead
+stays as a secondary number. Cost is still the objective — not feature parity,
+not eliminating subscriptions for their own sake — and "keep paying the third
+party" remains a valid build-vs-buy answer.
 
 ### The cost hierarchy (measured, see docs/GAP-ANALYSIS.md)
 At 1k / 10k / 100k leads per month:
@@ -27,7 +32,7 @@ At 1k / 10k / 100k leads per month:
 |---|---|---|---|
 | **AI research + personalization** | **57%** | **70%** | **70%** |
 | Mailboxes + domains + verification | 13% | 16% | 17% |
-| ~~Smartlead subscription~~ (removed 2026-09-21) | ~~20%~~ | ~~16%~~ | ~~6%~~ |
+| Smartlead subscription (kept: warmup + SmartSenders) | 20% | 16% | 6% — re-measure |
 | Compute, warmup | 10% | 8% | 7% |
 
 **This table is now out of date and is kept for the reasoning, not the
@@ -37,12 +42,11 @@ fixed template over a deterministic qualification (`docs/DECISIONS.md`) — so
 the 57-70% AI line applies only to the deep-research path, which is now spent
 on leads that REPLIED rather than on every cold list entry. Re-measure before
 quoting a split. The reasoning stands: AI cost engineering outranks everything
-else precisely because that is what made it worth removing from the cold path. The Smartlead line is now zero —
-the client sends from his own mailboxes — which makes AI a LARGER share of
-what remains, not a smaller problem. The measured percentages above are the
-pre-removal ones and are deliberately not re-derived here: owning the rail
-adds compute and operational cost that has not been measured yet. Re-measure
-in `docs/GAP-ANALYSIS.md` before quoting a new split.
+else precisely because that is what made it worth removing from the cold path.
+The Smartlead line is not zero: the subscription stays for warmup and the
+SmartSenders mailboxes. Owning the rail adds compute and operational cost that
+has not been measured yet. Re-measure in `docs/GAP-ANALYSIS.md` before quoting
+a new split.
 
 Cost per usable lead today: ~$0.19 at 1k, ~$0.11 at 10k, ~$0.064 at 100k.
 Drive those down; report them honestly; never trade draft quality for them
@@ -63,22 +67,26 @@ We DO build the orchestration on top: rotation, pacing, sequencing, inbox,
 classification, routing, suppression, research, personalization.
 
 ## Required capabilities and current state
-Built: lead import/management · suppression & unsubscribe · domain-keyed
-research caching · own company research engine (qualification pages: homepage,
-services, contact — 2 fetches/domain, no AI)
-· mailbox management (roster, daily caps, spacing, rotation, health) · owned
-sending (Gmail API, one human-approved message at a time).
+Built: lead import/management (CSV, Excel, ZoomInfo headers) · suppression,
+removals page and public `/u/<token>` unsubscribe · domain-keyed research
+caching · own company research engine (homepage, services, contact — 2
+fetches/domain, no AI) · mailbox management (roster, caps, spacing, domain
+rotation, bounce auto-pause, per-mailbox OAuth) · owned sending (Gmail API,
+one human-approved message at a time, `SEND_ENABLED` kill switch) ·
+three-step sequences (per-campaign `sequence_steps`, same thread, business
+days, Mon–Fri 9–17 send window in the lead's timezone, per-company cap) ·
+reply sync, deterministic classification (bounce, OOO, unsubscribe, negative)
+and the `/inbox` with human tags · per-user logins and `audit_events` ·
+workspaces with scoped users and scoped suppression · cost entries and cost
+per qualified conversation on `/dashboard` · Smartlead cutover import ·
+`ops preflight` go-live check.
 
-Partial: scheduling/pacing (per-mailbox caps and spacing enforced at send;
-no send-window or time-of-day shaping) · company research (live adapter built;
-paid provider arm under evaluation) · email 1 (fixed template, zero AI; a
-per-campaign body template is the next step and needs the verifier to treat an
-operator-written sentence as an untrusted claim) · performance tracking (`/dashboard` reports
-cost per usable lead, hold rate, cache effectiveness and queue health).
+Partial: company research (paid provider arm under evaluation) · email 1
+(fixed per-campaign template, zero AI) · multi-client workspaces (scoping is
+built; ClientRise's own workspace is staged, not launched).
 
-Missing: multi-step campaigns · lead distribution · activity-based
-stop/continue · unified inbox · reply classification · APIs/webhooks ·
-multi-client workspaces.
+Missing: canned replies · lead distribution · APIs/webhooks · holiday
+calendar in the send window.
 
 ## Pipeline
 ```
@@ -110,6 +118,16 @@ throughput. All are built and audited.
    review panel says plainly that no vertical was confirmed. A blank vertical
    without the flag still refuses to draft, loudly, because it is normally a
    setup gap and the error is what gets it filled in.
+   For template campaigns the gate is vertical confirmation on the prospect's
+   own pages (`min_vertical_matches` distinct terms; 2 for the launch law-firm
+   campaign, so "LLP" alone does not make an accounting firm a law firm).
+   When the site is **blocked or unreachable**, and only then, the lead may
+   qualify from its own record if its industry is legal services AND its
+   company name is law-firm-like (`fallback_industry_terms` +
+   `fallback_name_terms`, cited as `lead_record`). An outage retries; it never
+   falls back. Unconfirmed = `no_angle`, `skip_reason=vertical_unconfirmed`,
+   counted and listed. Generic fallback stays OFF for Search Site Marketing.
+   (Blocked-site fallback ratified 2026-10-14.)
    (Restated 2026-09-21. It previously read "weak signals mean no email",
    scoped to event research; against a list of nine-person law firms that gate
    refused to write to the entire addressable market. `docs/DECISIONS.md`.)
@@ -148,7 +166,15 @@ throughput. All are built and audited.
 5. **Delete-by-person is complete** — leads, drafts, jobs, and person-scoped facts
    pruned from the shared company cache by `subject_email`.
 6. **Footer carries a physical mailing address and one-click unsubscribe**, added
-   outside the composer so no model can omit it.
+   outside the composer so no model can omit it. The address is per workspace
+   and renders only once a named person has confirmed it.
+7. **Kill switch.** `SEND_ENABLED` (default false) is checked in the send path
+   before any sender exists; false renders the MIME to `out/dryrun/` and
+   nothing leaves. Live sending (`SEND_ENABLED=true`, `EMAIL_SENDER=google`)
+   refuses to boot without an https unsubscribe host isolated by
+   `UNSUBSCRIBE_HOST`, an `UNSUBSCRIBE_SECRET`, and the OAuth settings
+   (`config.deployment_problems`). Run `python -m mazz.ops preflight` before
+   flipping it.
 
 ### Known gap in the guardrails
 Verification proves a claim traces to retrieved evidence. It does **not** prove
@@ -189,21 +215,24 @@ and the legacy `scoring_config`) · `proof_points` (the sender's own evidence:
 `claim_text` verbatim, `client_name` NOT NULL, `occurred_on`, `source_note`,
 `active` — the only source of a digit in the copy) · `mailboxes`
 (the client's sending accounts, `daily_cap`, `min_spacing_seconds`,
-`credential_ref` — a NAME, never a key) · `sent_messages` (one row per email
-that actually left; the daily-cap denominator, and the thread key replies will
-match on).
-To come: `sequences`, `replies`.
+`credential_ref` now vestigial; the Fernet-encrypted OAuth refresh token is
+the one secret in the database) · `sent_messages` (one row per email that
+actually left; the daily-cap denominator and the thread key replies match on)
+· `sequence_steps` · `replies` · `users`, `user_workspaces`, `audit_events` ·
+`cost_entries`.
 
 ## Stack
 Postgres · Python · FastAPI + Jinja2 + HTMX (server-rendered; no SPA, no bundler)
-· Claude via ANTHROPIC_API_KEY · Gmail API via a service account with
-domain-wide delegation (`.[google]` extra, `gmail.send` scope only) · Alembic ·
-pytest.
+· Claude via ANTHROPIC_API_KEY · Gmail API via per-mailbox OAuth (`.[google]`
+extra; `gmail.send` + `gmail.readonly`, nothing broader), refresh tokens
+encrypted at rest with `OAUTH_TOKEN_KEY` · Alembic · pytest · Render (one web,
+one worker, managed Postgres; `render.yaml`).
 
-**Sending is off by default.** `EMAIL_SENDER=stub` writes the real MIME to
-`sent_outbox.jsonl` and touches no network. Only `EMAIL_SENDER=google` sends,
-and a `GMAIL_SA_*` key appearing in the environment must never flip it — same
-rule as `DRAFT_COMPOSER`, sharper consequence.
+**Sending is off by default.** `SEND_ENABLED=false` writes dry-run MIME and
+sends nothing. `EMAIL_SENDER=stub` writes to `sent_outbox.jsonl` and touches
+no network. Only `SEND_ENABLED=true` with `EMAIL_SENDER=google` sends, and a
+credential appearing in the environment must never flip either — same rule as
+`DRAFT_COMPOSER`, sharper consequence.
 
 **Claude API specifics** (verified, several changed in 2025–26):
 `claude-opus-5` default; structured output via `output_config.format` (the
@@ -222,7 +251,12 @@ never fixes). Commands: `/phase1`, `/seed`, `/audit`.
 Do not rebuild working systems. Do not duplicate another agent's files. Report
 honestly — paste real test output, never claim green without running it.
 
-## Work order (cost-primary)
+## Work order
+V1 sends fixed templates with no model calls (`DRAFT_COMPOSER=template`).
+Launch readiness, reply handling and suppression lead; AI cost work returns
+if and when a model returns to the cold path. Launch status:
+`docs/LAUNCH-PLAN.md`.
+
 1. **AI cost engineering** — largely DONE for the cold path, by deleting the
    spend rather than optimising it: email 1 costs zero tokens, and research
    dropped from six-to-eight fetches per domain to two. What remains is the
@@ -236,8 +270,8 @@ honestly — paste real test output, never claim green without running it.
    citing it passes verification correctly.
 3. **Own research engine over paid providers** wherever the free baseline suffices.
 4. **Sending platform** — mailboxes, rotation, caps, pacing and the send path
-   are BUILT (2026-09-21, `docs/DECISIONS.md`). Still open on this item:
-   sequences/follow-ups, the unified inbox, reply classification, and
-   send-window shaping. Deliverability is now our liability: warmup stays
-   bought, and SPF/DKIM/DMARC per burner domain is a standing obligation.
+   are BUILT, and so are follow-ups, the inbox, reply classification and the
+   send window (launch-v1). Deliverability is now our liability: warmup stays
+   bought (in Smartlead), and SPF/DKIM/DMARC per burner domain is a standing
+   obligation (`scripts/verify_dns.py`).
 5. Multi-tenancy, APIs/webhooks, analytics — as the business actually requires.

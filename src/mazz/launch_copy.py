@@ -11,7 +11,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from mazz.models import Campaign, SequenceStep, SuppressionEntry, Workspace
+from mazz.models import Campaign, Mailbox, MailboxStatus, SequenceStep, SuppressionEntry, Workspace
 
 CAMPAIGN_NAME = "Search Site Marketing, law firms"
 VERTICAL = "law firms"
@@ -43,6 +43,10 @@ QUALIFICATION = {
         "attorney", "attorneys", "law firm", "law firms", "law office", "law offices",
         "practice areas", "practice area", "llp", "pllc", "p.c.",
     ],
+    # Two distinct terms, not one: "LLP" or "P.C." alone also fits an
+    # accounting firm, and "We help law firms" to a CPA is a false premise
+    # (audit M2, Sam's decision 2026-10-14).
+    "min_vertical_matches": 2,
     # The copy's question presupposes nothing the site must show; the gate is
     # the vertical alone (client decision).
     "require_intake_signal": False,
@@ -52,6 +56,16 @@ QUALIFICATION = {
         "law", "legal", "attorney", "attorneys", "lawyers", "llp", "pllc", "p.c.", "esq",
     ],
 }
+
+#: Sean's four sending mailboxes (confirmed by Maaz 2026-10-14). The cap is
+#: the client's launch decision: 15/mailbox/day, 60/day in all, follow-ups
+#: included. Raising it is a human edit on /mailboxes, never a re-seed.
+MAILBOXES = (
+    "sean.gough@getsearchsitemarketing.com", "gough@getsearchsitemarketing.com",
+    "sean.gough@searchsitemarketinghub.com", "gough@searchsitemarketinghub.com",
+)
+DISPLAY_NAME = "Sean Gough"
+DAILY_CAP = 15
 
 #: Never contact: the senders' own domains (client decision).
 OWN_DOMAINS = (
@@ -92,3 +106,21 @@ def ensure_launch_campaign(session: Session, workspace: Workspace) -> Campaign:
             session.add(SuppressionEntry(domain=domain, reason="own domain", added_by="seed-launch"))
     session.flush()
     return campaign
+
+
+def ensure_launch_mailboxes(session: Session, campaign: Campaign) -> None:
+    """Sean's four mailboxes, pinned to the campaign at the launch cap.
+
+    Insert only: an existing row keeps whatever cap, pin and status a person
+    gave it. Each starts ``needs_reconnect`` and is never picked to send
+    until connected through /mailboxes/<id>/connect."""
+
+    for address in MAILBOXES:
+        if session.execute(select(Mailbox.id).where(Mailbox.email_address == address)).first() is None:
+            session.add(Mailbox(
+                email_address=address, display_name=DISPLAY_NAME, credential_ref="oauth",
+                daily_cap=DAILY_CAP, campaign_id=campaign.id,
+                # Never selected to send until the OAuth callback connects it.
+                status=MailboxStatus.NEEDS_RECONNECT,
+            ))
+    session.flush()

@@ -212,7 +212,7 @@ def test_a_removal_takes_effect_at_once_and_is_attributed(session, client):
     login(client, "client")
 
     resp = client.post("/removals", data={"value": "ADA@firm-law.com", "reason": "asked by reply"})
-    assert resp.status_code == 200 and "1 pending lead(s) held" in resp.text
+    assert resp.status_code == 200 and "1 lead(s) held or stopped" in resp.text
     session.expire_all()
     assert session.get(Lead, lead.id).status is LeadStatus.HELD
     entry = session.execute(select(SuppressionEntry)).scalar_one()

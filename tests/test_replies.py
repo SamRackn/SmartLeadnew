@@ -57,6 +57,7 @@ def env(monkeypatch):
         "OAUTH_TOKEN_KEY": KEY,
         "GOOGLE_OAUTH_CLIENT_ID": "client-id.apps.example",
         "GOOGLE_OAUTH_CLIENT_SECRET": "client-secret",
+        # https, so the session cookie is Secure: clients here use https://testserver.
         "APP_BASE_URL": "https://app.example.test",
     }.items():
         monkeypatch.setenv(k, v)
@@ -522,7 +523,7 @@ def _stub_google(monkeypatch, who="sean.gough@getsearchsitemarketing.com"):
 def test_the_callback_stores_only_an_encrypted_token_and_burns_the_state(session, monkeypatch):
     box = _connect_box(session, status=MailboxStatus.NEEDS_RECONNECT, consecutive_failures=3)
     _stub_google(monkeypatch)
-    client = TestClient(create_app())
+    client = TestClient(create_app(), base_url="https://testserver")
     resp = client.get("/oauth/google/callback", params={"code": "abc", "state": "STATE1"})
     assert resp.status_code == 200 and "connected" in resp.text.lower()
     assert "rt-secret-123" not in resp.text and "abc" not in resp.text
@@ -538,7 +539,7 @@ def test_the_callback_stores_only_an_encrypted_token_and_burns_the_state(session
 
 def test_the_callback_refuses_the_wrong_account_a_stale_link_and_a_denied_consent(session, monkeypatch):
     box = _connect_box(session)
-    client = TestClient(create_app())
+    client = TestClient(create_app(), base_url="https://testserver")
     _stub_google(monkeypatch, who="intruder@example.com")
     assert client.get("/oauth/google/callback",
                       params={"code": "c", "state": "STATE1"}).status_code == 400
@@ -568,13 +569,13 @@ def test_the_connect_screen_is_operator_only_and_never_shows_a_token(session):
     ensure_account("op@example.test")
     ensure_account("sean@example.test", operator=False, workspace_ids=(mine.workspace_id,))
 
-    op = login(TestClient(create_app()), "op@example.test")
+    op = login(TestClient(create_app(), base_url="https://testserver"), "op@example.test")
     page = op.get(f"/mailboxes/{box.id}/connect")
     assert page.status_code == 200 and "STATE1" in page.text and "connected" in page.text
     assert "rt-visible" not in page.text and "gAAAA" not in page.text
     assert "gmail.send" in page.text and "gmail.readonly" in page.text
 
-    assert login(TestClient(create_app()), "sean@example.test").get(
+    assert login(TestClient(create_app(), base_url="https://testserver"), "sean@example.test").get(
         f"/mailboxes/{box.id}/connect").status_code == 403
     assert op.post(f"/mailboxes/{box.id}/connect/new", follow_redirects=False).status_code == 303
     session.expire_all()
@@ -584,7 +585,7 @@ def test_the_connect_screen_is_operator_only_and_never_shows_a_token(session):
 def test_a_needs_reconnect_mailbox_cannot_be_resumed_by_hand(session):
     box = _connect_box(session, status=MailboxStatus.NEEDS_RECONNECT)
     ensure_account("op@example.test")
-    op = login(TestClient(create_app()), "op@example.test")
+    op = login(TestClient(create_app(), base_url="https://testserver"), "op@example.test")
     assert op.post(f"/mailboxes/{box.id}/status", data={"status": "active"}).status_code == 400
 
 
@@ -647,13 +648,13 @@ def test_inbox_tags_are_human_attributed_dated_and_workspace_scoped(session):
     ensure_account("maaz@example.test")
     ensure_account("sean@example.test", operator=False, workspace_ids=(campaign.workspace_id,))
 
-    sean = login(TestClient(create_app()), "sean@example.test")
+    sean = login(TestClient(create_app(), base_url="https://testserver"), "sean@example.test")
     page = sean.get("/inbox?show=all").text
     assert f"/leads/{mine.id}" in page and f"/leads/{theirs.id}" not in page
     assert sean.post(f"/inbox/{r_theirs.id}/tag", data={"tag": "interested"}).status_code == 404
     assert sean.post(f"/inbox/{r_mine.id}/tag", data={"tag": "bogus"}).status_code == 400
 
-    maaz = login(TestClient(create_app()), "maaz@example.test")
+    maaz = login(TestClient(create_app(), base_url="https://testserver"), "maaz@example.test")
     for tag in ("interested", "qualified"):
         resp = maaz.post(f"/inbox/{r_mine.id}/tag", data={"tag": tag}, follow_redirects=False)
         assert resp.status_code == 303
@@ -679,7 +680,7 @@ def test_an_interested_reply_unhandled_past_two_business_hours_is_highlighted(se
         session.add(ReplyTag(reply_id=r.id, tag="interested", tagged_by="maaz@example.test"))
     session.commit()
     ensure_account("maaz@example.test")
-    maaz = login(TestClient(create_app()), "maaz@example.test")
+    maaz = login(TestClient(create_app(), base_url="https://testserver"), "maaz@example.test")
 
     page = maaz.get("/inbox").text
     assert "1 interested reply has waited" in page
@@ -696,7 +697,7 @@ def test_ooo_stays_out_of_the_attention_list_and_unsubscribes_ask_for_confirmati
     _reply(session, lead, mid="a", cls=R.OOO)
     unsub = _reply(session, lead, mid="b", cls=R.UNSUBSCRIBE, needs_confirmation=True)
     ensure_account("maaz@example.test")
-    maaz = login(TestClient(create_app()), "maaz@example.test")
+    maaz = login(TestClient(create_app(), base_url="https://testserver"), "maaz@example.test")
     body = maaz.get("/inbox").text.split("<tbody>")[1]
     assert "suppressed automatically" in body and body.count("<tr") == 1
     maaz.post(f"/inbox/{unsub.id}/confirm")
@@ -752,7 +753,7 @@ def test_the_callback_survives_google_failing_to_say_who_consented(session, monk
         raise RuntimeError("HttpError 503")
 
     monkeypatch.setattr(google_oauth, "mailbox_identity", boom)
-    resp = TestClient(create_app()).get("/oauth/google/callback", params={"code": "c", "state": "STATE1"})
+    resp = TestClient(create_app(), base_url="https://testserver").get("/oauth/google/callback", params={"code": "c", "state": "STATE1"})
     assert resp.status_code == 400
     session.expire_all()
     assert session.get(Mailbox, box.id).oauth_refresh_token_enc is None
@@ -807,9 +808,9 @@ def test_only_an_operator_can_lift_an_automatic_unsubscribe_and_only_that_kind(s
 
     ensure_account("maaz@example.test")
     ensure_account("sean@example.test", operator=False, workspace_ids=(lead.campaign.workspace_id,))
-    sean = login(TestClient(create_app()), "sean@example.test")
+    sean = login(TestClient(create_app(), base_url="https://testserver"), "sean@example.test")
     assert sean.post(f"/inbox/{reply.id}/lift", data={"confirm": "LIFT"}).status_code == 403
-    maaz = login(TestClient(create_app()), "maaz@example.test")
+    maaz = login(TestClient(create_app(), base_url="https://testserver"), "maaz@example.test")
     assert "lift suppression" in maaz.get("/inbox").text
     assert maaz.post(f"/inbox/{reply.id}/lift", data={"confirm": ""}).status_code == 400
     resp = maaz.post(f"/inbox/{reply.id}/lift", data={"confirm": "LIFT"}, follow_redirects=False)
@@ -833,7 +834,7 @@ def test_outbox_shows_a_stopped_or_paused_lead_as_blocked_and_release_refuses(se
     mailbox(session)
     lead = drafted_and_approved(session, campaign)
     ensure_account("maaz@example.test")
-    maaz = login(TestClient(create_app()), "maaz@example.test")
+    maaz = login(TestClient(create_app(), base_url="https://testserver"), "maaz@example.test")
 
     lead.sequence_state, lead.next_step_due_at = "paused", h.utcnow() + timedelta(days=3)
     session.commit()

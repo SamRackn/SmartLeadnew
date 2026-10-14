@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import re
 from functools import lru_cache
+from urllib.parse import urlsplit
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -48,6 +49,11 @@ class Settings(BaseSettings):
 
     # --- Review app -----------------------------------------------------
     session_secret: str = "changeme"
+    # Keys the unsubscribe token in every footer. Separate from the session
+    # secret so rotating that (a leaked login) never kills links already in
+    # inboxes. Blank falls back to SESSION_SECRET; live sending requires it.
+    # Set once and never rotate.
+    unsubscribe_secret: str = ""
 
     # --- Compliance -----------------------------------------------------
     # CAN-SPAM requires a physical mailing address in every outbound email.
@@ -78,10 +84,18 @@ class Settings(BaseSettings):
     # reach /u/* and /health only; everything else is a 404 there. Blank = no
     # dedicated host (single-host dev).
     unsubscribe_host: str = ""
+    # Public https base serving /u/<token>, and this app's own base URL.
+    unsubscribe_base_url: str = ""
+    app_base_url: str = ""
+    # Per-mailbox Google OAuth (integrations/google_oauth.py reads these).
+    google_oauth_client_id: str = ""
+    google_oauth_client_secret: str = ""
+    oauth_token_key: str = ""
     # Per-mailbox daily send ceiling used when a mailbox row does not set its
     # own. Small on purpose -- Workspace permits ~2000/day, and cold outreach
-    # from a burner domain does not survive anything near that.
-    default_daily_cap: int = 30
+    # from a burner domain does not survive anything near that. 15 is the
+    # client's launch decision (2026-10-14).
+    default_daily_cap: int = 15
     # Minimum gap between two sends from the SAME mailbox, in seconds.
     default_min_spacing_seconds: int = 300
 
@@ -136,6 +150,35 @@ def deployment_problems(settings: Settings, *, sending: bool = False) -> list[st
             f"SEND_ENABLED is true but EMAIL_SENDER is {settings.email_sender!r}: leads "
             "would be booked as sent (and followed up) with nothing sent"
         )
+    if settings.send_enabled and settings.email_sender == "google":
+        problems += _live_sending_problems(settings)
+    return problems
+
+
+def _live_sending_problems(settings: Settings) -> list[str]:
+    """What real mail needs that a dry run does not. Checked in both
+    processes: the web app is the one serving /u/ and isolating its host."""
+
+    problems = []
+    unsub = settings.unsubscribe_base_url.strip()
+    host = settings.unsubscribe_host.strip().lower()
+    if not unsub.startswith("https://"):
+        problems.append(f"UNSUBSCRIBE_BASE_URL {unsub!r} is not https: every footer link would be dead")
+    elif not host or (urlsplit(unsub).hostname or "") != host:
+        problems.append(
+            f"UNSUBSCRIBE_HOST {host!r} must be set to the host of UNSUBSCRIBE_BASE_URL, "
+            "or the public unsubscribe host also serves the login page"
+        )
+    if len(settings.unsubscribe_secret.strip()) < 32:
+        problems.append(
+            "UNSUBSCRIBE_SECRET is unset or under 32 characters: unsubscribe links would "
+            "die whenever SESSION_SECRET is rotated"
+        )
+    if not settings.app_base_url.strip().startswith("https://"):
+        problems.append("APP_BASE_URL is not https: the OAuth redirect and session cookie need it")
+    for name in ("google_oauth_client_id", "google_oauth_client_secret", "oauth_token_key"):
+        if not getattr(settings, name).strip():
+            problems.append(f"{name.upper()} is unset: no mailbox can send or be read")
     return problems
 
 

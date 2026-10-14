@@ -88,6 +88,8 @@ def create_app() -> FastAPI:
         secret_key=settings.session_secret,
         session_cookie="mazz_review_session",
         same_site="lax",
+        # Secure cookie whenever the app is served over https (always, live).
+        https_only=settings.app_base_url.startswith("https://"),
     )
 
     templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
