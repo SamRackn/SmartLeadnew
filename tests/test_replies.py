@@ -278,6 +278,9 @@ def test_an_ooo_pauses_until_the_business_day_after_return_then_resumes(session,
     from mazz.pipeline.queue import JobContext
 
     job = session.execute(select(Job).where(Job.kind == "followup")).scalar_one()
+    # The resume date above is fixed; "too early" must be relative to now or
+    # the test expires the day it names.
+    lead.next_step_due_at = h.utcnow() + timedelta(hours=1)
     with pytest.raises(JobDeferred):
         handle_followup(JobContext(session=session, job=job, lead=lead, handlers={}))
     # After the return date it resumes and writes the draft.
