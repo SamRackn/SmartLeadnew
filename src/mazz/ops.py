@@ -302,7 +302,7 @@ def check_preflight(session: Session, *, settings=None) -> list[Alert]:
         address = (ws.postal_address or "").strip()
         if not address or ws.postal_address_confirmed_at is None:
             alerts.append(Alert(CRITICAL, "postal_address",
-                                f"{ws.name}: no confirmed postal address (confirm it on /campaigns)"))
+                                f"{ws.name}: no confirmed postal address (confirm it on /workspaces/{ws.id}/edit)"))
         elif marker := placeholder_marker_in(address):
             alerts.append(Alert(CRITICAL, "postal_address",
                                 f"{ws.name}: address contains placeholder {marker!r}"))

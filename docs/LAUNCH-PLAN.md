@@ -752,7 +752,7 @@ names the host.
 
 1. Deploy (Render). Sending stays off: `SEND_ENABLED=false`, `EMAIL_SENDER=stub`.
 2. `python -m mazz.users seed-launch`, then set passwords. Maaz confirms the
-   postal address on `/campaigns` while logged in as himself.
+   postal address on Workspaces → edit workspace (`/workspaces/<id>/edit`) while logged in as himself.
 3. Maaz adds the redirect URI, sends the client ID and secret; set them along
    with `OAUTH_TOKEN_KEY` and `UNSUBSCRIBE_SECRET` (new, 32+ characters,
    never rotated). Any draft written before this step is refused at live
