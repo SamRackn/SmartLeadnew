@@ -782,7 +782,7 @@ names the host.
 
 | # | Gate | State | Owner |
 |---|---|---|---|
-| 1 | Postal address confirmed in the workspace row | address known; **confirm on `/campaigns` after deploy** | Maaz |
+| 1 | Postal address confirmed in the workspace row | address known; **confirm on `/workspaces/<id>/edit` after deploy** | Maaz |
 | 2 | Google OAuth app (Web, In production) + Zapmail written OK | unmet: waiting on the redirect URI (needs the host) and on Zapmail | Maaz (Sam: host) |
 | 3 | Four mailboxes connected, one test send + read each | unmet | Maaz |
 | 4 | Smartlead exports A, B, C imported | unmet | Maaz → Sam |
