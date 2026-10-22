@@ -23,7 +23,7 @@ from sqlalchemy import func, select
 from mazz.config import deployment_problems, get_settings
 from mazz.db import session_scope
 from mazz.models import Lead, LeadStatus, Reply
-from mazz.web.auth import SESSION_USER_KEY, AuthRequired, Forbidden, load_account
+from mazz.web.auth import SESSION_EPOCH_KEY, SESSION_USER_KEY, AuthRequired, Forbidden, load_account
 from mazz.web.routes import auth as auth_routes
 from mazz.web.routes import campaigns as campaigns_routes
 from mazz.web.routes import dashboard as dashboard_routes
@@ -75,7 +75,7 @@ def nav_state(request: Request) -> dict | None:
     if not handle:
         return None
     with session_scope() as session:
-        account = load_account(session, handle)
+        account = load_account(session, handle, request.session.get(SESSION_EPOCH_KEY))
         if account is None:
             return None
         leads = select(func.count(Lead.id)).where(account.lead_filter())

@@ -1084,6 +1084,11 @@ class User(Base):
     active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=text("true")
     )
+    #: Stamped into the session cookie at login. Logout and a password change
+    #: bump it, so every cookie issued before is refused server-side.
+    session_epoch: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
     created_at: Mapped[datetime] = _utcnow_column(
         nullable=False, server_default=func.now()
     )

@@ -19,7 +19,7 @@ import sys
 from dataclasses import dataclass
 
 from fastapi import Depends, Request
-from sqlalchemy import select, true
+from sqlalchemy import select, true, update
 from sqlalchemy.orm import Session
 
 from mazz.db import get_session, session_scope
@@ -27,6 +27,7 @@ from mazz.models import Campaign, Lead, User, UserWorkspace
 
 __all__ = [
     "SESSION_USER_KEY",
+    "SESSION_EPOCH_KEY",
     "Account",
     "AuthRequired",
     "Forbidden",
@@ -42,6 +43,7 @@ __all__ = [
 ]
 
 SESSION_USER_KEY = "user"
+SESSION_EPOCH_KEY = "epoch"
 
 _ALGORITHM = "sha256"
 _ITERATIONS = 600_000  # OWASP 2023 for PBKDF2-HMAC-SHA256; old hashes carry their own count
@@ -150,18 +152,23 @@ def current_account(request: Request, session: Session = Depends(get_session)) -
     handle = request.session.get(SESSION_USER_KEY)
     if not handle:
         raise AuthRequired("no active session")
-    account = load_account(session, handle)
+    account = load_account(session, handle, request.session.get(SESSION_EPOCH_KEY))
     if account is None:
-        request.session.pop(SESSION_USER_KEY, None)
+        request.session.clear()
         raise AuthRequired("account no longer active")
     return account
 
 
-def load_account(session: Session, handle: str) -> Account | None:
-    """The active account for a login handle, or None. Reads only; no side effects."""
+def load_account(session: Session, handle: str, epoch: int | None) -> Account | None:
+    """The active account for a login handle, or None. Reads only; no side effects.
+
+    ``epoch`` is the one stamped into the cookie at login. A logout or password
+    change since then bumped ``users.session_epoch``, so the cookie is dead
+    even though its signature is still valid.
+    """
 
     user = session.execute(select(User).where(User.email == handle)).scalar_one_or_none()
-    if user is None or not user.active:
+    if user is None or not user.active or user.session_epoch != epoch:
         return None
     workspace_ids = frozenset(
         session.execute(
@@ -210,11 +217,31 @@ def require_operator(account: Account = Depends(current_account)) -> Account:
 
 
 def login_user(request: Request, username: str) -> None:
-    request.session[SESSION_USER_KEY] = username.strip().lower()
+    handle = username.strip().lower()
+    with session_scope() as session:
+        epoch = session.execute(
+            select(User.session_epoch).where(User.email == handle)
+        ).scalar_one()
+    request.session.clear()
+    request.session.update({SESSION_USER_KEY: handle, SESSION_EPOCH_KEY: epoch})
 
 
 def logout_user(request: Request) -> None:
-    request.session.pop(SESSION_USER_KEY, None)
+    """End this session and every other cookie issued to the account.
+
+    Only a cookie that is still live can bump the epoch, so a stale stolen
+    cookie cannot be replayed at /logout to log the real user out.
+    """
+
+    handle, epoch = request.session.get(SESSION_USER_KEY), request.session.get(SESSION_EPOCH_KEY)
+    request.session.clear()
+    if handle and epoch is not None:
+        with session_scope() as session:
+            session.execute(
+                update(User)
+                .where(User.email == handle, User.session_epoch == epoch)
+                .values(session_epoch=User.session_epoch + 1)
+            )
 
 
 def _main(argv: list[str]) -> int:

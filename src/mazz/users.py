@@ -88,6 +88,7 @@ def set_password(session: Session, email: str, password: str) -> None:
     if user is None:
         raise LookupError(f"no account {email!r}; create it first")
     user.password_hash = hash_password(password)
+    user.session_epoch += 1  # a new password logs out every existing session
     session.flush()
 
 

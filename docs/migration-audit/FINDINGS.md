@@ -52,7 +52,7 @@ Line numbers describe the working tree on that date. "Retest" names the test tha
 | SND-01, 03, 04, 05, 06, 07 | Committed holds, Eastern cap day, pinning, worker lock, preflight running-sends check, live boot refuses the window turned off | FIXED. SND-03's day boundary still needs confirming (OD-02). SND-05's lock is lost if the DB drops. |
 | DB-03, 04, 04b, 06, 07, 09, 10, 11, GML-4, GML-5 | Late suppression holds, one outcome per row, replay idempotent, adoption retries and step reconciliation, a count-only override, protected downgrades | FIXED (`test_audit_migration.py`, `test_audit_gmail.py`) |
 | GML-2, 3, 6, 7, 8, 10 | Gone messages, fallback scan, opt-out scope, quota detection, MIME before the marker, false opt-outs | FIXED (`test_audit_gmail.py`) |
-| WEB-11 / COMP-04 | Logout does not invalidate the session server-side. A stolen cookie works for up to 8 h. | OPEN: needs a `users.session_epoch` column. `test_audit_web.py::test_logout_invalidates...` fails. |
+| WEB-11 / COMP-04 | Logout does not invalidate the session server-side. A stolen cookie works for up to 8 h. | FIXED 2026-10-22: `users.session_epoch` (migration d1b8f9a0c2e3) stamped at login, bumped by logout and `set-password`; `test_audit_web.py::test_logout_invalidates...` passes. |
 | WEB-06 | Placeholder regex misses newlines and more than 40 characters inside braces | OPEN, SUSPECTED (qual, `draft.py:281`) |
 | COMP-01 | WEB-29's audit redaction has no test, and `audit_events` is not in the delete-by-person residual check | OPEN (db) |
 | BP-01 | New ZoomInfo imports cannot route to the launch campaign, which has no segment | DECISION OD-18 |
