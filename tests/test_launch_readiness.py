@@ -26,6 +26,7 @@ LIVE = dict(
     session_secret=STRONG,
     send_enabled=True,
     email_sender="google",
+    send_window=True,  # live sending requires it; conftest turns it off
     unsubscribe_base_url="https://outreach.getsearchsitemarketing.com",
     unsubscribe_host="outreach.getsearchsitemarketing.com",
     unsubscribe_secret="u" * 40,

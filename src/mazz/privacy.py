@@ -45,12 +45,12 @@ from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from mazz.db import session_scope
 from mazz.ingest.csv_import import email_sha256
-from mazz.models import Draft, Job, Lead, Reply, ResearchCache, SentMessage, SuppressionEntry
+from mazz.models import AuditEvent, Draft, Job, Lead, Reply, ResearchCache, SentMessage, SuppressionEntry
 
 __all__ = [
     "DeletionIncomplete",
@@ -354,6 +354,17 @@ def delete_person(
         # forward) are not under their own lead, so nothing cascades to them.
         sess.execute(delete(Reply).where(func.lower(Reply.from_address) == email))
 
+        # Audit rows survive on purpose, but their free text (a reject reason an
+        # operator typed) can name the person: keep who/what/when, drop the rest.
+        sess.execute(
+            update(AuditEvent)
+            .where(
+                AuditEvent.target_type == "lead",
+                AuditEvent.target_id.in_([str(i) for i in before.lead_ids]),
+            )
+            .values(detail={"redacted": "delete-by-person"})
+        )
+
         for lead_id in before.lead_ids:
             lead = sess.get(Lead, lead_id)
             if lead is not None:
@@ -405,7 +416,7 @@ def delete_person(
         if report.residual.total:
             log.error(
                 "delete_person(%s) left references behind: %s",
-                email,
+                digest[:12],
                 report.residual.describe(),
             )
             if strict:
@@ -414,6 +425,7 @@ def delete_person(
                     f"{report.residual.describe()}"
                 )
         else:
-            log.info("delete_person(%s): %s", email, report.summary())
+            # The log must not keep what the erasure just removed: digest, not address.
+            log.info("delete_person(%s): %s", digest[:12], report.summary().replace(email, digest[:12]))
 
     return report

@@ -103,8 +103,10 @@
           <li>
             <span class="fact-kind">{{ c.kind }}</span>
             <blockquote>{{ c.content or "(fact id not found in current research_cache)" }}</blockquote>
-            {% if c.source_url %}
-              <a href="{{ c.source_url }}" target="_blank" rel="noopener">{{ c.source_url }}</a>
+            {% if c.source_url|safe_url %}
+              <a href="{{ c.source_url|safe_url }}" target="_blank" rel="noopener">{{ c.source_url }}</a>
+            {% elif c.source_url %}
+              <span class="muted">{{ c.source_url }}</span>
             {% else %}
               <span class="muted">no source URL</span>
             {% endif %}
@@ -125,11 +127,11 @@
         </p>
       {% elif lead.status.value == "approved" %}
         <p class="queued-banner">
-          <strong>Approved — queued to send.</strong>
+          <strong>Approved. Not sent yet.</strong>
           {% if send_state.mailbox %}
-            Next out of <code>{{ send_state.mailbox.email_address }}</code>.
+            Once released it goes out of <code>{{ send_state.mailbox.email_address }}</code>.
           {% elif send_state.waiting_until %}
-            Every mailbox is at its daily cap or spacing; this goes out after
+            Every mailbox is at its daily cap or spacing; a release now would wait until
             {{ send_state.waiting_until.strftime("%Y-%m-%d %H:%M UTC") }}.
           {% endif %}
           Release it on <a href="/outbox">the outbox</a>.

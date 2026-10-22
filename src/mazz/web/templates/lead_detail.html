@@ -11,7 +11,7 @@
     <dt>Title</dt><dd>{{ lead.job_title or "—" }}</dd>
     <dt>Email</dt><dd>{{ lead.email }}</dd>
     <dt>Location</dt><dd>{{ lead.location or "—" }}</dd>
-    <dt>LinkedIn</dt><dd>{% if lead.linkedin_url %}<a href="{{ lead.linkedin_url }}" target="_blank" rel="noopener">{{ lead.linkedin_url }}</a>{% else %}—{% endif %}</dd>
+    <dt>LinkedIn</dt><dd>{% if lead.linkedin_url|safe_url %}<a href="{{ lead.linkedin_url|safe_url }}" target="_blank" rel="noopener">{{ lead.linkedin_url }}</a>{% elif lead.linkedin_url %}{{ lead.linkedin_url }}{% else %}—{% endif %}</dd>
     <dt>Notes</dt><dd>{{ lead.notes or "—" }}</dd>
   </dl>
 </section>
@@ -35,7 +35,7 @@
         <td>{{ s.score }}</td>
         <td>{{ s.fact.kind }}</td>
         <td>{{ s.fact.content[:160] }}</td>
-        <td>{% if s.fact.source_url %}<a href="{{ s.fact.source_url }}" target="_blank" rel="noopener">source</a>{% else %}—{% endif %}</td>
+        <td>{% if s.fact.source_url|safe_url %}<a href="{{ s.fact.source_url|safe_url }}" target="_blank" rel="noopener">source</a>{% else %}—{% endif %}</td>
         <td>{{ s.reason }}</td>
       </tr>
       {% endfor %}

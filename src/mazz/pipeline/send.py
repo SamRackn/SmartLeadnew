@@ -34,10 +34,10 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from sqlalchemy import exists, select
+from sqlalchemy import exists, func, select
 
 from mazz.ingest.csv_import import SuppressionChecker, SuppressionUnavailable
 from mazz.integrations.base import (
@@ -49,6 +49,7 @@ from mazz.integrations.email_sender import (
     EmailSender,
     MailboxNeedsReconnect,
     OutgoingMessage,
+    SenderNotConfigured,
     get_email_sender,
 )
 from mazz.models import Draft, Lead, LeadStatus, Mailbox, MailboxStatus, SentMessage
@@ -73,7 +74,12 @@ from mazz.pipeline.mailbox import (
 )
 from mazz.pipeline.queue import JobContext, JobDeferred, PermanentJobError
 from mazz.pipeline.mailbox import pause_mailbox
-from mazz.pipeline.sequence import lead_timezone, next_window_open, schedule_next_step
+from mazz.pipeline.sequence import (
+    check_company_cap,
+    lead_timezone,
+    next_window_open,
+    schedule_next_step,
+)
 from mazz.pipeline.verify import is_approvable, latest_draft
 
 log = logging.getLogger(__name__)
@@ -91,6 +97,15 @@ __all__ = [
 
 #: ``jobs.kind`` for this step. Only the outbox's Send action enqueues it.
 SEND_JOB_KIND = "send"
+
+#: Transaction-scoped advisory lock held from mailbox selection to the attempt
+#: marker's commit. Caps, spacing and the per-company cap are counted, so two
+#: sends choosing at once would each see the same headroom. Distinct from the
+#: worker's own session lock (`mazz.ops.WORKER_LOCK_KEY`).
+SEND_SELECT_LOCK_KEY = 0x6D617A7A01
+
+#: How long a follow-up waits before re-checking a stale reply sync.
+REPLY_SYNC_RETRY = timedelta(minutes=10)
 
 
 def _now() -> datetime:
@@ -165,6 +180,7 @@ def send_lead(
     *,
     sender: EmailSender | None = None,
     now: datetime | None = None,
+    released_at: datetime | None = None,
 ) -> SentMessage:
     """Send this lead's approved draft from one of the client's mailboxes.
 
@@ -182,7 +198,9 @@ def send_lead(
     # milliseconds before the wire still leaves; closing it would mean holding
     # a transaction across the Gmail call.
     session.flush()
-    session.refresh(lead, ["status", "sequence_state", "next_step_due_at"], with_for_update=True)
+    session.refresh(
+        lead, ["status", "sequence_state", "next_step_due_at", "approved_at"], with_for_update=True
+    )
 
     # -- the approval must still stand ------------------------------------
     if lead.status != LeadStatus.APPROVED:
@@ -190,6 +208,15 @@ def send_lead(
             f"lead {lead.id} is {lead.status.value}, not approved — refusing to "
             "send. Only a human pressing approve puts a lead in this queue, and "
             "only an approval that is still current may leave."
+        )
+    # A release is a decision about the copy approved when it was clicked. One
+    # older than the current approval (reject, edit, approve again while the
+    # job waited or ran) authorizes nothing. Both stamps are database `now()`.
+    if released_at is not None and lead.approved_at is not None and lead.approved_at > released_at:
+        raise PermanentJobError(
+            f"lead {lead.id} was re-approved at {lead.approved_at}, after this send "
+            f"was released at {released_at}; the release belongs to earlier copy. "
+            "Not sent: release it again from the outbox."
         )
 
     draft = latest_draft(session, lead)
@@ -212,8 +239,7 @@ def send_lead(
     # -- the sequence must still be running --------------------------------
     # A reply, bounce or unsubscribe can land between approve and send.
     if lead.sequence_state == "stopped":
-        lead.status = LeadStatus.HELD
-        session.flush()
+        _hold(session, lead)
         raise PermanentJobError(
             f"lead {lead.id}'s sequence was stopped (reply, bounce or unsubscribe) "
             "after this was approved; held, not sent."
@@ -246,16 +272,14 @@ def send_lead(
         match = SuppressionChecker(session).check_lead(lead)
     except SuppressionUnavailable as exc:
         # Fails closed, exactly as the ingest gate does.
-        lead.status = LeadStatus.HELD
-        session.flush()
+        _hold(session, lead)
         raise PermanentJobError(
             f"suppression_list could not be read at send time ({exc}); holding "
             f"lead {lead.id} rather than sending. An unreadable never-contact "
             "list and a list with this person on it look identical from here."
         ) from exc
     if match is not None:
-        lead.status = LeadStatus.HELD
-        session.flush()
+        _hold(session, lead)
         raise PermanentJobError(
             f"lead {lead.id} is suppressed ({match}) — approved earlier, "
             "suppressed since. Held, not sent."
@@ -310,6 +334,10 @@ def send_lead(
             )
 
     # -- pick a mailbox ----------------------------------------------------
+    # Serialised from here to the marker commit (or the rollback of a refusal
+    # or deferral): everything below is counted, not reserved, so a second
+    # worker choosing at the same instant would see the same headroom.
+    session.execute(select(func.pg_advisory_xact_lock(SEND_SELECT_LOCK_KEY)))
     thread = session.execute(
         select(SentMessage)
         .where(SentMessage.lead_id == lead.id)
@@ -324,6 +352,10 @@ def send_lead(
             f"lead {lead.id} has already been emailed ({len(thread)} message(s) on "
             "record); refusing to send Email 1 again. Held."
         )
+    if (draft.step or 1) == 1:
+        # The client's max-per-company, here as well as at drafting: colleagues
+        # drafted in the same pass were all "not started" when each was drafted.
+        check_company_cap(session, lead, now=now, at_send=True)
     if (draft.step or 1) > 1 and not thread:
         raise PermanentJobError(
             f"draft {draft.id} is follow-up step {draft.step} but nothing was ever "
@@ -352,7 +384,28 @@ def send_lead(
     except NoMailboxConfigured as exc:
         raise PermanentJobError(str(exc)) from exc
 
+    # -- a follow-up only after this thread's replies were read -------------
+    # The re-checks above see only replies a sync has stored; an answer that
+    # arrived since the last periodic sync must stop the follow-up, not trail
+    # it. So read the thread's mailbox now. Left: the moments between this read
+    # and the wire (see the lock note at the top).
+    if enabled and sender.provider != STUB_PROVIDER and (draft.step or 1) > 1:
+        _read_replies_first(session, lead, mailbox, sender, now=now)
+
     message = _outgoing(lead, draft, mailbox, thread)
+
+    # -- the message must render, before anything is marked -----------------
+    # A header that cannot be encoded (a CR/LF in the subject, an unencodable
+    # display name) would otherwise fail inside the sender, after the marker,
+    # and hold the lead as "may have been sent" when nothing could have left.
+    try:
+        build_mime(message, now=now).as_bytes()
+    except Exception as exc:  # noqa: BLE001 - any render failure is a refusal
+        _hold(session, lead)
+        raise PermanentJobError(
+            f"draft {draft.id} cannot be rendered as an email ({exc.__class__.__name__}: "
+            f"{exc}); nothing was sent. Held: fix the subject or the mailbox name."
+        ) from exc
 
     # -- the kill switch ----------------------------------------------------
     # Before the attempt marker and before any sender exists: with sending
@@ -367,6 +420,9 @@ def send_lead(
     # back to "never sent" and the queue sends the same email again.
     draft.send_attempted_at = now
     draft.send_attempt_mailbox_id = mailbox.id
+    # Spacing starts now, not at booking: a second chooser must see this
+    # mailbox as just used even if the booking never comes.
+    mailbox.last_sent_at = now
     session.commit()
 
     # -- send --------------------------------------------------------------
@@ -499,7 +555,7 @@ def _may_have_been_sent(lead: Lead, draft: Draft, mailbox: Mailbox | None) -> st
         f"{draft.id}: it was handed to the sender at {draft.send_attempted_at} "
         f"and no result was booked. Check the Sent folder of {where}, then "
         f"resolve it with `python -m mazz.ops resolve-send {lead.id} "
-        "--sent` or `--not-sent`."
+        "--sent` or `--not-sent`, with `--by` your login email."
     )
 
 
@@ -512,6 +568,12 @@ def _record_mailbox_failure(session, mailbox: Mailbox, exc: ProviderError) -> No
     until five jobs have burned their attempts against one bad credential.
     """
 
+    if isinstance(exc, SenderNotConfigured):
+        # OAUTH_TOKEN_KEY missing or unable to decrypt, or the google extra
+        # absent: a deployment fault, identical for every mailbox. Disabling
+        # this one would only take the roster down a mailbox at a time.
+        log.error("sender not configured (mailbox %s untouched): %s", mailbox.email_address, exc)
+        return
     mailbox.consecutive_failures = (mailbox.consecutive_failures or 0) + 1
     mailbox.last_error = f"{exc.__class__.__name__}: {exc}"[:4000]
     if re.search(r"\b5\.7\.\d+", str(exc)) and not isinstance(exc, ProviderAuthError):
@@ -601,11 +663,42 @@ def _hold(session, lead: Lead) -> None:
     session.commit()
 
 
+def _read_replies_first(session, lead: Lead, mailbox: Mailbox, sender, *, now: datetime) -> None:
+    """Sync `mailbox` in this transaction, then re-check the lead. Unread is
+    never permission: any failure to read defers the follow-up."""
+
+    from mazz.pipeline.replies import sync_mailbox
+
+    try:
+        service = sender.read_service(
+            credential_ref=mailbox.credential_ref, mailbox_address=mailbox.email_address
+        )
+        sync_mailbox(session, mailbox, service, now=now)
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        raise JobDeferred(
+            f"could not read {mailbox.email_address}'s replies before this follow-up "
+            f"({exc.__class__.__name__}: {exc}); not sent, retrying",
+            retry_at=now + REPLY_SYNC_RETRY,
+        ) from exc
+    if lead.sequence_state == "stopped":
+        _hold(session, lead)  # commits the sync with it
+        raise PermanentJobError(
+            f"lead {lead.id} replied, bounced or unsubscribed (read just now); "
+            "held, follow-up not sent."
+        )
+    if lead.sequence_state == "paused":
+        session.commit()
+        raise JobDeferred(
+            f"lead {lead.id} is out of office until {lead.next_step_due_at} (read just now)",
+            retry_at=lead.next_step_due_at or now + REPLY_SYNC_RETRY,
+        )
+
+
 def handle_send(ctx: JobContext) -> None:
     """Queue handler for ``kind='send'``. Nothing chains after it."""
 
     try:
-        send_lead(ctx.session, ctx.lead)
+        send_lead(ctx.session, ctx.lead, released_at=ctx.job.created_at)
     except SendDisabled as exc:
         audit.record(
             ctx.session, audit.SYSTEM, "dry_run_send", "lead", ctx.lead.id, path=str(exc.path)

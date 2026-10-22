@@ -155,8 +155,11 @@ def test_get_confirms_without_suppressing_and_post_suppresses_globally(session, 
 
 
 def test_an_unknown_token_is_a_dead_link_not_an_error(session, client):
+    # POST is the RFC 8058 one-click path: mail providers read any 2xx as
+    # "unsubscribed", and an unknown token suppressed nobody (WEB-18).
     resp = client.post("/u/not-a-real-token")
-    assert resp.status_code == 200 and "no longer active" in resp.text
+    assert resp.status_code == 404 and "no longer active" in resp.text
+    assert client.get("/u/not-a-real-token").status_code == 200
     assert session.execute(select(SuppressionEntry)).first() is None
 
 

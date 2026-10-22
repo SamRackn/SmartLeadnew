@@ -1,0 +1,895 @@
+database=mazz_codex_inherited_test; host=localhost; root=C:\Users\sam_r\Claude\Cowork1\PROJECTS\smartlead; Python=3.12.10
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade  -> c2dd03b8b825, initial schema
+INFO  [alembic.runtime.migration] Running upgrade c2dd03b8b825 -> a7f31c0b9e42, draft_batches: Batch API submissions and their measured cost
+INFO  [alembic.runtime.migration] Running upgrade a7f31c0b9e42 -> 59c0a8574cf1, workspaces + campaigns (per-campaign scoring config)
+INFO  [alembic.runtime.migration] Running upgrade 59c0a8574cf1 -> 9377c345f195, mailboxes + sent_messages: the client's own sending rail
+INFO  [alembic.runtime.migration] Running upgrade 9377c345f195 -> 818480b5c611, campaign offer + proof_points: the sender's own evidence
+INFO  [alembic.runtime.migration] Running upgrade 818480b5c611 -> f10b1bbc48d5, opt-in generic vertical fallback
+INFO  [alembic.runtime.migration] Running upgrade f10b1bbc48d5 -> a67a2d5777dc, approval audit trail on leads
+INFO  [alembic.runtime.migration] Running upgrade a67a2d5777dc -> b3e1c9d4f2a7, send attempt marker on drafts
+INFO  [alembic.runtime.migration] Running upgrade b3e1c9d4f2a7 -> c4a1e2f3b5d6, users, workspace memberships, audit events
+INFO  [alembic.runtime.migration] Running upgrade c4a1e2f3b5d6 -> d5b2f3a4c6e7, compliance plumbing: per-workspace postal address, scoped suppression, tombstones
+INFO  [alembic.runtime.migration] Running upgrade d5b2f3a4c6e7 -> e6c3a4b5d7f8, sequences: steps table, lead name/state/sequence columns, draft step
+INFO  [alembic.runtime.migration] Running upgrade e6c3a4b5d7f8 -> f7d4b5c6e8a9, bounces: sent_messages.bounced_at / bounce_code (feeds mailbox auto-pause)
+INFO  [alembic.runtime.migration] Running upgrade f7d4b5c6e8a9 -> a8e5c6d7f9b0, oauth + replies: per-mailbox OAuth columns, needs_reconnect, replies, reply_tags
+INFO  [alembic.runtime.migration] Running upgrade a8e5c6d7f9b0 -> b9f6d7e8a0c1, cost_entries: manually entered monthly costs per workspace
+INFO  [alembic.runtime.migration] Running upgrade b9f6d7e8a0c1 -> c0a7e8f9b1d2, legacy sent_messages: Smartlead's sends, recorded so Email 1 is never repeated
+.......F................FF..........F......F...F.......F................ [ 52%]
+.....................F..FFFF.FFFFFFFFFFFFFFFFFFF..FFFFFFFFFFF..FF.       [100%]
+================================== FAILURES ===================================
+___________ test_snd07_preflight_flags_the_send_window_switched_off ___________
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA1F1FA70>
+
+    def test_snd07_preflight_flags_the_send_window_switched_off(session):
+        from mazz.ops import check_preflight
+    
+        settings = get_settings().model_copy(update={"send_window": False})
+        alerts = check_preflight(session, settings=settings)
+>       assert any("window" in (a.code + a.message).lower() for a in alerts), alerts
+E       AssertionError: [Alert(severity='critical', code='config', message="UNSUBSCRIBE_BASE_URL '' is not https: every footer link would be d...'), Alert(severity='critical', code='config', message='OAUTH_TOKEN_KEY is unset: no mailbox can send or be read'), ...]
+E       assert False
+E        +  where False = any(<generator object test_snd07_preflight_flags_the_send_window_switched_off.<locals>.<genexpr> at 0x000001BBA2F6C040>)
+
+tests\test_audit_sending.py:243: AssertionError
+___ test_adoption_trusts_gmail_over_the_export_for_how_many_steps_went_out ____
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA2F17650>
+
+    def test_adoption_trusts_gmail_over_the_export_for_how_many_steps_went_out(session):
+        """Export says 1 sent; the Gmail thread shows Smartlead sent FU1 too."""
+    
+        campaign = ssm_campaign(session)
+        mailbox(session)
+        box = session.execute(select(Mailbox)).scalar_one()
+        box.oauth_refresh_token_enc = "encrypted-elsewhere"
+        S.import_leads(session, [row("one@one-law.com", "INPROGRESS", sent="1")], campaign, now=TUE)
+        s1 = gmsg("s1", "t1", box.email_address, "Quick Question", "Hey One",
+                  headers={"Message-ID": "<s1@sl>"}, ts=LAST)
+        s2 = gmsg("s2", "t1", box.email_address, "Re: Quick Question", "Following up",
+                  headers={"Message-ID": "<s2@sl>"}, ts=LAST + timedelta(days=3))
+        svc = SentSearch(box.email_address, {"one@one-law.com": ["s1", "s2"]},
+                         messages=[s1, s2], threads={"t1": [s1, s2]})
+        S.adopt(session, service_for=lambda a: svc, now=TUE)
+        one = cutover_lead(session, "one@one-law.com")
+>       assert one.sequence_step == 2  # else FU1 is sent to him a second time
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       assert 1 == 2
+E        +  where 1 = <Lead 1 one@one-law.com LeadStatus.SENT>.sequence_step
+
+tests\test_audit_gmail.py:380: AssertionError
+______ test_adoption_does_not_hold_a_lead_because_a_mailbox_was_skipped _______
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA34F2F90>
+
+    def test_adoption_does_not_hold_a_lead_because_a_mailbox_was_skipped(session):
+        campaign = ssm_campaign(session)
+        mailbox(session)
+        a = session.execute(select(Mailbox)).scalar_one()
+        a.oauth_refresh_token_enc = "encrypted-elsewhere"
+        session.add(Mailbox(email_address="b@getsearchsitemarketing.com", display_name="B", credential_ref="oauth",
+                            status=MailboxStatus.NEEDS_RECONNECT))  # its thread lives here; not searched
+        S.import_leads(session, [row("one@one-law.com", "INPROGRESS", sent="1")], campaign, now=TUE)
+        svc = SentSearch(a.email_address, {}, messages=[], threads={})
+        S.adopt(session, service_for=lambda addr: svc, now=TUE)
+        one = cutover_lead(session, "one@one-law.com")
+        # Held means "never retried": adopt only selects status=sent. A skipped mailbox
+        # is "unknown", not "not found".
+>       assert one.status is not LeadStatus.HELD
+E       AssertionError: assert <LeadStatus.HELD: 'held'> is not <LeadStatus.HELD: 'held'>
+E        +  where <LeadStatus.HELD: 'held'> = <Lead 1 one@one-law.com LeadStatus.HELD>.status
+E        +  and   <LeadStatus.HELD: 'held'> = LeadStatus.HELD
+
+tests\test_audit_gmail.py:396: AssertionError
+________________ test_a_garbage_scope_value_is_a_4xx_not_a_500 ________________
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA3691AF0>
+
+    def test_a_garbage_scope_value_is_a_4xx_not_a_500(session):
+        op = operator(raise_server_exceptions=False)
+        resp = op.post("/removals", data={"value": "example.org", "scope": "²"})
+>       assert resp.status_code < 500
+E       assert 500 < 500
+E        +  where 500 = <Response [500 Internal Server Error]>.status_code
+
+tests\test_audit_web.py:251: AssertionError
+________________ test_edit_rejects_a_subject_with_a_line_break ________________
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA36692E0>
+
+    def test_edit_rejects_a_subject_with_a_line_break(session):
+        lead, draft = make_passed_lead(session)
+        lead.status = LeadStatus.READY
+        session.commit()
+        op = operator()
+        op.post(f"/leads/{lead.id}/edit", data={"subject": "Hello\r\nBcc: someone@else.example",
+                                                "body_text": "Dana - saw the hiring post."})
+        resp = op.post(f"/leads/{lead.id}/approve")
+        session.expire_all()
+>       assert resp.status_code == 409, "a CR/LF subject was approved; it fails only after the send attempt marker"
+E       AssertionError: a CR/LF subject was approved; it fails only after the send attempt marker
+E       assert 200 == 409
+E        +  where 200 = <Response [200 OK]>.status_code
+
+tests\test_audit_web.py:347: AssertionError
+___________ test_logout_invalidates_the_session_cookie_server_side ____________
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA36EC3B0>
+
+    def test_logout_invalidates_the_session_cookie_server_side(session):
+        c = operator()
+        stolen = c.cookies.get(SESSION_COOKIE)
+        c.post("/logout")
+        replay = TestClient(app)
+        replay.cookies.set(SESSION_COOKIE, stolen)
+>       assert replay.get("/leads", follow_redirects=False).status_code == 303
+E       AssertionError: assert 200 == 303
+E        +  where 200 = <Response [200 OK]>.status_code
+E        +    where <Response [200 OK]> = get('/leads', follow_redirects=False)
+E        +      where get = <starlette.testclient.TestClient object at 0x000001BBA378B230>.get
+
+tests\test_audit_web.py:394: AssertionError
+_ test_the_default_inbox_still_shows_an_old_unhandled_reply_after_500_newer_handled_ones _
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA38CA660>
+
+    def test_the_default_inbox_still_shows_an_old_unhandled_reply_after_500_newer_handled_ones(session):
+        lead_a, _lead_b, _ws = _two_workspace_leads(session)
+        old = Reply(lead_id=lead_a.id, provider_message_id="old", from_address=lead_a.email, subject="Re",
+                    body="OLD-UNHANDLED-REPLY", received_at=h.utcnow() - timedelta(days=90), classification="needs_review")
+        session.add(old)
+        for i in range(501):
+            session.add(Reply(lead_id=lead_a.id, provider_message_id=f"n{i}", from_address=lead_a.email, subject="Re",
+                              body="done", received_at=h.utcnow() - timedelta(minutes=i), classification="needs_review",
+                              handled_at=h.utcnow(), handled_by="client"))
+        session.commit()
+        html = operator().get("/inbox").text
+>       assert "OLD-UNHANDLED-REPLY" in html  # sidebar counts it (unlimited query), the page must too
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       assert 'OLD-UNHANDLED-REPLY' in '<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="utf-8">\n  <meta name="viewport" content="width=device-wi...w=all" >everything</a>\n</p>\n\n\n\n\n  <p class="empty">Nothing needs attention.</p>\n\n\n  </main>\n</body>\n</html>'
+
+tests\test_audit_web.py:464: AssertionError
+____ test_one_click_post_with_an_unknown_token_is_not_reported_as_success _____
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA380F110>
+
+    def test_one_click_post_with_an_unknown_token_is_not_reported_as_success(session):
+        """RFC 8058 clients treat any 2xx to the POST as 'unsubscribed'. A token that
+        matched nobody (rotated secret, pre-secret draft) must not look like that."""
+    
+        resp = TestClient(app).post("/u/" + "0" * 32, content="List-Unsubscribe=One-Click",
+                                    headers={"content-type": "application/x-www-form-urlencoded"})
+>       assert resp.status_code >= 400
+E       assert 200 >= 400
+E        +  where 200 = <Response [200 OK]>.status_code
+
+tests\test_audit_web.py:517: AssertionError
+____________ test_lead_urls_are_never_rendered_as_javascript_hrefs ____________
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA38F2DB0>
+
+    def test_lead_urls_are_never_rendered_as_javascript_hrefs(session):
+        lead, _ = make_passed_lead(session)
+        lead.linkedin_url = "javascript:alert(document.cookie)"
+        session.commit()
+>       assert 'href="javascript:' not in operator().get(f"/leads/{lead.id}").text.lower()
+E       assert 'href="javascript:' not in '<!doctype h...dy>\n</html>'
+E         
+E         'href="javascript:' is contained here:
+E           dt><dd><a href="javascript:alert(document.cookie)" target="_blank" rel="noopener">javascript:alert(document.cookie)</a></dd>
+E         ?           +++++++++++++++++
+E               <dt>notes</dt><dd>—</dd>
+E             </dl>
+E           </section>...
+E         
+E         ...Full output truncated (122 lines hidden), use '-vv' to show
+
+tests\test_audit_web.py:561: AssertionError
+________ test_approved_panels_do_not_claim_the_lead_is_queued_to_send _________
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA38F0A40>
+
+    def test_approved_panels_do_not_claim_the_lead_is_queued_to_send(session):
+        lead, _ = make_passed_lead(session)
+        op = operator()
+        assert op.post(f"/leads/{lead.id}/approve").status_code == 200
+        for path in (f"/leads/{lead.id}", f"/review/{lead.id}/panel"):
+>           assert "queued to send" not in op.get(path).text.lower(), path
+E           AssertionError: /leads/1
+E           assert 'queued to send' not in '<!doctype h...dy>\n</html>'
+E             
+E             'queued to send' is contained here:
+E               pproved — queued to send.</strong>
+E             ?           ++++++++++++++
+E                         
+E                       </p>
+E                     ...
+E             
+E             ...Full output truncated (51 lines hidden), use '-vv' to show
+
+tests\test_audit_web.py:574: AssertionError
+_____________ test_ready_draft_page_does_not_say_approve_and_send _____________
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA380FA40>
+
+    def test_ready_draft_page_does_not_say_approve_and_send(session):
+        lead, _ = make_passed_lead(session)
+        html = operator().get(f"/leads/{lead.id}").text
+>       assert "Approve &amp; send" not in html and "Approving queues" not in html
+E       assert ('Approve &amp; send' not in '<!DOCTYPE h...dy>\n</html>'
+E         
+E         'Approve &amp; send' is contained here:
+E           "approve">Approve &amp; send</button>
+E                   </form>
+E                   <p class="muted send-hint">
+E                     
+E                     Approving queues exactly this one email. Nothing else is sent....
+E         
+E         ...Full output truncated (53 lines hidden), use '-vv' to show)
+
+tests\test_audit_web.py:581: AssertionError
+____________ test_no_angle_page_does_not_blame_the_retired_scorer _____________
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA36EEC60>
+
+    def test_no_angle_page_does_not_blame_the_retired_scorer(session):
+        lead = h.make_lead(session, email="n2@paperkite.io", company_domain=h.WEAK_DOMAIN, status=LeadStatus.NO_ANGLE)
+        session.commit()
+>       assert "scorer" not in operator().get(f"/leads/{lead.id}").text.lower()
+E       AssertionError: assert 'scorer' not in '<!doctype h...dy>\n</html>'
+E         
+E         'scorer' is contained here:
+E                 the scorer found no signal strong enough to clear the threshold —
+E         ?           ++++++
+E                   see the rationale below. no draft was written on purpose; a forced
+E                   generic opener is exactly what this tool exists to avoid.
+E                 ...
+E         
+E         ...Full output truncated (15 lines hidden), use '-vv' to show
+
+tests\test_audit_web.py:587: AssertionError
+________________ test_reply_rate_can_never_exceed_100_percent _________________
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA3535670>
+
+    def test_reply_rate_can_never_exceed_100_percent(session):
+        """A lead contacted in September whose reply lands in October is a reply in
+        October's numerator with no October denominator."""
+    
+        camp = h.make_campaign(session)
+        a = h.make_lead(session, email="a@oct1.com", company_domain="oct1.com", campaign_id=camp.id)
+        b = h.make_lead(session, email="b@sep1.com", company_domain="sep1.com", campaign_id=camp.id)
+        _sent(session, a, IN_OCT)
+        _sent(session, b, IN_SEP)
+        add_reply(session, a, mid="a", at=IN_OCT)
+        add_reply(session, b, mid="b", at=IN_OCT)
+        m = M.month_metrics(session, OCT)
+>       assert m.contacted == 1 and m.reply_rate <= 1.0, f"reply rate {m.reply_rate:.0%}"
+E       AssertionError: reply rate 200%
+E       assert (1 == 1 and 2.0 <= 1.0)
+E        +  where 1 = MonthMetrics(month=datetime.date(2026, 10, 1), workspace_id=None, cost_total=Decimal('0'), cost_by_category={}, sent=1...es={'interested': 0, 'qualified': 0, 'meeting_booked': 0, 'meeting_showed': 0, 'client_won': 0}, skipped_unconfirmed=0).contacted
+E        +  and   2.0 = MonthMetrics(month=datetime.date(2026, 10, 1), workspace_id=None, cost_total=Decimal('0'), cost_by_category={}, sent=1...es={'interested': 0, 'qualified': 0, 'meeting_booked': 0, 'meeting_showed': 0, 'client_won': 0}, skipped_unconfirmed=0).reply_rate
+
+tests\test_audit_web.py:653: AssertionError
+_ test_a_zero_dollar_cost_entry_does_not_produce_a_zero_cost_per_conversation _
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA36CF0E0>
+
+    def test_a_zero_dollar_cost_entry_does_not_produce_a_zero_cost_per_conversation(session):
+        camp = h.make_campaign(session)
+        lead = h.make_lead(session, email="q@qual1.com", company_domain="qual1.com", campaign_id=camp.id)
+        _tag(session, add_reply(session, lead, mid="q", at=IN_OCT), "qualified", IN_OCT)
+        session.add(CostEntry(workspace_id=camp.workspace_id, month=OCT, category="other", amount=Decimal("0"),
+                              entered_by="m@x.test"))
+        session.commit()
+>       assert M.month_metrics(session, OCT).cost_per_qualified is None  # '$0.00 per conversation' means 'not measured'
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AssertionError: assert Decimal('0.00') is None
+E        +  where Decimal('0.00') = MonthMetrics(month=datetime.date(2026, 10, 1), workspace_id=None, cost_total=Decimal('0.00'), cost_by_category={'other...es={'interested': 0, 'qualified': 1, 'meeting_booked': 0, 'meeting_showed': 0, 'client_won': 0}, skipped_unconfirmed=0).cost_per_qualified
+E        +    where MonthMetrics(month=datetime.date(2026, 10, 1), workspace_id=None, cost_total=Decimal('0.00'), cost_by_category={'other...es={'interested': 0, 'qualified': 1, 'meeting_booked': 0, 'meeting_showed': 0, 'client_won': 0}, skipped_unconfirmed=0) = <function month_metrics at 0x000001BBA1AF8F40>(<sqlalchemy.orm.session.Session object at 0x000001BBA36CF0E0>, datetime.date(2026, 10, 1))
+E        +      where <function month_metrics at 0x000001BBA1AF8F40> = M.month_metrics
+
+tests\test_audit_web.py:663: AssertionError
+____________ test_skipped_unconfirmed_is_scoped_to_the_month_shown ____________
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA36B5D90>
+
+    def test_skipped_unconfirmed_is_scoped_to_the_month_shown(session):
+        camp = h.make_campaign(session)
+        h.make_lead(session, email="s@skip1.com", company_domain="skip1.com", campaign_id=camp.id,
+                    skip_reason="vertical_unconfirmed", status=LeadStatus.NO_ANGLE)
+        session.commit()
+>       assert M.month_metrics(session, date(2020, 1, 1)).skipped_unconfirmed == 0
+E       AssertionError: assert 1 == 0
+E        +  where 1 = MonthMetrics(month=datetime.date(2020, 1, 1), workspace_id=None, cost_total=Decimal('0'), cost_by_category={}, sent=0,...es={'interested': 0, 'qualified': 0, 'meeting_booked': 0, 'meeting_showed': 0, 'client_won': 0}, skipped_unconfirmed=1).skipped_unconfirmed
+E        +    where MonthMetrics(month=datetime.date(2020, 1, 1), workspace_id=None, cost_total=Decimal('0'), cost_by_category={}, sent=0,...es={'interested': 0, 'qualified': 0, 'meeting_booked': 0, 'meeting_showed': 0, 'client_won': 0}, skipped_unconfirmed=1) = <function month_metrics at 0x000001BBA1AF8F40>(<sqlalchemy.orm.session.Session object at 0x000001BBA36B5D90>, datetime.date(2020, 1, 1))
+E        +      where <function month_metrics at 0x000001BBA1AF8F40> = M.month_metrics
+E        +      and   datetime.date(2020, 1, 1) = date(2020, 1, 1)
+
+tests\test_audit_web.py:671: AssertionError
+_ test_dashboard_and_costs_survive_hostile_query_parameters[/dashboard?month=9999-12] _
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA382E420>
+path = '/dashboard?month=9999-12'
+
+    @pytest.mark.parametrize("path", ["/dashboard?month=9999-12", "/costs?month=9999-12",
+                                      "/dashboard?workspace=²", "/dashboard?workspace=99999999999999999999"])
+    def test_dashboard_and_costs_survive_hostile_query_parameters(session, path):
+        resp = operator(raise_server_exceptions=False).get(path)
+>       assert resp.status_code < 500, path
+E       AssertionError: /dashboard?month=9999-12
+E       assert 500 < 500
+E        +  where 500 = <Response [500 Internal Server Error]>.status_code
+
+tests\test_audit_web.py:678: AssertionError
+_ test_dashboard_and_costs_survive_hostile_query_parameters[/costs?month=9999-12] _
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA382F0E0>
+path = '/costs?month=9999-12'
+
+    @pytest.mark.parametrize("path", ["/dashboard?month=9999-12", "/costs?month=9999-12",
+                                      "/dashboard?workspace=²", "/dashboard?workspace=99999999999999999999"])
+    def test_dashboard_and_costs_survive_hostile_query_parameters(session, path):
+        resp = operator(raise_server_exceptions=False).get(path)
+>       assert resp.status_code < 500, path
+E       AssertionError: /costs?month=9999-12
+E       assert 500 < 500
+E        +  where 500 = <Response [500 Internal Server Error]>.status_code
+
+tests\test_audit_web.py:678: AssertionError
+_ test_dashboard_and_costs_survive_hostile_query_parameters[/dashboard?workspace=\xb2] _
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA382CEC0>
+path = '/dashboard?workspace=²'
+
+    @pytest.mark.parametrize("path", ["/dashboard?month=9999-12", "/costs?month=9999-12",
+                                      "/dashboard?workspace=²", "/dashboard?workspace=99999999999999999999"])
+    def test_dashboard_and_costs_survive_hostile_query_parameters(session, path):
+        resp = operator(raise_server_exceptions=False).get(path)
+>       assert resp.status_code < 500, path
+E       AssertionError: /dashboard?workspace=²
+E       assert 500 < 500
+E        +  where 500 = <Response [500 Internal Server Error]>.status_code
+
+tests\test_audit_web.py:678: AssertionError
+_ test_dashboard_and_costs_survive_hostile_query_parameters[/dashboard?workspace=99999999999999999999] _
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA3A1FA70>
+path = '/dashboard?workspace=99999999999999999999'
+
+    @pytest.mark.parametrize("path", ["/dashboard?month=9999-12", "/costs?month=9999-12",
+                                      "/dashboard?workspace=²", "/dashboard?workspace=99999999999999999999"])
+    def test_dashboard_and_costs_survive_hostile_query_parameters(session, path):
+        resp = operator(raise_server_exceptions=False).get(path)
+>       assert resp.status_code < 500, path
+E       AssertionError: /dashboard?workspace=99999999999999999999
+E       assert 500 < 500
+E        +  where 500 = <Response [500 Internal Server Error]>.status_code
+
+tests\test_audit_web.py:678: AssertionError
+_ test_every_admin_state_change_writes_an_audit_event_with_the_actor[mailbox_create] _
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA3A1E330>
+name = 'mailbox_create'
+
+    @pytest.mark.parametrize("name", ["mailbox_create", "mailbox_edit_cap", "mailbox_status", "mailbox_delete",
+                                      "workspace_create", "workspace_rename", "campaign_create", "campaign_edit",
+                                      "proof_point_create", "proof_point_retire", "campaign_delete"])
+    def test_every_admin_state_change_writes_an_audit_event_with_the_actor(session, name):
+        path, data = _admin_actions(session)[name]
+        resp = operator().post(path, data=data, follow_redirects=False)
+        assert resp.status_code in (200, 303), (name, resp.status_code, resp.text[:300])
+        session.expire_all()
+        events = session.execute(select(AuditEvent)).scalars().all()
+>       assert events and all(e.user_email == "client" for e in events), f"{name} left no audit trail"
+E       AssertionError: mailbox_create left no audit trail
+E       assert ([])
+
+tests\test_audit_web.py:718: AssertionError
+_ test_every_admin_state_change_writes_an_audit_event_with_the_actor[mailbox_edit_cap] _
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA36CFD40>
+name = 'mailbox_edit_cap'
+
+    @pytest.mark.parametrize("name", ["mailbox_create", "mailbox_edit_cap", "mailbox_status", "mailbox_delete",
+                                      "workspace_create", "workspace_rename", "campaign_create", "campaign_edit",
+                                      "proof_point_create", "proof_point_retire", "campaign_delete"])
+    def test_every_admin_state_change_writes_an_audit_event_with_the_actor(session, name):
+        path, data = _admin_actions(session)[name]
+        resp = operator().post(path, data=data, follow_redirects=False)
+        assert resp.status_code in (200, 303), (name, resp.status_code, resp.text[:300])
+        session.expire_all()
+        events = session.execute(select(AuditEvent)).scalars().all()
+>       assert events and all(e.user_email == "client" for e in events), f"{name} left no audit trail"
+E       AssertionError: mailbox_edit_cap left no audit trail
+E       assert ([])
+
+tests\test_audit_web.py:718: AssertionError
+_ test_every_admin_state_change_writes_an_audit_event_with_the_actor[mailbox_status] _
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA36EC710>
+name = 'mailbox_status'
+
+    @pytest.mark.parametrize("name", ["mailbox_create", "mailbox_edit_cap", "mailbox_status", "mailbox_delete",
+                                      "workspace_create", "workspace_rename", "campaign_create", "campaign_edit",
+                                      "proof_point_create", "proof_point_retire", "campaign_delete"])
+    def test_every_admin_state_change_writes_an_audit_event_with_the_actor(session, name):
+        path, data = _admin_actions(session)[name]
+        resp = operator().post(path, data=data, follow_redirects=False)
+        assert resp.status_code in (200, 303), (name, resp.status_code, resp.text[:300])
+        session.expire_all()
+        events = session.execute(select(AuditEvent)).scalars().all()
+>       assert events and all(e.user_email == "client" for e in events), f"{name} left no audit trail"
+E       AssertionError: mailbox_status left no audit trail
+E       assert ([])
+
+tests\test_audit_web.py:718: AssertionError
+_ test_every_admin_state_change_writes_an_audit_event_with_the_actor[mailbox_delete] _
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA38B73E0>
+name = 'mailbox_delete'
+
+    @pytest.mark.parametrize("name", ["mailbox_create", "mailbox_edit_cap", "mailbox_status", "mailbox_delete",
+                                      "workspace_create", "workspace_rename", "campaign_create", "campaign_edit",
+                                      "proof_point_create", "proof_point_retire", "campaign_delete"])
+    def test_every_admin_state_change_writes_an_audit_event_with_the_actor(session, name):
+        path, data = _admin_actions(session)[name]
+        resp = operator().post(path, data=data, follow_redirects=False)
+        assert resp.status_code in (200, 303), (name, resp.status_code, resp.text[:300])
+        session.expire_all()
+        events = session.execute(select(AuditEvent)).scalars().all()
+>       assert events and all(e.user_email == "client" for e in events), f"{name} left no audit trail"
+E       AssertionError: mailbox_delete left no audit trail
+E       assert ([])
+
+tests\test_audit_web.py:718: AssertionError
+_ test_every_admin_state_change_writes_an_audit_event_with_the_actor[workspace_create] _
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA3577A70>
+name = 'workspace_create'
+
+    @pytest.mark.parametrize("name", ["mailbox_create", "mailbox_edit_cap", "mailbox_status", "mailbox_delete",
+                                      "workspace_create", "workspace_rename", "campaign_create", "campaign_edit",
+                                      "proof_point_create", "proof_point_retire", "campaign_delete"])
+    def test_every_admin_state_change_writes_an_audit_event_with_the_actor(session, name):
+        path, data = _admin_actions(session)[name]
+        resp = operator().post(path, data=data, follow_redirects=False)
+        assert resp.status_code in (200, 303), (name, resp.status_code, resp.text[:300])
+        session.expire_all()
+        events = session.execute(select(AuditEvent)).scalars().all()
+>       assert events and all(e.user_email == "client" for e in events), f"{name} left no audit trail"
+E       AssertionError: workspace_create left no audit trail
+E       assert ([])
+
+tests\test_audit_web.py:718: AssertionError
+_ test_every_admin_state_change_writes_an_audit_event_with_the_actor[workspace_rename] _
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA38B5880>
+name = 'workspace_rename'
+
+    @pytest.mark.parametrize("name", ["mailbox_create", "mailbox_edit_cap", "mailbox_status", "mailbox_delete",
+                                      "workspace_create", "workspace_rename", "campaign_create", "campaign_edit",
+                                      "proof_point_create", "proof_point_retire", "campaign_delete"])
+    def test_every_admin_state_change_writes_an_audit_event_with_the_actor(session, name):
+        path, data = _admin_actions(session)[name]
+        resp = operator().post(path, data=data, follow_redirects=False)
+        assert resp.status_code in (200, 303), (name, resp.status_code, resp.text[:300])
+        session.expire_all()
+        events = session.execute(select(AuditEvent)).scalars().all()
+>       assert events and all(e.user_email == "client" for e in events), f"{name} left no audit trail"
+E       AssertionError: workspace_rename left no audit trail
+E       assert ([])
+
+tests\test_audit_web.py:718: AssertionError
+_ test_every_admin_state_change_writes_an_audit_event_with_the_actor[campaign_create] _
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA382C7D0>
+name = 'campaign_create'
+
+    @pytest.mark.parametrize("name", ["mailbox_create", "mailbox_edit_cap", "mailbox_status", "mailbox_delete",
+                                      "workspace_create", "workspace_rename", "campaign_create", "campaign_edit",
+                                      "proof_point_create", "proof_point_retire", "campaign_delete"])
+    def test_every_admin_state_change_writes_an_audit_event_with_the_actor(session, name):
+        path, data = _admin_actions(session)[name]
+        resp = operator().post(path, data=data, follow_redirects=False)
+        assert resp.status_code in (200, 303), (name, resp.status_code, resp.text[:300])
+        session.expire_all()
+        events = session.execute(select(AuditEvent)).scalars().all()
+>       assert events and all(e.user_email == "client" for e in events), f"{name} left no audit trail"
+E       AssertionError: campaign_create left no audit trail
+E       assert ([])
+
+tests\test_audit_web.py:718: AssertionError
+_ test_every_admin_state_change_writes_an_audit_event_with_the_actor[campaign_edit] _
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA378B0E0>
+name = 'campaign_edit'
+
+    @pytest.mark.parametrize("name", ["mailbox_create", "mailbox_edit_cap", "mailbox_status", "mailbox_delete",
+                                      "workspace_create", "workspace_rename", "campaign_create", "campaign_edit",
+                                      "proof_point_create", "proof_point_retire", "campaign_delete"])
+    def test_every_admin_state_change_writes_an_audit_event_with_the_actor(session, name):
+        path, data = _admin_actions(session)[name]
+        resp = operator().post(path, data=data, follow_redirects=False)
+        assert resp.status_code in (200, 303), (name, resp.status_code, resp.text[:300])
+        session.expire_all()
+        events = session.execute(select(AuditEvent)).scalars().all()
+>       assert events and all(e.user_email == "client" for e in events), f"{name} left no audit trail"
+E       AssertionError: campaign_edit left no audit trail
+E       assert ([])
+
+tests\test_audit_web.py:718: AssertionError
+_ test_every_admin_state_change_writes_an_audit_event_with_the_actor[proof_point_create] _
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA380F4A0>
+name = 'proof_point_create'
+
+    @pytest.mark.parametrize("name", ["mailbox_create", "mailbox_edit_cap", "mailbox_status", "mailbox_delete",
+                                      "workspace_create", "workspace_rename", "campaign_create", "campaign_edit",
+                                      "proof_point_create", "proof_point_retire", "campaign_delete"])
+    def test_every_admin_state_change_writes_an_audit_event_with_the_actor(session, name):
+        path, data = _admin_actions(session)[name]
+        resp = operator().post(path, data=data, follow_redirects=False)
+        assert resp.status_code in (200, 303), (name, resp.status_code, resp.text[:300])
+        session.expire_all()
+        events = session.execute(select(AuditEvent)).scalars().all()
+>       assert events and all(e.user_email == "client" for e in events), f"{name} left no audit trail"
+E       AssertionError: proof_point_create left no audit trail
+E       assert ([])
+
+tests\test_audit_web.py:718: AssertionError
+_ test_every_admin_state_change_writes_an_audit_event_with_the_actor[proof_point_retire] _
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA36EE6C0>
+name = 'proof_point_retire'
+
+    @pytest.mark.parametrize("name", ["mailbox_create", "mailbox_edit_cap", "mailbox_status", "mailbox_delete",
+                                      "workspace_create", "workspace_rename", "campaign_create", "campaign_edit",
+                                      "proof_point_create", "proof_point_retire", "campaign_delete"])
+    def test_every_admin_state_change_writes_an_audit_event_with_the_actor(session, name):
+        path, data = _admin_actions(session)[name]
+        resp = operator().post(path, data=data, follow_redirects=False)
+        assert resp.status_code in (200, 303), (name, resp.status_code, resp.text[:300])
+        session.expire_all()
+        events = session.execute(select(AuditEvent)).scalars().all()
+>       assert events and all(e.user_email == "client" for e in events), f"{name} left no audit trail"
+E       AssertionError: proof_point_retire left no audit trail
+E       assert ([])
+
+tests\test_audit_web.py:718: AssertionError
+_ test_every_admin_state_change_writes_an_audit_event_with_the_actor[campaign_delete] _
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA2F17B60>
+name = 'campaign_delete'
+
+    @pytest.mark.parametrize("name", ["mailbox_create", "mailbox_edit_cap", "mailbox_status", "mailbox_delete",
+                                      "workspace_create", "workspace_rename", "campaign_create", "campaign_edit",
+                                      "proof_point_create", "proof_point_retire", "campaign_delete"])
+    def test_every_admin_state_change_writes_an_audit_event_with_the_actor(session, name):
+        path, data = _admin_actions(session)[name]
+        resp = operator().post(path, data=data, follow_redirects=False)
+        assert resp.status_code in (200, 303), (name, resp.status_code, resp.text[:300])
+        session.expire_all()
+        events = session.execute(select(AuditEvent)).scalars().all()
+>       assert events and all(e.user_email == "client" for e in events), f"{name} left no audit trail"
+E       AssertionError: campaign_delete left no audit trail
+E       assert ([])
+
+tests\test_audit_web.py:718: AssertionError
+________________________ test_a_lead_import_is_audited ________________________
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA3C322A0>
+
+    def test_a_lead_import_is_audited(session):
+        csv = b"Full Name,Email,Company,Website\nAda Law,ada@auditfirm.com,Audit Firm,https://auditfirm.com\n"
+        resp = operator().post("/leads/import", files={"file": ("leads.csv", csv, "text/csv")})
+        assert resp.status_code == 200
+        session.expire_all()
+>       assert session.execute(select(AuditEvent)).first() is not None, "import of leads left no audit trail"
+E       AssertionError: import of leads left no audit trail
+E       assert None is not None
+E        +  where None = first()
+E        +    where first = <sqlalchemy.engine.result.ChunkedIteratorResult object at 0x000001BBA39EBB10>.first
+E        +      where <sqlalchemy.engine.result.ChunkedIteratorResult object at 0x000001BBA39EBB10> = execute(<sqlalchemy.sql.selectable.Select object at 0x000001BBA38F1FA0>)
+E        +        where execute = <sqlalchemy.orm.session.Session object at 0x000001BBA3C322A0>.execute
+E        +        and   <sqlalchemy.sql.selectable.Select object at 0x000001BBA38F1FA0> = select(AuditEvent)
+
+tests\test_audit_web.py:726: AssertionError
+_________ test_a_sequence_smartlead_ended_is_never_resumed[COMPLETED] _________
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA1E15D90>
+status = 'COMPLETED'
+
+    @pytest.mark.parametrize("status", ["COMPLETED", "UNSUBSCRIBED", "BOUNCED", "REPLIED"])
+    def test_a_sequence_smartlead_ended_is_never_resumed(session, status):
+        campaign = ssm_campaign(session)
+        S.import_leads(session, [row("x@x-law.com", status, sent="1")], campaign, now=TUE)
+        x = lead(session, "x@x-law.com")
+>       assert x.sequence_state != "active", (
+            f"Smartlead status {status} with 1 send was imported as an active sequence: "
+            f"adopt will queue FU1 (next_step_due_at={x.next_step_due_at})")
+E       AssertionError: Smartlead status COMPLETED with 1 send was imported as an active sequence: adopt will queue FU1 (next_step_due_at=2026-10-05 11:00:00-04:00)
+E       assert 'active' != 'active'
+E        +  where 'active' = <Lead 1 x@x-law.com LeadStatus.SENT>.sequence_state
+
+tests\test_audit_migration.py:110: AssertionError
+_______ test_a_sequence_smartlead_ended_is_never_resumed[UNSUBSCRIBED] ________
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA38F19A0>
+status = 'UNSUBSCRIBED'
+
+    @pytest.mark.parametrize("status", ["COMPLETED", "UNSUBSCRIBED", "BOUNCED", "REPLIED"])
+    def test_a_sequence_smartlead_ended_is_never_resumed(session, status):
+        campaign = ssm_campaign(session)
+        S.import_leads(session, [row("x@x-law.com", status, sent="1")], campaign, now=TUE)
+        x = lead(session, "x@x-law.com")
+>       assert x.sequence_state != "active", (
+            f"Smartlead status {status} with 1 send was imported as an active sequence: "
+            f"adopt will queue FU1 (next_step_due_at={x.next_step_due_at})")
+E       AssertionError: Smartlead status UNSUBSCRIBED with 1 send was imported as an active sequence: adopt will queue FU1 (next_step_due_at=2026-10-05 11:00:00-04:00)
+E       assert 'active' != 'active'
+E        +  where 'active' = <Lead 1 x@x-law.com LeadStatus.SENT>.sequence_state
+
+tests\test_audit_migration.py:110: AssertionError
+__________ test_a_sequence_smartlead_ended_is_never_resumed[BOUNCED] __________
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA36CC8C0>
+status = 'BOUNCED'
+
+    @pytest.mark.parametrize("status", ["COMPLETED", "UNSUBSCRIBED", "BOUNCED", "REPLIED"])
+    def test_a_sequence_smartlead_ended_is_never_resumed(session, status):
+        campaign = ssm_campaign(session)
+        S.import_leads(session, [row("x@x-law.com", status, sent="1")], campaign, now=TUE)
+        x = lead(session, "x@x-law.com")
+>       assert x.sequence_state != "active", (
+            f"Smartlead status {status} with 1 send was imported as an active sequence: "
+            f"adopt will queue FU1 (next_step_due_at={x.next_step_due_at})")
+E       AssertionError: Smartlead status BOUNCED with 1 send was imported as an active sequence: adopt will queue FU1 (next_step_due_at=2026-10-05 11:00:00-04:00)
+E       assert 'active' != 'active'
+E        +  where 'active' = <Lead 1 x@x-law.com LeadStatus.SENT>.sequence_state
+
+tests\test_audit_migration.py:110: AssertionError
+__________ test_a_sequence_smartlead_ended_is_never_resumed[REPLIED] __________
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA34F3A10>
+status = 'REPLIED'
+
+    @pytest.mark.parametrize("status", ["COMPLETED", "UNSUBSCRIBED", "BOUNCED", "REPLIED"])
+    def test_a_sequence_smartlead_ended_is_never_resumed(session, status):
+        campaign = ssm_campaign(session)
+        S.import_leads(session, [row("x@x-law.com", status, sent="1")], campaign, now=TUE)
+        x = lead(session, "x@x-law.com")
+>       assert x.sequence_state != "active", (
+            f"Smartlead status {status} with 1 send was imported as an active sequence: "
+            f"adopt will queue FU1 (next_step_due_at={x.next_step_due_at})")
+E       AssertionError: Smartlead status REPLIED with 1 send was imported as an active sequence: adopt will queue FU1 (next_step_due_at=2026-10-05 11:00:00-04:00)
+E       assert 'active' != 'active'
+E        +  where 'active' = <Lead 1 x@x-law.com LeadStatus.SENT>.sequence_state
+
+tests\test_audit_migration.py:110: AssertionError
+_______ test_unsubscribed_or_bounced_flag_columns_stop_the_lead[extra0] _______
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA2F128D0>
+extra = {'Is Unsubscribed': 'true'}
+
+    @pytest.mark.parametrize("extra", [{"Is Unsubscribed": "true"}, {"Is Bounced": "true"}])
+    def test_unsubscribed_or_bounced_flag_columns_stop_the_lead(session, extra):
+        # HYPOTHETICAL header names: the point is that no flag column is read at all.
+        campaign = ssm_campaign(session)
+        S.import_leads(session, [{**row("x@x-law.com", "INPROGRESS", sent="1"), **extra}],
+                       campaign, now=TUE)
+        x = lead(session, "x@x-law.com")
+        suppressed = SuppressionChecker(session).check("x@x-law.com", "x-law.com") is not None
+>       assert x is None or x.sequence_state != "active" or suppressed
+E       AssertionError: assert (<Lead 1 x@x-law.com LeadStatus.SENT> is None or 'active' != 'active' or False)
+E        +  where 'active' = <Lead 1 x@x-law.com LeadStatus.SENT>.sequence_state
+
+tests\test_audit_migration.py:123: AssertionError
+_______ test_unsubscribed_or_bounced_flag_columns_stop_the_lead[extra1] _______
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA34F1EE0>
+extra = {'Is Bounced': 'true'}
+
+    @pytest.mark.parametrize("extra", [{"Is Unsubscribed": "true"}, {"Is Bounced": "true"}])
+    def test_unsubscribed_or_bounced_flag_columns_stop_the_lead(session, extra):
+        # HYPOTHETICAL header names: the point is that no flag column is read at all.
+        campaign = ssm_campaign(session)
+        S.import_leads(session, [{**row("x@x-law.com", "INPROGRESS", sent="1"), **extra}],
+                       campaign, now=TUE)
+        x = lead(session, "x@x-law.com")
+        suppressed = SuppressionChecker(session).check("x@x-law.com", "x-law.com") is not None
+>       assert x is None or x.sequence_state != "active" or suppressed
+E       AssertionError: assert (<Lead 1 x@x-law.com LeadStatus.SENT> is None or 'active' != 'active' or False)
+E        +  where 'active' = <Lead 1 x@x-law.com LeadStatus.SENT>.sequence_state
+
+tests\test_audit_migration.py:123: AssertionError
+_ test_suppression_export_with_an_email_address_header_is_not_silently_empty __
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA378B170>
+
+    def test_suppression_export_with_an_email_address_header_is_not_silently_empty(session):
+        # "Email Address" is an alias the lead importer already accepts.
+        report = S.import_suppression(session, [{"Email Address": "gone@u-law.com"}])
+        suppressed = SuppressionChecker(session).check("gone@u-law.com", "u-law.com") is not None
+>       assert suppressed or S.blockers(report), (
+            f"nobody suppressed and --commit would succeed: {dict(report.counts)}")
+E       AssertionError: nobody suppressed and --commit would succeed: {'invalid': 1}
+E       assert (False or [])
+E        +  where [] = <function blockers at 0x000001BBA1826520>(Report(counts=Counter({'invalid': 1}), lines=["row 2: missing required field 'email'"]))
+E        +    where <function blockers at 0x000001BBA1826520> = S.blockers
+
+tests\test_audit_migration.py:135: AssertionError
+____ test_an_exclusion_row_with_email_and_domain_blocks_the_whole_company _____
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA382E3C0>
+
+    def test_an_exclusion_row_with_email_and_domain_blocks_the_whole_company(session):
+        campaign = ssm_campaign(session)
+        S.import_exclusions(session, [{"Email": "ceo@client-law.com", "Website": "client-law.com"}],
+                            campaign.workspace)
+        match = SuppressionChecker(session).check(
+            "partner@client-law.com", "client-law.com", workspace_id=campaign.workspace_id)
+>       assert match is not None, "an existing client's colleague is still emailable"
+E       AssertionError: an existing client's colleague is still emailable
+E       assert None is not None
+
+tests\test_audit_migration.py:145: AssertionError
+_ test_leads_imported_before_suppression_leave_no_live_work_for_the_suppressed _
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA3A1E150>
+
+    def test_leads_imported_before_suppression_leave_no_live_work_for_the_suppressed(session):
+        campaign = ssm_campaign(session)
+        S.import_leads(session, [row("unsub@u-law.com", "NOT_STARTED")], campaign, now=TUE)
+        S.import_suppression(session, [{"Email": "unsub@u-law.com"}])
+        x = lead(session, "unsub@u-law.com")
+        pending = session.execute(select(func.count(Job.id)).where(
+            Job.lead_id == x.id, Job.status == JobStatus.PENDING)).scalar_one()
+>       assert pending == 0, "a suppressed person still has an enrich job; Email 1 gets drafted for review"
+E       AssertionError: a suppressed person still has an enrich job; Email 1 gets drafted for review
+E       assert 1 == 0
+
+tests\test_audit_migration.py:160: AssertionError
+___________ test_every_source_row_has_exactly_one_reported_outcome ____________
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA382EC30>
+
+    def test_every_source_row_has_exactly_one_reported_outcome(session):
+        campaign = ssm_campaign(session)
+        rows = [row("dup@d-law.com", "INPROGRESS", sent="1"),
+                row("dup@d-law.com", "NOT_STARTED"),       # same person, other row
+                row("new@n-law.com", "NOT_STARTED"),
+                row("new@n-law.com", "NOT_STARTED")]       # exact duplicate
+        report = S.import_leads(session, rows, campaign, now=TUE)
+        enrich = session.execute(select(func.count(Job.id)).where(Job.kind == "enrich")).scalar_one()
+        outcomes = {k: report.counts[k] for k in OUTCOMES if report.counts.get(k)}
+>       assert report.counts["new_queued"] == enrich, f"new_queued over-counts: {outcomes}, jobs={enrich}"
+E       AssertionError: new_queued over-counts: {'awaiting_adoption': 1, 'new_queued': 2}, jobs=1
+E       assert 2 == 1
+
+tests\test_audit_migration.py:183: AssertionError
+________ test_replaying_the_leads_import_does_not_reset_pipeline_state ________
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA38CA210>
+
+    def test_replaying_the_leads_import_does_not_reset_pipeline_state(session):
+        campaign = ssm_campaign(session)
+        S.import_leads(session, [row("new@n-law.com", "NOT_STARTED")], campaign, now=TUE)
+        x = lead(session, "new@n-law.com")
+        # The pipeline has since run and a reviewer held the Email 1 draft.
+        for job in session.execute(select(Job)).scalars():
+            job.status = JobStatus.DONE
+        x.status = LeadStatus.HELD
+        session.flush()
+        S.import_leads(session, [row("new@n-law.com", "NOT_STARTED")], campaign, now=TUE)
+        x = lead(session, "new@n-law.com")
+        pending = session.execute(select(func.count(Job.id)).where(
+            Job.status == JobStatus.PENDING)).scalar_one()
+>       assert (x.status, pending) == (LeadStatus.HELD, 0)
+E       AssertionError: assert (<LeadStatus....earching'>, 1) == (<LeadStatus.HELD: 'held'>, 0)
+E         
+E         At index 0 diff: <LeadStatus.RESEARCHING: 'researching'> != <LeadStatus.HELD: 'held'>
+E         Use -v to get more diff
+
+tests\test_audit_migration.py:200: AssertionError
+_ test_adopt_replay_retries_a_lead_held_because_its_mailbox_was_not_yet_readable _
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA3A1F530>
+
+    def test_adopt_replay_retries_a_lead_held_because_its_mailbox_was_not_yet_readable(session):
+        campaign = ssm_campaign(session)
+        box = _connected_box(session)
+        S.import_leads(session, [row("one@one-law.com", "INPROGRESS", sent="1")], campaign, now=TUE)
+        S.adopt(session, service_for=lambda a: SentSearch(box.email_address, {}), now=TUE)
+        assert lead(session, "one@one-law.com").status is LeadStatus.HELD
+    
+        s1 = gmsg("s1", "t1", box.email_address, "Quick Question", "Hey One",
+                  headers={"Message-ID": "<s1@smartlead>"}, ts=LAST)
+        svc = SentSearch(box.email_address, {"one@one-law.com": ["s1"]}, messages=[s1],
+                         threads={"t1": [s1]})
+        report = S.adopt(session, service_for=lambda a: svc, now=TUE)
+>       assert report.counts["adopted"] == 1, dict(report.counts)
+E       AssertionError: {}
+E       assert 0 == 1
+
+tests\test_audit_migration.py:250: AssertionError
+__________ test_adopt_reconciles_the_step_with_what_the_thread_shows __________
+
+session = <sqlalchemy.orm.session.Session object at 0x000001BBA37B4B30>
+
+    def test_adopt_reconciles_the_step_with_what_the_thread_shows(session):
+        """Export says 1 sent; the mailbox shows Smartlead sent 2 in the thread
+        (export taken before the pause). The next email must be step 3, not FU1."""
+    
+        campaign = ssm_campaign(session)
+        box = _connected_box(session)
+        S.import_leads(session, [row("one@one-law.com", "INPROGRESS", sent="1")], campaign, now=TUE)
+        s1 = gmsg("s1", "t1", box.email_address, "Quick Question", "Hey One",
+                  headers={"Message-ID": "<s1@smartlead>"}, ts=LAST)
+        s2 = gmsg("s2", "t1", box.email_address, "Re: Quick Question", "Bumping this",
+                  headers={"Message-ID": "<s2@smartlead>"}, ts=LAST + timedelta(days=2))
+        svc = SentSearch(box.email_address, {"one@one-law.com": ["s1", "s2"]}, messages=[s1, s2],
+                         threads={"t1": [s1, s2]})
+        S.adopt(session, service_for=lambda a: svc, now=TUE)
+        one = lead(session, "one@one-law.com")
+>       assert one.sequence_step == 2
+E       assert 1 == 2
+E        +  where 1 = <Lead 1 one@one-law.com LeadStatus.SENT>.sequence_step
+
+tests\test_audit_migration.py:268: AssertionError
+============================== warnings summary ===============================
+.venv\Lib\site-packages\fastapi\testclient.py:1
+  C:\Users\sam_r\Claude\Cowork1\PROJECTS\smartlead\.venv\Lib\site-packages\fastapi\testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_audit_sending.py::test_snd07_preflight_flags_the_send_window_switched_off
+FAILED tests/test_audit_gmail.py::test_adoption_trusts_gmail_over_the_export_for_how_many_steps_went_out
+FAILED tests/test_audit_gmail.py::test_adoption_does_not_hold_a_lead_because_a_mailbox_was_skipped
+FAILED tests/test_audit_web.py::test_a_garbage_scope_value_is_a_4xx_not_a_500
+FAILED tests/test_audit_web.py::test_edit_rejects_a_subject_with_a_line_break
+FAILED tests/test_audit_web.py::test_logout_invalidates_the_session_cookie_server_side
+FAILED tests/test_audit_web.py::test_the_default_inbox_still_shows_an_old_unhandled_reply_after_500_newer_handled_ones
+FAILED tests/test_audit_web.py::test_one_click_post_with_an_unknown_token_is_not_reported_as_success
+FAILED tests/test_audit_web.py::test_lead_urls_are_never_rendered_as_javascript_hrefs
+FAILED tests/test_audit_web.py::test_approved_panels_do_not_claim_the_lead_is_queued_to_send
+FAILED tests/test_audit_web.py::test_ready_draft_page_does_not_say_approve_and_send
+FAILED tests/test_audit_web.py::test_no_angle_page_does_not_blame_the_retired_scorer
+FAILED tests/test_audit_web.py::test_reply_rate_can_never_exceed_100_percent
+FAILED tests/test_audit_web.py::test_a_zero_dollar_cost_entry_does_not_produce_a_zero_cost_per_conversation
+FAILED tests/test_audit_web.py::test_skipped_unconfirmed_is_scoped_to_the_month_shown
+FAILED tests/test_audit_web.py::test_dashboard_and_costs_survive_hostile_query_parameters[/dashboard?month=9999-12]
+FAILED tests/test_audit_web.py::test_dashboard_and_costs_survive_hostile_query_parameters[/costs?month=9999-12]
+FAILED tests/test_audit_web.py::test_dashboard_and_costs_survive_hostile_query_parameters[/dashboard?workspace=\xb2]
+FAILED tests/test_audit_web.py::test_dashboard_and_costs_survive_hostile_query_parameters[/dashboard?workspace=99999999999999999999]
+FAILED tests/test_audit_web.py::test_every_admin_state_change_writes_an_audit_event_with_the_actor[mailbox_create]
+FAILED tests/test_audit_web.py::test_every_admin_state_change_writes_an_audit_event_with_the_actor[mailbox_edit_cap]
+FAILED tests/test_audit_web.py::test_every_admin_state_change_writes_an_audit_event_with_the_actor[mailbox_status]
+FAILED tests/test_audit_web.py::test_every_admin_state_change_writes_an_audit_event_with_the_actor[mailbox_delete]
+FAILED tests/test_audit_web.py::test_every_admin_state_change_writes_an_audit_event_with_the_actor[workspace_create]
+FAILED tests/test_audit_web.py::test_every_admin_state_change_writes_an_audit_event_with_the_actor[workspace_rename]
+FAILED tests/test_audit_web.py::test_every_admin_state_change_writes_an_audit_event_with_the_actor[campaign_create]
+FAILED tests/test_audit_web.py::test_every_admin_state_change_writes_an_audit_event_with_the_actor[campaign_edit]
+FAILED tests/test_audit_web.py::test_every_admin_state_change_writes_an_audit_event_with_the_actor[proof_point_create]
+FAILED tests/test_audit_web.py::test_every_admin_state_change_writes_an_audit_event_with_the_actor[proof_point_retire]
+FAILED tests/test_audit_web.py::test_every_admin_state_change_writes_an_audit_event_with_the_actor[campaign_delete]
+FAILED tests/test_audit_web.py::test_a_lead_import_is_audited - AssertionErro...
+FAILED tests/test_audit_migration.py::test_a_sequence_smartlead_ended_is_never_resumed[COMPLETED]
+FAILED tests/test_audit_migration.py::test_a_sequence_smartlead_ended_is_never_resumed[UNSUBSCRIBED]
+FAILED tests/test_audit_migration.py::test_a_sequence_smartlead_ended_is_never_resumed[BOUNCED]
+FAILED tests/test_audit_migration.py::test_a_sequence_smartlead_ended_is_never_resumed[REPLIED]
+FAILED tests/test_audit_migration.py::test_unsubscribed_or_bounced_flag_columns_stop_the_lead[extra0]
+FAILED tests/test_audit_migration.py::test_unsubscribed_or_bounced_flag_columns_stop_the_lead[extra1]
+FAILED tests/test_audit_migration.py::test_suppression_export_with_an_email_address_header_is_not_silently_empty
+FAILED tests/test_audit_migration.py::test_an_exclusion_row_with_email_and_domain_blocks_the_whole_company
+FAILED tests/test_audit_migration.py::test_leads_imported_before_suppression_leave_no_live_work_for_the_suppressed
+FAILED tests/test_audit_migration.py::test_every_source_row_has_exactly_one_reported_outcome
+FAILED tests/test_audit_migration.py::test_replaying_the_leads_import_does_not_reset_pipeline_state
+FAILED tests/test_audit_migration.py::test_adopt_replay_retries_a_lead_held_because_its_mailbox_was_not_yet_readable
+FAILED tests/test_audit_migration.py::test_adopt_reconciles_the_step_with_what_the_thread_shows
+44 failed, 94 passed, 1 warning in 61477.51s (17:04:37)
+
+exit=1

@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from mazz.db import session_scope
@@ -165,6 +165,12 @@ def _is_permanent(exc: BaseException) -> bool:
 # --------------------------------------------------------------------------
 
 
+#: First half of the two-int advisory key that serialises send enqueues per
+#: lead (the second half is the lead id). Two-int keys never collide with the
+#: single-bigint keys in send.py and ops.py.
+SEND_ENQUEUE_LOCK_CLASS = 7101
+
+
 def enqueue_job(
     session: Session,
     lead_id: int,
@@ -181,6 +187,14 @@ def enqueue_job(
     twice. Ingest relies on this for its "enqueue exactly ONE jobs row".
     """
 
+    if dedupe and kind == "send":
+        # SELECT-then-INSERT races: two release clicks in flight at once would
+        # both see no job (QA-02). Serialise them per lead until commit, so the
+        # second one's SELECT sees the first one's row.
+        # ponytail: send only. Each xact lock holds a shared lock-table slot
+        # until commit, and an import enqueues thousands of jobs in one
+        # transaction. A partial unique index covers every kind if that matters.
+        session.execute(select(func.pg_advisory_xact_lock(SEND_ENQUEUE_LOCK_CLASS, lead_id)))
     if dedupe:
         existing = session.execute(
             select(Job)

@@ -32,12 +32,13 @@ Three rules, in the order they bite:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.orm import Session
 
-from mazz.models import Lead, Mailbox, MailboxStatus, SentMessage, SuppressionEntry
+from mazz.models import Draft, Lead, Mailbox, MailboxStatus, SentMessage, SuppressionEntry
 
 __all__ = [
     "MailboxUnavailable",
@@ -67,38 +68,54 @@ class NoMailboxConfigured(Exception):
     """No mailbox can EVER serve this lead. Permanent until someone acts."""
 
 
-def day_window(now: datetime) -> tuple[datetime, datetime]:
-    """The UTC calendar day ``now`` falls in.
+#: The cap's day. Every US send window (Mon-Fri 9-17 local, Hawaii included)
+#: ends before Eastern midnight, so one Eastern day holds exactly one business
+#: day of every lead's window. A UTC day split it: 16:00-17:00 Pacific in winter
+#: is the next UTC day, so a mailbox could send its cap twice in one afternoon.
+CAP_DAY_TZ = ZoneInfo("America/New_York")
 
-    UTC rather than each mailbox's local business day: a cap is a volume
-    control, not a schedule, and a single unambiguous boundary is one both this
-    code and a human reading `sent_messages` can agree on. Send-time-of-day
-    shaping is a separate concern and does not belong in the cap.
+
+def day_window(now: datetime) -> tuple[datetime, datetime]:
+    """The Eastern calendar day ``now`` falls in, as UTC instants.
+
+    One fixed boundary for every mailbox: a cap is a volume control, and a
+    single unambiguous day is one both this code and a human reading
+    `sent_messages` can agree on. See `CAP_DAY_TZ` for why Eastern, not UTC.
     """
 
-    start = now.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    return start, start + timedelta(days=1)
+    day = now.astimezone(CAP_DAY_TZ).date()
+    start = datetime.combine(day, time(0), tzinfo=CAP_DAY_TZ)
+    end = datetime.combine(day + timedelta(days=1), time(0), tzinfo=CAP_DAY_TZ)
+    return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
 
 
 def sent_today(session: Session, mailbox: Mailbox, *, now: datetime) -> int:
-    """How many messages this mailbox has actually sent in the current UTC day.
+    """How many messages this mailbox has sent, or may have sent, today.
 
     Counted from `sent_messages`, never from a counter on the mailbox row: a
     crash between the send and the bookkeeping must not hand a mailbox a fresh
     budget, and the only record that cannot drift is the one written when the
-    message actually left.
+    message actually left. An attempt handed to the sender with no booked
+    result yet (in flight, or ambiguous) counts too: it may be in an inbox.
     """
 
     start, end = day_window(now)
-    return int(
-        session.execute(
-            select(func.count(SentMessage.id)).where(
-                SentMessage.mailbox_id == mailbox.id,
-                SentMessage.sent_at >= start,
-                SentMessage.sent_at < end,
-            )
-        ).scalar_one()
-    )
+    booked = session.execute(
+        select(func.count(SentMessage.id)).where(
+            SentMessage.mailbox_id == mailbox.id,
+            SentMessage.sent_at >= start,
+            SentMessage.sent_at < end,
+        )
+    ).scalar_one()
+    in_flight = session.execute(
+        select(func.count(Draft.id)).where(
+            Draft.send_attempt_mailbox_id == mailbox.id,
+            Draft.send_attempted_at >= start,
+            Draft.send_attempted_at < end,
+            ~exists().where(SentMessage.draft_id == Draft.id),
+        )
+    ).scalar_one()
+    return int(booked) + int(in_flight)
 
 
 def headroom(session: Session, mailbox: Mailbox, *, now: datetime) -> int:
@@ -126,22 +143,17 @@ class _Candidate:
 
 
 def _candidates(session: Session, *, campaign_id: int | None) -> list[Mailbox]:
-    """Active mailboxes that may serve this campaign. Pinned wins if present."""
+    """Active mailboxes that may serve this campaign. Pinned wins if present.
 
-    active = (
-        session.execute(
-            select(Mailbox)
-            .where(Mailbox.status == MailboxStatus.ACTIVE)
-            .order_by(Mailbox.id)
-        )
-        .scalars()
-        .all()
-    )
-    if campaign_id is not None:
-        pinned = [m for m in active if m.campaign_id == campaign_id]
-        if pinned:
-            return pinned
-    return [m for m in active if m.campaign_id is None]
+    The pin is judged over every status, not just active ones: a campaign whose
+    pinned mailboxes are all paused (a bounce auto-pause) waits for them, it
+    does not spill onto whatever unpinned mailbox happens to be active.
+    """
+
+    rows = session.execute(select(Mailbox).order_by(Mailbox.id)).scalars().all()
+    if campaign_id is not None and any(m.campaign_id == campaign_id for m in rows):
+        return [m for m in rows if m.campaign_id == campaign_id and m.status == MailboxStatus.ACTIVE]
+    return [m for m in rows if m.campaign_id is None and m.status == MailboxStatus.ACTIVE]
 
 
 def select_mailbox(
@@ -190,7 +202,7 @@ def select_mailbox(
     waiting: list[datetime] = []
     for mailbox in pool:
         if headroom(session, mailbox, now=now) <= 0:
-            # Capped for the day: free again at the next UTC midnight.
+            # Capped for the day: free again at the next Eastern midnight.
             waiting.append(day_window(now)[1])
             continue
         eligible_at = next_eligible_at(mailbox, now=now)

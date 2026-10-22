@@ -250,10 +250,17 @@ def normalize_row(raw: Mapping[str, Any]) -> dict[str, Any]:
     """Re-key an arbitrary spreadsheet row onto canonical field names.
 
     Later columns never clobber an earlier non-empty value, so a sheet with
-    both ``Email`` and ``Work Email`` keeps the first populated one.
+    both ``Email`` and ``Work Email`` keeps the first populated one -- unless
+    they hold two different addresses. Then the row is rejected: picking one
+    could contact, or suppression-check, the wrong person.
+
+    An exact alias always beats a leading-token guess, whatever the column
+    order, and ``email`` is never guessed: an "Email Account" column (a
+    sender's mailbox) sitting left of "Email" must not become the lead.
     """
 
     out: dict[str, Any] = {}
+    guessed: dict[str, Any] = {}
     for header, value in raw.items():
         field = canonical_field(str(header))
         if field is None:
@@ -261,6 +268,16 @@ def normalize_row(raw: Mapping[str, Any]) -> dict[str, Any]:
         text = "" if value is None else str(value).strip()
         if not text:
             continue
+        key = _HEADER_PUNCT_RE.sub("_", str(header).strip().lower()).strip("_")
+        if key in _ALIASES:
+            if field == "email" and out.get("email", text).lower() != text.lower():
+                raise RowValidationError(
+                    f"two different email addresses ({out['email']!r}, {text!r}); "
+                    "keep one column", field="email")
+            out.setdefault(field, text)
+        elif field != "email":
+            guessed.setdefault(field, text)
+    for field, text in guessed.items():
         out.setdefault(field, text)
     return out
 

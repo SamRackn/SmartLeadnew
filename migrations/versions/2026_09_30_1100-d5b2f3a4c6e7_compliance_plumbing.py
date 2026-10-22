@@ -54,8 +54,16 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Refuse rather than delete: a sha256-only row is an erased person's
+    # tombstone, the only thing stopping the next import bringing them back.
+    op.execute(
+        "DO $$ BEGIN IF EXISTS (SELECT 1 FROM suppression_list "
+        "WHERE email IS NULL AND domain IS NULL) THEN "
+        "RAISE EXCEPTION 'refusing to downgrade: suppression_list holds erasure "
+        "tombstones (sha256 only); the old schema cannot keep them'; "
+        "END IF; END $$"
+    )
     op.alter_column('leads', 'approved_by', type_=sa.String(length=64), existing_nullable=True)
-    op.execute("DELETE FROM suppression_list WHERE email IS NULL AND domain IS NULL")
     op.drop_constraint(op.f('ck_suppression_list_email_or_domain'), 'suppression_list', type_='check')
     op.create_check_constraint('email_or_domain', 'suppression_list', 'email IS NOT NULL OR domain IS NOT NULL')
     op.drop_index(op.f('ix_suppression_list_workspace_id'), table_name='suppression_list')

@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Callable
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from mazz import audit
 from mazz.integrations import gmail_reader as gr
@@ -51,6 +51,9 @@ NEEDS_REVIEW = "needs_review"
 #: A lead gets at most this many OOO pauses; after that an OOO is only recorded.
 MAX_OOO_PAUSES = 2
 DEFAULT_OOO_DAYS = 7
+#: An auto-reply that says the person is away longer than this is a person's
+#: situation, not a pause: a human decides (see `apply_reply`).
+MAX_OOO_DAYS = 180
 #: A "not interested" longer than this is a conversation, not a brush-off.
 NEGATIVE_MAX_CHARS = 400
 REPLY_BODY_LIMIT = 5000
@@ -94,11 +97,18 @@ _AUTO_SUBJECT = re.compile(
     r"out[ -]of[ -](?:the[ -])?office|ooo\b|away from (?:the )?office|vacation (?:reply|response))",
     re.I,
 )
+# "don't stop emailing me" asks for the opposite of an opt-out, so `stop ...`
+# is not matched after a negation. Plain opt-outs still match (fail closed).
 _UNSUB = re.compile(
-    r"\b(?:unsubscribe|remove me|remove my (?:e-?mail|address)|stop (?:e-?mailing|contacting|"
-    r"sending|messaging)|take me off|do not (?:e-?mail|contact)|don'?t (?:e-?mail|contact)|opt[ -]?out)\b",
+    r"\b(?:unsubscribe|remove me|remove my (?:e-?mail|address)|"
+    r"(?<!don't )(?<!don\u2019t )(?<!dont )(?<!do not )(?<!never )"
+    r"stop (?:e-?mailing|contacting|sending|messaging)|take me off|do not (?:e-?mail|contact)|"
+    r"don'?t (?:e-?mail|contact)|opt[ -]?out)\b",
     re.I,
 )
+#: A signature delimiter ("--" alone on a line): what follows is the sender's
+#: signature, where a newsletter "unsubscribe" is not a request to us.
+_SIGNATURE = re.compile(r"^[ \t]*--[ \t]*$", re.M)
 _NEGATIVE = re.compile(
     r"\b(?:not interested|no,? thanks|no,? thank you|not a fit|not looking|not at this time|"
     r"no interest|we(?:'re| are) (?:all set|good)|not for us|not needed|we(?:'re| are) covered|"
@@ -127,7 +137,7 @@ def is_auto_reply(headers: dict[str, str], subject: str) -> bool:
 def classify(headers: dict[str, str], subject: str, own_text: str) -> Classification:
     # An opt-out outranks the auto-reply headers: "remove me" sent from a
     # client that stamps Auto-Submitted is still a person asking to stop.
-    if _UNSUB.search(own_text[:600]):
+    if _UNSUB.search(_SIGNATURE.split(own_text, maxsplit=1)[0][:600]):
         return Classification(UNSUBSCRIBE, needs_confirmation=True)
     if is_auto_reply(headers, subject):
         return Classification(OOO)
@@ -194,12 +204,15 @@ def parse_return_date(text: str, received_on: date) -> date | None:
     """The date an out-of-office says the person is back, or None.
 
     "returning on October 14", "back 10/14", "until 14 Oct 2026". A bare
-    weekday ("back Monday") is not parsed: None means the 7-day default.
+    weekday ("back Monday") is not parsed, nor is a date already past: None
+    means the 7-day default. A date beyond `MAX_OOO_DAYS` is returned as is;
+    `apply_reply` sends that to a human rather than pausing for months.
     """
 
     for m in _TRIGGER.finditer(text or ""):
         d = _date_in(text[m.end() : m.end() + 60], received_on)
-        if d and d <= received_on + timedelta(days=180):
+        # A date already past (an explicit old year) schedules nothing sensible.
+        if d and d >= received_on - timedelta(days=1):
             return d
     return None
 
@@ -273,6 +286,11 @@ def apply_reply(
         if result.kind == OOO
         else None
     )
+    if return_date and return_date > msg.received_at.date() + timedelta(days=MAX_OOO_DAYS):
+        # Away for most of a year: not a pause. Stops the sequence and shows in
+        # the inbox's attention list for a person to decide (not the 7-day default,
+        # which would email someone who is not there).
+        result = Classification(NEEDS_REVIEW)
     prior_ooo = session.execute(
         select(Reply.id).where(Reply.lead_id == lead.id, Reply.classification == OOO)
     ).all()
@@ -313,6 +331,17 @@ def apply_reply(
         if result.kind == UNSUBSCRIBE:
             _suppress(session, lead.email, "unsubscribe request by reply")
             detail["suppressed"] = True
+            # The person who asked may be a colleague or assistant answering on
+            # the lead's thread: they asked, so they are suppressed too.
+            asker = (msg.from_address or "").strip().lower()
+            if (
+                "@" in asker
+                and asker != lead.email.strip().lower()
+                and session.execute(
+                    select(Mailbox.id).where(func.lower(Mailbox.email_address) == asker)
+                ).first() is None
+            ):
+                _suppress(session, asker, "unsubscribe request by reply (other sender on thread)")
 
     audit.record(session, audit.SYSTEM, f"reply_{result.kind}", "lead", lead.id, **detail)
     session.flush()
@@ -323,7 +352,15 @@ def apply_reply(
 # Bounces
 # --------------------------------------------------------------------------
 
-_STATUS = re.compile(r"\b([45]\.\d{1,3}\.\d{1,3})\b")
+# Most reliable first: the DSN's own "Status:" field, then a code that follows
+# an SMTP reply ("550 5.1.1"), then any bare status. Every form refuses a
+# dotted quad's first three octets (an IP like 5.9.149.12 is not a status).
+_CODE = r"([45]\.\d{1,3}\.\d{1,3})\b(?!\.\d)"
+_STATUS_FORMS = (
+    re.compile(r"\bstatus:\s*" + _CODE),
+    re.compile(r"\b[45]\d\d[ -]" + _CODE),
+    re.compile(r"(?<![\d.])" + _CODE),
+)
 _NO_SUCH = re.compile(
     r"address not found|user unknown|no such user|does not exist|doesn'?t exist|unknown user",
     re.I,
@@ -369,7 +406,7 @@ def handle_bounce(session, mailbox: Mailbox, msg: gr.ParsedMessage) -> bool:
     if sent is None or sent.bounced_at is not None:
         return False
 
-    m = _STATUS.search(text)
+    m = next((m for m in (rx.search(text) for rx in _STATUS_FORMS) if m), None)
     code = m.group(1) if m else ("5.1.1" if _NO_SUCH.search(text) else None)
     if code is None or not code.startswith("5.") or code == "5.2.2":
         log.info("bounce for %s is soft or unreadable (%s); not suppressing", sent.to_address, code)
@@ -424,6 +461,9 @@ def process_message(session, mailbox: Mailbox, msg: gr.ParsedMessage, report: Sy
 
 
 SCAN_DAYS = 14
+#: Finished or stopped sequences are still read this long: a late reply to the
+#: last step is real mail.
+SCAN_FINISHED_DAYS = 45
 
 
 def _scan(session, mailbox: Mailbox, service, now: datetime, report: SyncReport) -> None:
@@ -431,27 +471,37 @@ def _scan(session, mailbox: Mailbox, service, now: datetime, report: SyncReport)
     expired it: walk the threads we started recently, plus recent DSNs."""
 
     report.scanned = True
-    since = now - timedelta(days=SCAN_DAYS)
+    since = now - timedelta(days=SCAN_FINISHED_DAYS)
+    # A live sequence is read however old its last send is (a long outage, or a
+    # legacy thread adopted weeks after Smartlead's last email); a finished one
+    # for SCAN_FINISHED_DAYS.
     threads = session.execute(
         select(SentMessage.provider_thread_id)
+        .join(Lead, Lead.id == SentMessage.lead_id)
         .where(
             SentMessage.mailbox_id == mailbox.id,
-            SentMessage.sent_at >= since,
             SentMessage.provider_thread_id.is_not(None),
+            (Lead.sequence_state.in_(("active", "paused"))) | (SentMessage.sent_at >= since),
         )
         .distinct()
     ).scalars().all()
     for thread_id in threads:
-        for msg in gr.thread_messages(service, thread_id):
+        try:
+            msgs = gr.thread_messages(service, thread_id)
+        except gr.MessageGone as exc:
+            report.errors.append(str(exc))
+            continue
+        for msg in msgs:
             process_message(session, mailbox, msg, report)
-    listing = (
-        service.users().messages()
-        .list(userId="me", q=f"from:(mailer-daemon OR postmaster) newer_than:{SCAN_DAYS}d",
-              maxResults=100)
-        .execute()
-    )
-    for item in listing.get("messages") or []:
-        process_message(session, mailbox, gr.get_message(service, item["id"]), report)
+    for mid in gr.list_message_ids(
+        service, f"from:(mailer-daemon OR postmaster) newer_than:{SCAN_FINISHED_DAYS}d"
+    ):
+        try:
+            msg = gr.get_message(service, mid)
+        except gr.MessageGone as exc:
+            report.errors.append(str(exc))
+            continue
+        process_message(session, mailbox, msg, report)
 
 
 class WrongAccount(RuntimeError):
@@ -479,7 +529,14 @@ def sync_mailbox(session, mailbox: Mailbox, service, *, now: datetime | None = N
             cursor = head
         else:
             for mid in ids:
-                process_message(session, mailbox, gr.get_message(service, mid), report)
+                try:
+                    msg = gr.get_message(service, mid)
+                except gr.MessageGone as exc:
+                    # Deleted since Gmail listed it: nothing to read. Anything
+                    # else re-raises, so the cursor never passes unread mail.
+                    report.errors.append(str(exc))
+                    continue
+                process_message(session, mailbox, msg, report)
     mailbox.gmail_history_id = cursor
     mailbox.last_synced_at = now
     session.flush()

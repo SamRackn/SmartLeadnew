@@ -34,6 +34,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
+from mazz import audit
 from mazz.db import get_session
 from mazz.ingest.csv_import import ImportReport, import_csv
 from mazz.ingest.excel_import import (
@@ -204,4 +205,10 @@ async def import_upload(
             status_code=400,
         )
 
+    # Counts only: the rows carry other people's addresses.
+    audit.record(
+        session, user, "lead_import", "import", None,
+        filename=filename, created=len(report.created), updated=len(report.updated),
+        rejected=len(report.rejected), suppressed=len(report.suppressed),
+    )
     return _page(request, user, report=report, filename=filename)

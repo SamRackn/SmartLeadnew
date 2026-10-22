@@ -11,17 +11,22 @@
   {% if draft is none %}
     <p class="empty">No draft for this lead.
       {% if lead.status.value == "no_angle" %}
-        The scorer found no signal strong enough to clear the threshold —
-        see the rationale below. No draft was written on purpose; a forced
-        generic opener is exactly what this tool exists to avoid.
+        Their own website didn't confirm they're in this campaign's vertical
+        (or it ruled them out), so no email was written. That's on purpose:
+        there is no generic fallback.
       {% endif %}
     </p>
   {% else %}
 
-    {% if lead.status.value == "held" %}
+    {% if draft.verification_status.value == "failed" %}
       <div class="held-banner">
         <strong>HELD — cannot be approved.</strong>
         <pre class="verification-notes">{{ draft.verification_notes }}</pre>
+      </div>
+    {% elif lead.status.value == "held" %}
+      <div class="held-banner">
+        <strong>HELD.</strong> This lead was pulled from the send path
+        (suppression or a stopped sequence), not by verification.
       </div>
     {% endif %}
 
@@ -53,8 +58,10 @@
           <li>
             <span class="fact-kind">{{ c.kind }}</span>
             <blockquote>{{ c.content or "(fact id not found in current research_cache)" }}</blockquote>
-            {% if c.source_url %}
-              <a href="{{ c.source_url }}" target="_blank" rel="noopener">{{ c.source_url }}</a>
+            {% if c.source_url|safe_url %}
+              <a href="{{ c.source_url|safe_url }}" target="_blank" rel="noopener">{{ c.source_url }}</a>
+            {% elif c.source_url %}
+              <span class="muted">{{ c.source_url }}</span>
             {% else %}
               <span class="muted">no source URL</span>
             {% endif %}
@@ -77,11 +84,11 @@
         </p>
       {% elif lead.status.value == "approved" %}
         <p class="queued-banner">
-          <strong>Approved — queued to send.</strong>
+          <strong>Approved. Not sent yet:</strong> release it from <a href="/outbox">the outbox</a>.
           {% if send_state.mailbox %}
-            Next out of <code>{{ send_state.mailbox.email_address }}</code>.
+            Once released it goes out of <code>{{ send_state.mailbox.email_address }}</code>.
           {% elif send_state.waiting_until %}
-            Every mailbox is at its daily cap or spacing; this goes out after
+            Every mailbox is at its daily cap or spacing; a release now would wait until
             {{ send_state.waiting_until.strftime("%Y-%m-%d %H:%M UTC") }}.
             Waiting is the pacing working, not a fault.
           {% endif %}
@@ -93,18 +100,18 @@
           </p>
         {% endif %}
         <form hx-post="/leads/{{ lead.id }}/approve" hx-target="#draft-panel" hx-swap="outerHTML">
-          <button type="submit" class="approve">Approve &amp; send</button>
+          <button type="submit" class="approve">Approve</button>
         </form>
         <p class="muted send-hint">
           {% if send_state.mailbox %}
-            Sends from <code>{{ send_state.mailbox.email_address }}</code>
-            ({{ send_state.mailbox.display_name }}) once the worker picks it up.
+            Would send from <code>{{ send_state.mailbox.email_address }}</code>
+            ({{ send_state.mailbox.display_name }}).
           {% elif send_state.waiting_until %}
-            Every mailbox is at its daily cap or spacing right now — approving
-            queues this to go out after
+            Every mailbox is at its daily cap or spacing right now; a release
+            would wait until
             {{ send_state.waiting_until.strftime("%Y-%m-%d %H:%M UTC") }}.
           {% endif %}
-          Approving queues exactly this one email. Nothing else is sent.
+          Approving does not send. Releasing it from the outbox is a separate step.
         </p>
       {% else %}
         <p class="muted">

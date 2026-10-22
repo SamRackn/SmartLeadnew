@@ -120,6 +120,15 @@ class HistoryExpired(Exception):
     """Gmail no longer has history from our cursor (404). Fall back to a scan."""
 
 
+class MessageGone(Exception):
+    """A message or thread history named has since been deleted (404). Skippable:
+    the mail is gone, so there is nothing to read; anything else is not."""
+
+
+def _status(exc: BaseException):
+    return getattr(getattr(exc, "resp", None), "status", None)
+
+
 def profile(service) -> dict[str, Any]:
     return service.users().getProfile(userId="me").execute()
 
@@ -145,7 +154,7 @@ def new_message_ids(service, start_history_id: str) -> tuple[list[str], str]:
                 .execute()
             )
         except Exception as exc:  # googleapiclient.errors.HttpError
-            if getattr(getattr(exc, "resp", None), "status", None) == 404:
+            if _status(exc) == 404:
                 raise HistoryExpired(str(exc)) from exc
             raise
         for record in resp.get("history") or []:
@@ -160,11 +169,37 @@ def new_message_ids(service, start_history_id: str) -> tuple[list[str], str]:
 
 
 def get_message(service, message_id: str) -> ParsedMessage:
-    return parse_gmail_message(
-        service.users().messages().get(userId="me", id=message_id, format="full").execute()
-    )
+    try:
+        raw = service.users().messages().get(userId="me", id=message_id, format="full").execute()
+    except Exception as exc:  # googleapiclient.errors.HttpError
+        if _status(exc) == 404:
+            raise MessageGone(f"message {message_id} no longer exists") from exc
+        raise
+    return parse_gmail_message(raw)
 
 
 def thread_messages(service, thread_id: str) -> list[ParsedMessage]:
-    resp = service.users().threads().get(userId="me", id=thread_id, format="full").execute()
+    try:
+        resp = service.users().threads().get(userId="me", id=thread_id, format="full").execute()
+    except Exception as exc:  # googleapiclient.errors.HttpError
+        if _status(exc) == 404:
+            raise MessageGone(f"thread {thread_id} no longer exists") from exc
+        raise
     return [parse_gmail_message(m) for m in resp.get("messages") or []]
+
+
+def list_message_ids(service, query: str) -> list[str]:
+    """Every message id matching a Gmail search, following nextPageToken."""
+
+    ids: list[str] = []
+    token = None
+    while True:
+        resp = (
+            service.users().messages()
+            .list(userId="me", q=query, maxResults=100, pageToken=token)
+            .execute()
+        )
+        ids += [m["id"] for m in resp.get("messages") or [] if m.get("id")]
+        token = resp.get("nextPageToken")
+        if not token:
+            return ids

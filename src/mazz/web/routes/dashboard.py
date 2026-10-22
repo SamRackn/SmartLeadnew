@@ -168,7 +168,8 @@ async def dashboard(
     # The client's own metric first: cost per qualified conversation for the
     # chosen month (default this one) and workspace (default all).
     metrics_month = parse_month(month)
-    workspace_id = int(workspace) if (workspace or '').isdigit() else None  # '' = all
+    ws = workspace or ""  # '' = all
+    workspace_id = int(ws) if ws.isascii() and ws.isdigit() and len(ws) < 10 else None
     metrics = month_metrics(session, metrics_month, workspace_id=workspace_id)
     workspaces = list(session.execute(select(Workspace).order_by(Workspace.name)).scalars())
 

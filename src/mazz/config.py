@@ -160,6 +160,11 @@ def _live_sending_problems(settings: Settings) -> list[str]:
     processes: the web app is the one serving /u/ and isolating its host."""
 
     problems = []
+    if not settings.send_window:
+        problems.append(
+            "SEND_WINDOW is off: real mail would go out at night and at weekends, "
+            "outside Mon-Fri 9-17 in the lead's timezone"
+        )
     unsub = settings.unsubscribe_base_url.strip()
     host = settings.unsubscribe_host.strip().lower()
     if not unsub.startswith("https://"):

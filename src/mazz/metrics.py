@@ -72,6 +72,8 @@ def parse_month(raw: str | None, *, default: date | None = None) -> date:
 
     try:
         year, month = (raw or "").split("-")
+        if not (year.isascii() and month.isascii()) or not 2000 <= int(year) <= 2100:
+            raise ValueError(raw)
         return date(int(year), int(month), 1)
     except (ValueError, TypeError):
         return month_start(default or datetime.now(timezone.utc))
@@ -102,7 +104,9 @@ class MonthMetrics:
 
     @property
     def has_costs(self) -> bool:
-        return bool(self.cost_by_category)
+        # A $0.00 line is "nothing measured", not a free month: dividing by it
+        # would print "$0.00 per qualified conversation".
+        return self.cost_total > 0
 
     @property
     def qualified(self) -> int:
@@ -167,7 +171,9 @@ def month_metrics(
         select(func.count(distinct(Reply.lead_id))).where(
             Reply.received_at >= start, Reply.received_at < end,
             Reply.classification != "ooo", Reply.lead_id.in_(leads),
-            Reply.lead_id.in_(select(SentMessage.lead_id).where(SentMessage.legacy.is_(False))),
+            # Same cohort as `contacted`: a September lead replying in October
+            # has no October denominator (reply rate could exceed 100%).
+            Reply.lead_id.in_(select(SentMessage.lead_id).where(*in_month)),
         )
     ).scalar_one()
 
@@ -182,7 +188,9 @@ def month_metrics(
     )
     m.stages = {stage: tagged.get(stage, 0) for stage in STAGES}
 
-    skipped = select(func.count(Lead.id)).where(Lead.skip_reason == "vertical_unconfirmed")
+    skipped = select(func.count(Lead.id)).where(
+        Lead.skip_reason == "vertical_unconfirmed", Lead.created_at >= start, Lead.created_at < end
+    )
     if workspace_id is not None:
         skipped = skipped.where(Lead.id.in_(leads))
     m.skipped_unconfirmed = session.execute(skipped).scalar_one()

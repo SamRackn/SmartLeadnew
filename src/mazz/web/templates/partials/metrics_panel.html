@@ -38,7 +38,7 @@
       <tr><td>Meetings booked</td><td>{{ metrics.stages.get("meeting_booked", 0) }}</td><td>&mdash;</td></tr>
       <tr><td>Meetings showed</td><td>{{ metrics.stages.get("meeting_showed", 0) }}</td><td>&mdash;</td></tr>
       <tr><td>Clients won</td><td>{{ metrics.stages.get("client_won", 0) }}</td><td>{{ baseline.deals }}</td></tr>
-      <tr><td>Skipped: vertical unconfirmed (to date)</td><td>{{ metrics.skipped_unconfirmed }}</td><td>&mdash;</td></tr>
+      <tr><td>Skipped: vertical unconfirmed (leads added this month)</td><td>{{ metrics.skipped_unconfirmed }}</td><td>&mdash;</td></tr>
     </tbody>
   </table>
   <p class="hint">

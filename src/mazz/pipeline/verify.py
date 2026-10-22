@@ -1091,7 +1091,10 @@ class _Scanner:
             if self.is_consumed(start, end):
                 continue
             self.consume(start, end)
-            if self._number_is_not_a_claim(start, end):
+            # A digit in sender voice IS a claim ("we got a client 50+ leads"):
+            # only proof_points or notes can carry it (QUAL-02). Meeting
+            # lengths stay exempt, and so do spelled-out numbers below.
+            if self.in_meeting_offer(start, end):
                 continue
             if canonical not in self.g.numbers:
                 self.fail(self.text[start:end].strip(), "number", start, end)
@@ -1648,7 +1651,7 @@ def campaign_copy_for(
 
     from mazz.models import Campaign
     from mazz.pipeline.outreach import effective_vertical, vertical_is_generic
-    from mazz.pipeline.qualify import config_for_campaign, qualify_facts
+    from mazz.pipeline.qualify import config_for_campaign, fallback_lead, qualify_facts
 
     if lead.campaign_id is None:
         return None
@@ -1663,7 +1666,9 @@ def campaign_copy_for(
     # The SAME config the composer's side derives, from the same function. If
     # these were built separately, a draft could be written believing no
     # vertical was claimed and checked believing one was.
-    result = qualify_facts(facts, config=config_for_campaign(campaign), lead=lead)
+    result = qualify_facts(
+        facts, config=config_for_campaign(campaign), lead=fallback_lead(session, lead)
+    )
     return CampaignCopy(
         vertical=vertical,
         offer_line=(campaign.offer_line or "").strip(),

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-shot setup for an Ubuntu 24.04 VM (Oracle Always-Free AMD micro, 1 GB).
+# One-shot setup for an Ubuntu 22.04 VM (Oracle Always-Free AMD micro, 1 GB).
 # Run ON THE VM as the default user, after copying the app tarball over:
 #
 #   scp -i ~/.ssh/oracle_mazz mazz.tar.gz scripts/oracle_setup.sh ubuntu@<ip>:~
@@ -138,13 +138,16 @@ ${APP_HOST}, ${UNSUB_HOST} {
 }
 EOF
 
-echo "== nightly backup (local; copy off the box too)"
-sudo install -d -m 700 -o postgres -g postgres /var/backups/mazz
-sudo tee /etc/cron.daily/mazz-backup >/dev/null <<'EOF'
+echo "== nightly backup (verified; still LOCAL ONLY -- copy it and $ENV_FILE off the box)"
+# `ops backup` dumps to a temporary name, reads it back with pg_restore --list and
+# only then renames it: a failed dump exits non-zero and never looks fresh. The old
+# `pg_dump | gzip` under /bin/sh had no pipefail, so a dead dump left a new file.
+# BACKUP_DIR in the env file is also where `ops health` looks for the newest dump.
+sudo install -d -m 700 -o mazz -g mazz /var/backups/mazz
+sudo grep -q '^BACKUP_DIR=' "$ENV_FILE" || echo 'BACKUP_DIR=/var/backups/mazz' | sudo tee -a "$ENV_FILE" >/dev/null
+sudo tee /etc/cron.daily/mazz-backup >/dev/null <<EOF
 #!/bin/sh
-f=/var/backups/mazz/mazz-$(date +%F).sql.gz
-su postgres -c "pg_dump mazz" | gzip > "$f" && chmod 600 "$f"
-find /var/backups/mazz -name 'mazz-*.sql.gz' -mtime +14 -delete
+exec sudo -u mazz sh -c 'set -a; . $ENV_FILE; set +a; cd $APP_DIR && exec .venv/bin/python -m mazz.ops backup --keep 14'
 EOF
 sudo chmod +x /etc/cron.daily/mazz-backup
 

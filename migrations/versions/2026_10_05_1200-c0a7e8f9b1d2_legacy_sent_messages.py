@@ -23,6 +23,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute("DELETE FROM sent_messages WHERE draft_id IS NULL")
+    # Refuse rather than delete: a legacy row is what stops Email 1 going to
+    # someone Smartlead already emailed. Roll back the application, not this.
+    op.execute(
+        "DO $$ BEGIN IF EXISTS (SELECT 1 FROM sent_messages WHERE draft_id IS NULL) THEN "
+        "RAISE EXCEPTION 'refusing to downgrade: sent_messages holds legacy (Smartlead) "
+        "sends; deleting them would let Email 1 go to people already emailed'; "
+        "END IF; END $$"
+    )
     op.alter_column('sent_messages', 'draft_id', existing_type=sa.Integer(), nullable=False)
     op.drop_column('sent_messages', 'legacy')

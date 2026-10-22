@@ -1,0 +1,132 @@
+﻿[
+    {
+        "path":  "src/mazz/ingest/validate.py",
+        "sha256":  "e617207de12f39ab209a74aa9b1301bb3252597a282ae86fa1c9f269f9cfd8e3",
+        "bytes":  15793
+    },
+    {
+        "path":  "src/mazz/integrations/email_sender.py",
+        "sha256":  "31e107eab47ebf9a61c7c2a87a97eb16d8e69066b4967038a643e6ee29bbe3cc",
+        "bytes":  18513
+    },
+    {
+        "path":  "src/mazz/integrations/gmail_reader.py",
+        "sha256":  "58ddce243ccc376331ffd95db9a7038f763c5b4c05c14888c8df05753dbfa697",
+        "bytes":  6906
+    },
+    {
+        "path":  "src/mazz/integrations/google_oauth.py",
+        "sha256":  "35029f09a07e481ec9b029afccdad65125e4134c307abad64d9c028bc25444d4",
+        "bytes":  8829
+    },
+    {
+        "path":  "src/mazz/ops.py",
+        "sha256":  "4727a29609fc6a6f1604a4420e00aa70ec75d5b9ba1ff0ffba81d80add4fa872",
+        "bytes":  32063
+    },
+    {
+        "path":  "src/mazz/pipeline/mailbox.py",
+        "sha256":  "afe5716cf4f22f2b376ec1d0121f218367bedf76bf940ed11e4a5cc2c6deca6f",
+        "bytes":  13414
+    },
+    {
+        "path":  "src/mazz/pipeline/replies.py",
+        "sha256":  "cd2cfd649799d57b4734899cfddcfb431be20624aa024560a9207e46105a51e3",
+        "bytes":  23601
+    },
+    {
+        "path":  "src/mazz/pipeline/send.py",
+        "sha256":  "79e9978afecf4aaa8670ef2e135f8ea2e8ed94a06ed39a50c4deff9578373e5a",
+        "bytes":  28444
+    },
+    {
+        "path":  "src/mazz/pipeline/sequence.py",
+        "sha256":  "fa5112c14597b5bbb4e880e26f9147f433fca24074a84ea204b9b924550fb3ef",
+        "bytes":  14407
+    },
+    {
+        "path":  "src/mazz/web/app.py",
+        "sha256":  "07ba2f9f0860ab272aefaa1e2be1360b27e9ae1b88b4d7ba11573bb40402c36c",
+        "bytes":  9173
+    },
+    {
+        "path":  "src/mazz/web/auth.py",
+        "sha256":  "c1c379751fea01d3830714e3f9e8552b9b523ff009989683f495317579a1afae",
+        "bytes":  7585
+    },
+    {
+        "path":  "src/mazz/web/routes/auth.py",
+        "sha256":  "feac7aa6fb715a690a5627666cae592ea8552b66d02c8e932f0bfa7605d2f9b9",
+        "bytes":  2710
+    },
+    {
+        "path":  "src/mazz/web/routes/leads.py",
+        "sha256":  "c7d3e0291e72778f797cfc8e4dcf6b70139d4e56fadc077cf873682f2422901b",
+        "bytes":  23157
+    },
+    {
+        "path":  "src/mazz/web/routes/oauth.py",
+        "sha256":  "2f951a5a8776881b7d02cbeebb53065a9d060972d10afffa87d641fe6e6864a4",
+        "bytes":  3543
+    },
+    {
+        "path":  "src/mazz/web/routes/outbox.py",
+        "sha256":  "060a173cf3135cb0c48da4cf8524f599d49cc482095f12e386ad2c4c567fc38a",
+        "bytes":  14080
+    },
+    {
+        "path":  "src/mazz/web/routes/removals.py",
+        "sha256":  "2369509779d794f9ed286c61dc664e675b5e9b4b8f32d744da8f1f6aa5d33ce5",
+        "bytes":  8286
+    },
+    {
+        "path":  "docs/CLAUDE-CODE-MIGRATION-AUDIT-PROMPT.md",
+        "sha256":  "c507c0474d8f9bb76eab8231e0601a44fcab97265c059fead4cde5c62ed2f4c4",
+        "bytes":  34375
+    },
+    {
+        "path":  "docs/LAUNCH-PROMPT.md",
+        "sha256":  "12aa15398bd386a29c7215e203fdc7ef905e271d7edbfe267225768284a355e9",
+        "bytes":  22345
+    },
+    {
+        "path":  "docs/SONNET-PLAN.md",
+        "sha256":  "b224c37b496c402b61abce11e6c38cac7a99b085eec57659b516365a4edf437d",
+        "bytes":  10613
+    },
+    {
+        "path":  "docs/migration-audit/HANDOFF-RECOVERY.md",
+        "sha256":  "9770c95bbf9dd5859aee14da1d9b435513ab079c478e8394da7bb66fd8d55b3e",
+        "bytes":  12861
+    },
+    {
+        "path":  "docs/migration-audit/evidence/vm-pip-freeze-2026-10-15.txt",
+        "sha256":  "2a1542ff17ce0d1f550ee6f4430885a0cefa31ed14cf65cfd3c9497da612b8bb",
+        "bytes":  1127
+    },
+    {
+        "path":  "docs/migration-audit/evidence/vm-source-sha256-crlf-normalized-2026-10-15.txt",
+        "sha256":  "6bba3fcdbada659c532d3bcc649e5dbdb2eb0e77669791a78e12b853f5f7b32e",
+        "bytes":  15071
+    },
+    {
+        "path":  "tests/test_audit_gmail.py",
+        "sha256":  "81890048366f10bc8834b35111975fc3e08d4067af5326645e1e3a208b50fb94",
+        "bytes":  19185
+    },
+    {
+        "path":  "tests/test_audit_migration.py",
+        "sha256":  "69b0de0cd2a2b51f113b81c8362c65a709952ebff61db1d371dc368e1b751cb9",
+        "bytes":  14059
+    },
+    {
+        "path":  "tests/test_audit_sending.py",
+        "sha256":  "afbe5522e2eb01351080fdeb9f938c8a5b8d5a8e4f20c38195c43715365b67a9",
+        "bytes":  11289
+    },
+    {
+        "path":  "tests/test_audit_web.py",
+        "sha256":  "0793302ba37e9af4587926c5a9da96c12c3b417f6c23588d45c91de762470b39",
+        "bytes":  35216
+    }
+]

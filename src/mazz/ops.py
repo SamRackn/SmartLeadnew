@@ -5,7 +5,7 @@ one manual repair the send step can ask a human for.
     python -m mazz.ops health [--notify]   # exit 1 if anything needs a human
     python -m mazz.ops preflight           # exit 1 if a go-live gate is unmet
     python -m mazz.ops backup              # pg_dump, verified, rotated
-    python -m mazz.ops resolve-send LEAD_ID --sent | --not-sent
+    python -m mazz.ops resolve-send LEAD_ID --sent | --not-sent --by EMAIL
 
 Before this module the queue had no process of its own: pressing Send in the
 outbox, or importing a spreadsheet in the browser, enqueued jobs that nothing
@@ -21,7 +21,6 @@ is the only thing that will notice a dead credential or a stalled queue.
 from __future__ import annotations
 
 import argparse
-import getpass
 import logging
 import os
 import signal
@@ -33,12 +32,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from sqlalchemy import exists, func, select
-from sqlalchemy.engine import make_url
+from sqlalchemy import exists, func, select, text
+from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.orm import Session
 
 from mazz.config import deployment_problems, get_settings
-from mazz.db import session_scope
+from mazz.db import get_engine, session_scope
 from mazz.models import (
     Campaign,
     Draft,
@@ -113,6 +112,10 @@ class HealthThresholds:
     backup_max_age: timedelta = timedelta(hours=36)
     #: A send marked less than this long ago is still in flight, not lost.
     send_in_flight_grace: timedelta = timedelta(minutes=5)
+    #: Replies not read for this long are not reaching /inbox, and nothing
+    #: stops a sequence on them until they are. (A follow-up reads its own
+    #: mailbox before it leaves: `send._read_replies_first`.)
+    reply_sync_stale_after: timedelta = timedelta(minutes=30)
 
 
 def check_health(
@@ -147,7 +150,7 @@ def check_health(
                 "send_unresolved",
                 f"{len(unresolved)} send(s) may already have gone out with no "
                 f"record (lead {leads}). Check the mailbox's Sent folder, then "
-                "`python -m mazz.ops resolve-send LEAD_ID --sent|--not-sent`.",
+                "`python -m mazz.ops resolve-send LEAD_ID --sent|--not-sent --by EMAIL`.",
             )
         )
 
@@ -165,6 +168,41 @@ def check_health(
                 f"{address} is disabled: {(last_error or 'no error recorded')[:200]}",
             )
         )
+
+    # -- a mailbox that cannot send or be read until a person reconnects it --
+    reconnect = session.execute(
+        select(Mailbox.email_address).where(Mailbox.status == MailboxStatus.NEEDS_RECONNECT)
+    ).scalars().all()
+    if reconnect:
+        alerts.append(
+            Alert(
+                CRITICAL,
+                "mailbox_needs_reconnect",
+                f"{len(reconnect)} mailbox(es) need reconnecting on /mailboxes "
+                f"({', '.join(reconnect)}): they neither send nor sync replies.",
+            )
+        )
+
+    # -- replies not being read --------------------------------------------
+    if get_settings().email_sender == "google":
+        stale_sync = session.execute(
+            select(Mailbox.email_address, Mailbox.last_synced_at).where(
+                Mailbox.status == MailboxStatus.ACTIVE,
+                Mailbox.oauth_refresh_token_enc.is_not(None),
+                (Mailbox.last_synced_at.is_(None))
+                | (Mailbox.last_synced_at < now - thresholds.reply_sync_stale_after),
+            )
+        ).all()
+        for address, synced in stale_sync:
+            alerts.append(
+                Alert(
+                    CRITICAL,
+                    "reply_sync_stale",
+                    f"{address}: replies last read "
+                    f"{f'{synced:%Y-%m-%d %H:%M} UTC' if synced else 'never'}: its "
+                    "replies are not reaching /inbox.",
+                )
+            )
 
     # -- no worker draining the queue --------------------------------------
     oldest_due = session.execute(
@@ -324,15 +362,31 @@ def check_preflight(session: Session, *, settings=None) -> list[Alert]:
                                 f"the launch decision is {DAILY_CAP}"))
 
     # Released while sending was off and deferred (window, cap): these go out
-    # for real the moment the switch flips.
+    # for real the moment the switch flips. RUNNING too: a dry-run worker
+    # killed mid-job leaves one that is reclaimed, and then runs live.
     pending = session.execute(
-        select(Job.lead_id).where(Job.kind == SEND_JOB_KIND, Job.status == JobStatus.PENDING)
+        select(Job.lead_id).where(
+            Job.kind == SEND_JOB_KIND,
+            Job.status.in_((JobStatus.PENDING, JobStatus.RUNNING)),
+        )
     ).scalars().all()
     if pending:
         alerts.append(Alert(CRITICAL, "send_jobs_pending",
                             f"{len(pending)} send job(s) released during the dry run are still "
                             f"pending (lead {', '.join(map(str, pending))}); they go live when "
                             "SEND_ENABLED flips. Let them run dry first, or reject those leads."))
+
+    unresolved = session.execute(
+        select(Draft.lead_id).where(
+            Draft.send_attempted_at.isnot(None),
+            ~exists().where(SentMessage.draft_id == Draft.id),
+        )
+    ).scalars().all()
+    if unresolved:
+        alerts.append(Alert(CRITICAL, "send_unresolved",
+                            f"{len(unresolved)} send attempt(s) with no booked result (lead "
+                            f"{', '.join(map(str, unresolved))}); resolve each with "
+                            "`python -m mazz.ops resolve-send` first."))
 
     stats = session.execute(
         select(func.count(ProofPoint.id))
@@ -526,6 +580,11 @@ def resolve_send(
             )
         )
         lead.status = LeadStatus.SENT
+        # No Gmail ids came back, so the thread cannot be continued from here
+        # (the send step refuses it): say so on the row rather than leave a
+        # sent lead with no sequence state, invisible to the company cap.
+        lead.sequence_state, lead.skip_reason = "stopped", "resolved_by_hand"
+        lead.next_step_due_at = None
         outcome = (
             f"lead {lead.id}: recorded as SENT at {draft.send_attempted_at} "
             f"(confirmed by {resolved_by}, {now:%Y-%m-%d %H:%M} UTC)"
@@ -550,7 +609,11 @@ def resolve_send(
             )
         outcome = f"lead {lead.id}: confirmed NOT sent by {resolved_by} -- {where}"
 
+    from mazz import audit
+
     session.flush()
+    audit.record(session, resolved_by, "resolve_send", "lead", lead.id,
+                 draft_id=draft.id, sent=sent, status=lead.status.value)
     log.warning(outcome)
     return outcome
 
@@ -625,12 +688,56 @@ def _configure_logging() -> None:
     )
 
 
+#: Session-level advisory lock a worker holds for its whole life. Caps,
+#: spacing and stale-job reclaim all assume one worker; this makes a second
+#: (a manual `ops worker` beside the systemd unit) refuse instead of assume.
+WORKER_LOCK_KEY = 0x6D617A7A00
+
+
+def acquire_worker_lock() -> Connection | None:
+    """A connection holding `WORKER_LOCK_KEY`, or None if another worker has it.
+
+    Keep it for as long as the worker runs, then `release_worker_lock`. The
+    process dying releases it too (Postgres drops the session).
+    """
+
+    conn = get_engine().connect()
+    got = conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": WORKER_LOCK_KEY}).scalar()
+    conn.commit()  # session-level lock survives; do not sit idle in a transaction
+    if got:
+        return conn
+    conn.close()
+    return None
+
+
+def release_worker_lock(conn: Connection) -> None:
+    # Unlocked explicitly: close() only returns a pooled connection, and the
+    # session-level lock would ride along with it.
+    try:
+        conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": WORKER_LOCK_KEY})
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _cmd_worker(args: argparse.Namespace) -> int:
     problems = deployment_problems(get_settings(), sending=True)
     if problems:
         for problem in problems:
             log.error("refusing to start the worker: %s", problem)
         return 2
+    lock = acquire_worker_lock()
+    if lock is None:
+        log.error("refusing to start the worker: another worker is already running "
+                  "against this database (caps and spacing assume exactly one)")
+        return 2
+    try:
+        return _run_worker_cli(args)
+    finally:
+        release_worker_lock(lock)
+
+
+def _run_worker_cli(args: argparse.Namespace) -> int:
     stopping = False
 
     def request_stop(signum, _frame):
@@ -740,7 +847,8 @@ def build_parser() -> argparse.ArgumentParser:
     outcome = resolve.add_mutually_exclusive_group(required=True)
     outcome.add_argument("--sent", dest="sent", action="store_true")
     outcome.add_argument("--not-sent", dest="sent", action="store_false")
-    resolve.add_argument("--by", default=getpass.getuser())
+    # A person, not the OS account: it is the actor on the audit event.
+    resolve.add_argument("--by", required=True, help="who checked the Sent folder (their login email)")
     resolve.set_defaults(func=_cmd_resolve_send)
 
     return parser

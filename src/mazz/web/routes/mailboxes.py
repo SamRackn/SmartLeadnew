@@ -34,6 +34,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from mazz import audit
 from mazz.config import get_settings
 from mazz.db import get_session
 from mazz.models import Campaign, Mailbox, MailboxStatus, Workspace
@@ -255,6 +256,8 @@ async def create_mailbox(
             status_code=409,
         )
 
+    audit.record(session, user, "mailbox_create", "mailbox", mailbox.id,
+                 email=mailbox.email_address, daily_cap=cap, min_spacing_seconds=spacing)
     return RedirectResponse(url="/mailboxes", status_code=303)
 
 
@@ -341,6 +344,13 @@ async def edit_mailbox(
             status_code=400,
         )
 
+    # A cap raise is the compliance-relevant edit: record old and new.
+    audit.record(
+        session, user, "mailbox_edit", "mailbox", mailbox.id,
+        email=mailbox.email_address,
+        daily_cap=f"{mailbox.daily_cap} -> {cap}",
+        min_spacing_seconds=f"{mailbox.min_spacing_seconds} -> {spacing}",
+    )
     mailbox.email_address = email_address.strip().lower()
     mailbox.display_name = display_name.strip()
     mailbox.credential_ref = credential_ref.strip()
@@ -404,7 +414,6 @@ async def new_connect_link(
 ):
     """Replace the link's state. The old link stops working at once."""
 
-    from mazz import audit
     from mazz.integrations import google_oauth
 
     mailbox = session.get(Mailbox, mailbox_id)
@@ -454,6 +463,8 @@ async def set_mailbox_status(
             detail="this mailbox's Google authorisation is gone; reconnect it "
             "(the connect link), which re-activates it once Google confirms.",
         )
+    audit.record(session, user, "mailbox_status", "mailbox", mailbox.id,
+                 email=mailbox.email_address, status=f"{mailbox.status.value} -> {new_status.value}")
     mailbox.status = new_status
     if new_status == MailboxStatus.ACTIVE:
         mailbox.consecutive_failures = 0
@@ -479,6 +490,8 @@ async def delete_mailbox(
     mailbox = session.get(Mailbox, mailbox_id)
     if mailbox is None:
         raise HTTPException(status_code=404, detail="mailbox not found")
+    audit.record(session, user, "mailbox_delete", "mailbox", mailbox.id,
+                 email=mailbox.email_address, daily_cap=mailbox.daily_cap)
     session.delete(mailbox)
     session.flush()
     return RedirectResponse(url="/mailboxes", status_code=303)

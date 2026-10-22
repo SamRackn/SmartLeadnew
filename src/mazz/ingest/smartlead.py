@@ -22,11 +22,17 @@ would ignore their replies. So:
   landed before cutover, and only THEN queues the next follow-up. A lead
   whose thread cannot be found is held; `send.send_lead` independently refuses
   any follow-up whose parent has no thread, so nothing unthreaded can leave.
+
+Every command may be re-run, and the files may arrive in any order: a replay
+changes nothing already imported, and a suppression or exclusion file that
+lands after the leads holds whoever it covers and cancels their queued work.
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import re
 import sys
 from collections import Counter
@@ -35,7 +41,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
-from sqlalchemy import delete, select
+from sqlalchemy import and_, delete, or_, select
 
 from mazz import audit
 from mazz.ingest.csv_import import (
@@ -46,7 +52,13 @@ from mazz.ingest.csv_import import (
     email_sha256,
     import_rows,
 )
-from mazz.ingest.validate import RowValidationError, normalize_email, validate_row
+from mazz.ingest.validate import (
+    RowValidationError,
+    canonical_field,
+    normalize_email,
+    normalize_row,
+    validate_row,
+)
 from mazz.models import (
     Campaign,
     Job,
@@ -60,7 +72,13 @@ from mazz.models import (
     Workspace,
 )
 from mazz.pipeline.routing import PinnedRoutingPolicy
-from mazz.pipeline.sequence import FOLLOWUP_JOB_KIND, due_after, lead_timezone, step_for
+from mazz.pipeline.sequence import (
+    FOLLOWUP_JOB_KIND,
+    LIVE_STATES,
+    due_after,
+    lead_timezone,
+    step_for,
+)
 
 ACTOR = "import:smartlead"
 #: Email 1's subject in the live Smartlead campaign; the adopt search uses it.
@@ -75,12 +93,17 @@ COLUMNS: dict[str, tuple[str, ...]] = {
     "last_sent_at": ("last_sent_time", "last_email_sent_at", "last_sent_at", "last_sent"),
     "replied": ("reply_count", "replied", "is_replied", "replies"),
     "domain": ("domain", "company_domain", "website", "company_url"),
+    # Narrower still: these two names exist only in the audit tests. A truthy
+    # flag suppresses the address globally, as file (a) would.
+    "unsubscribed": ("is_unsubscribed",),
+    "bounced": ("is_bounced",),
 }
 
 #: Smartlead lead status (normalised: lower case, letters only) -> bucket.
-#: Only an unambiguous "not started" is treated as safe to email from scratch.
-#: Anything unlisted ("started", say) is legacy if it has a sent count and
-#: refused if it does not.
+#: Only an unambiguous "not started" is treated as safe to email from scratch,
+#: and only "in_progress" may continue a sequence. Anything unlisted
+#: ("started", "replied", ...) is held for a person if it has a sent count and
+#: refused if it does not; either way --commit refuses until it is mapped here.
 STATUSES = {
     "notstarted": "not_started", "notyetcontacted": "not_started",
     "inprogress": "in_progress", "paused": "in_progress",
@@ -146,60 +169,113 @@ class Report:
             self.lines.append(line)
 
 
+def _email_of(row: Mapping[str, Any]) -> str:
+    """The row's address, read through the lead importer's exact header
+    aliases ("Email", "Email Address", ...). Raises `RowValidationError`."""
+
+    return normalize_email(normalize_row(row).get("email"))
+
+
+def _blank(row: Mapping[str, Any]) -> bool:
+    return not any(str(v or "").strip() for v in row.values())
+
+
+_STOPPABLE = (LeadStatus.RESEARCHING, LeadStatus.READY, LeadStatus.APPROVED)
+
+
+def _hold_suppressed(session, report: Report) -> None:
+    """Re-run the gate over every lead with work still ahead of it. The files
+    may be imported in any order, and an entry that lands after the leads it
+    covers must not leave an enrich job or a follow-up queued for them. (The
+    send step re-checks too; this keeps the work out of review.) An unreadable
+    list raises, so the whole import fails closed."""
+
+    checker = SuppressionChecker(session)
+    pending = select(Job.lead_id).where(Job.status == JobStatus.PENDING)
+    live = select(Lead).where(or_(Lead.status.in_(_STOPPABLE), Lead.sequence_state.in_(LIVE_STATES),
+                                  Lead.id.in_(pending)))
+    # ponytail: one gate query per live lead; fine at cutover size (~1k leads).
+    for lead in session.execute(live).scalars().all():
+        if checker.check_lead(lead) is None:
+            continue
+        if lead.status in _STOPPABLE:
+            lead.status = LeadStatus.HELD
+        if lead.sequence_state in LIVE_STATES:
+            lead.sequence_state, lead.next_step_due_at = "stopped", None
+        lead.skip_reason = "suppressed"
+        session.execute(delete(Job).where(Job.lead_id == lead.id, Job.status == JobStatus.PENDING))
+        audit.record(session, ACTOR, "hold_suppressed", "lead", lead.id)
+        report.note("held_existing", f"{lead.email}: imported earlier, now suppressed; "
+                                     "held and its queued work cancelled")
+    session.flush()
+
+
 def import_suppression(session, rows: Iterable[Mapping[str, Any]]) -> Report:
-    """Every address in Smartlead's unsubscribe/bounce export, suppressed globally."""
+    """Every address in Smartlead's unsubscribe/bounce export, suppressed
+    globally. A row we cannot read is someone who may have asked to stop, so
+    it blocks --commit (`BLOCKING`) rather than being skipped."""
 
     from mazz.web.routes.public import suppress_email
 
     report = Report()
     for n, row in enumerate(rows, start=2):
+        if _blank(row):
+            continue
         try:
-            email = normalize_email(row.get("email") or row.get("Email"))
+            email = _email_of(row)
         except RowValidationError as exc:
-            report.note("invalid", f"row {n}: {exc.reason}")
+            report.note("invalid", f"row {n}: {exc.reason}: {dict(row)}")
             continue
         before = session.execute(select(SuppressionEntry.id).where(
             SuppressionEntry.workspace_id.is_(None),
             SuppressionEntry.email_sha256 == email_sha256(email))).first()
         suppress_email(session, email, reason="smartlead export (unsubscribe/bounce)", actor=ACTOR)
         report.note("already" if before else "added")
+    _hold_suppressed(session, report)
     return report
 
 
 def import_exclusions(session, rows: Iterable[Mapping[str, Any]], workspace: Workspace) -> Report:
-    """Sean's clients and named companies: blocked for his workspace only. A row
-    with a company name but no domain or email cannot be enforced and is listed."""
+    """Sean's clients and named companies: blocked for his workspace only.
+
+    A domain blocks the whole company (subdomains too, by the gate's own
+    matching); an email blocks that address. A row with both gets both, so a
+    client's colleagues are covered and so is an address off the company
+    domain. A row with neither cannot be enforced: it blocks --commit."""
 
     from mazz.ingest.validate import derive_company_domain
 
     report = Report()
     for n, row in enumerate(rows, start=2):
+        if _blank(row):
+            continue
         email = domain = None
-        raw_email = row.get("email") or row.get("Email")
         try:
-            if raw_email:
-                email = normalize_email(raw_email)
-            elif column(row, "domain"):
+            if normalize_row(row).get("email"):
+                email = _email_of(row)
+            if column(row, "domain"):
                 domain = derive_company_domain(column(row, "domain"))
         except RowValidationError as exc:
-            report.note("invalid", f"row {n}: {exc.reason}")
+            report.note("invalid", f"row {n}: {exc.reason}: {dict(row)}")
             continue
         if not (email or domain):
             report.note("no_domain", f"row {n}: no email or domain, cannot block: {dict(row)}")
             continue
-        exists = session.execute(select(SuppressionEntry.id).where(
-            SuppressionEntry.workspace_id == workspace.id,
-            (SuppressionEntry.email == email) if email else (SuppressionEntry.domain == domain),
-        )).first()
-        if exists:
-            report.note("already")
-            continue
-        session.add(SuppressionEntry(
-            email=email, email_sha256=email_sha256(email) if email else None, domain=domain,
-            workspace_id=workspace.id, reason="smartlead export: existing client / named company",
-            added_by=ACTOR))
-        report.note("added")
-    session.flush()
+        scoped = SuppressionEntry.workspace_id == workspace.id
+        new = []
+        if email and not session.execute(select(SuppressionEntry.id).where(
+                scoped, SuppressionEntry.email == email)).first():
+            new.append(SuppressionEntry(email=email, email_sha256=email_sha256(email)))
+        if domain and not session.execute(select(SuppressionEntry.id).where(
+                scoped, SuppressionEntry.domain == domain)).first():
+            new.append(SuppressionEntry(domain=domain))
+        for entry in new:
+            entry.workspace_id, entry.added_by = workspace.id, ACTOR
+            entry.reason = "smartlead export: existing client / named company"
+            session.add(entry)
+        session.flush()
+        report.note("added" if new else "already")
+    _hold_suppressed(session, report)
     return report
 
 
@@ -210,9 +286,14 @@ def import_exclusions(session, rows: Iterable[Mapping[str, Any]], workspace: Wor
 
 def import_leads(session, rows: Iterable[Mapping[str, Any]], campaign: Campaign,
                  *, now: datetime | None = None) -> Report:
+    """Each source row ends in exactly one outcome bucket (`OUTCOMES`)."""
+
+    from mazz.web.routes.public import suppress_email
+
     now = now or datetime.now(timezone.utc)
     report = Report()
     fresh: list[Mapping[str, Any]] = []
+    seen: dict[str, tuple[int, tuple]] = {}
     checker = SuppressionChecker(session)
     rows = list(rows)
     headers = {_key(str(h)) for r in rows[:1] for h in r}
@@ -230,8 +311,39 @@ def import_leads(session, rows: Iterable[Mapping[str, Any]], campaign: Campaign,
         report.note(bucket or "unknown_status")
         if bucket != "not_started" or (sent or 0) > 0:
             report.note("contacted")
+        try:
+            email: str | None = _email_of(row)
+        except RowValidationError:
+            email = None  # reported by whichever path the row takes below
+
+        if _truthy(column(row, "unsubscribed")) or _truthy(column(row, "bounced")):
+            if email is None:
+                report.note("MUST_FIX", f"row {n}: flagged unsubscribed/bounced, no readable email")
+            else:
+                # The sweep at the end holds this person if already imported.
+                suppress_email(session, email, reason="smartlead export flag (unsubscribed/bounced)",
+                               actor=ACTOR)
+                report.note("suppressed", f"row {n}: {email} flagged unsubscribed/bounced; suppressed")
+            continue
+
+        # One outcome per person: a repeated row is reported, never applied twice.
+        sig = (bucket, sent, _truthy(column(row, "replied")))
+        if email in seen:
+            first, first_sig = seen[email]
+            report.note("duplicate", f"row {n}: {email} repeats row {first}")
+            if sig != first_sig:
+                report.note("duplicate_conflict", f"row {n}: {email} disagrees with row {first} "
+                                                  "on status/sent/replied; dedupe the export")
+            continue
+        if email:
+            seen[email] = (n, sig)
 
         if bucket == "not_started" and not sent:
+            if email and session.execute(select(Lead.id).where(Lead.email == email)).first():
+                # A replay, or someone another import brought in: whatever
+                # the pipeline has done with them since stands.
+                report.note("already")
+                continue
             fresh.append(row)
             continue
         if bucket is None and not sent:
@@ -245,7 +357,13 @@ def import_leads(session, rows: Iterable[Mapping[str, Any]], campaign: Campaign,
     report.counts["new_queued"] += len(out.job_ids)
     for rej in out.rejected:
         report.note("new_" + rej.kind, f"not-started {rej}")
+    _hold_suppressed(session, report)
     return report
+
+
+#: Body of a legacy row whose export gave no sent count: it exists only so
+#: Email 1 can never go, and must not read as a confirmed send.
+UNCONFIRMED_SEND = "(no send confirmed: the Smartlead export gave no sent count)"
 
 
 def _legacy(session, checker, report, n, row, campaign, bucket, sent, now) -> None:
@@ -269,6 +387,12 @@ def _legacy(session, checker, report, n, row, campaign, bucket, sent, now) -> No
 
     existing = session.execute(select(Lead).where(Lead.email == validated.email)).scalar_one_or_none()
     if existing is not None:
+        other = session.get(Campaign, existing.campaign_id) if existing.campaign_id else None
+        if other is not None and other.workspace_id != campaign.workspace_id:
+            # Never move a person between clients' workspaces on an import.
+            report.note("refused", f"row {n}: {validated.email} is in campaign {other.id} of "
+                                   "another workspace; not moved")
+            return
         prior = session.execute(select(SentMessage.legacy).where(
             SentMessage.lead_id == existing.id)).scalars().all()
         if prior:
@@ -282,7 +406,12 @@ def _legacy(session, checker, report, n, row, campaign, bucket, sent, now) -> No
     lead.campaign_id = campaign.id
     lead.status = LeadStatus.SENT
     lead.next_step_due_at = None
-    last_sent = _when(column(row, "last_sent_at")) or now  # provisional; adopt reads Gmail's
+    raw_when = column(row, "last_sent_at")
+    last_sent = _when(raw_when)
+    if raw_when and last_sent is None:
+        report.note("bad_last_sent", f"row {n}: unreadable last-sent time {raw_when!r}; "
+                                     "the import time stands in until adopt reads Gmail's")
+    last_sent = last_sent or now  # provisional; adopt reads Gmail's
 
     replied = _truthy(column(row, "replied"))
     nxt = NEXT_STEP_AFTER.get(sent or 0)
@@ -292,7 +421,15 @@ def _legacy(session, checker, report, n, row, campaign, bucket, sent, now) -> No
     elif not sent:
         lead.sequence_state, lead.skip_reason = "stopped", "legacy_step_unknown"
         report.note("MUST_FIX", f"row {n}: contacted but no sent count; stopped")
-    elif nxt is None or step_for(session, campaign.id, nxt) is None:
+    elif bucket not in ("in_progress", "completed"):
+        # Emailed, and no status says the sequence may go on (unknown, or
+        # "not started" with a sent count). Never resumed: a person decides.
+        lead.status, lead.skip_reason = LeadStatus.HELD, "legacy_status_unclear"
+        lead.sequence_state, lead.sequence_step = "stopped", sent
+        report.note("held_unclear", f"row {n}: status {column(row, 'status')!r} with {sent} "
+                                    "sent; held, never resumed")
+    elif bucket == "completed" or nxt is None or step_for(session, campaign.id, nxt) is None:
+        # Smartlead ended it (whatever the count says), or we have no next step.
         lead.sequence_state, lead.sequence_step = "complete", sent
         report.note("complete")
     else:
@@ -303,8 +440,8 @@ def _legacy(session, checker, report, n, row, campaign, bucket, sent, now) -> No
 
     session.add(SentMessage(
         lead_id=lead.id, draft_id=None, mailbox_id=None, legacy=True,
-        from_address="", to_address=lead.email, subject=LEGACY_SUBJECT, body="",
-        sent_at=last_sent))
+        from_address="", to_address=lead.email, subject=LEGACY_SUBJECT,
+        body="" if sent else UNCONFIRMED_SEND, sent_at=last_sent))
     session.flush()
     audit.record(session, ACTOR, "legacy_import", "lead", lead.id,
                  emails_sent=sent, state=lead.sequence_state)
@@ -315,9 +452,17 @@ def _legacy(session, checker, report, n, row, campaign, bucket, sent, now) -> No
 # --------------------------------------------------------------------------
 
 
+#: Holds `adopt` itself puts on a live lead. A later run retries them (a
+#: mailbox reconnected, a stray thread cleaned up) and lifts the hold when the
+#: thread is found. Any other hold is a person's to lift.
+RETRYABLE_HOLDS = ("legacy_thread_not_found", "legacy_thread_ambiguous")
+
+
 def adopt(session, *, service_for: Callable[[str], Any], now: datetime | None = None) -> Report:
-    """Find each live legacy lead's Smartlead message in its mailbox (read-only)
-    and make the thread ours. Then, and only then, queue its next follow-up."""
+    """Find each legacy lead's Smartlead message in its mailbox (read-only)
+    and make the thread ours. Then, and only then, queue a live lead's next
+    follow-up. A finished one is adopted too, so a late reply on its thread
+    is read, but nothing is ever queued for it."""
 
     from mazz.integrations import gmail_reader as gr
     from mazz.pipeline.queue import enqueue_job
@@ -335,18 +480,24 @@ def adopt(session, *, service_for: Callable[[str], Any], now: datetime | None = 
         if str(gr.profile(svc).get("emailAddress", "")).lower() != box.email_address.lower():
             raise WrongAccount(f"token for {box.email_address} reads as another account")
         services[box.id] = svc
+    # A mailbox we cannot read may hold the thread. "Not found" there means
+    # "not looked", which must not become a hold.
+    unsearched = session.execute(select(Mailbox.email_address).where(
+        Mailbox.id.notin_([b.id for b in boxes])).order_by(Mailbox.id)).scalars().all()
 
     leads = session.execute(
         select(Lead).join(SentMessage, SentMessage.lead_id == Lead.id).where(
             SentMessage.legacy.is_(True), SentMessage.provider_thread_id.is_(None),
-            Lead.sequence_state == "active", Lead.status == LeadStatus.SENT,
+            or_(Lead.status == LeadStatus.SENT,
+                and_(Lead.status == LeadStatus.HELD, Lead.skip_reason.in_(RETRYABLE_HOLDS))),
         ).distinct().order_by(Lead.id)
     ).scalars().all()
 
     checker = SuppressionChecker(session)
     for lead in leads:
-        # Suppressed since import (e.g. `suppression` run after `leads`):
-        # stop now rather than queue a follow-up the send step would refuse.
+        live = lead.sequence_state in LIVE_STATES
+        # Suppressed since import: stop now rather than queue a follow-up the
+        # send step would refuse.
         try:
             with session.begin_nested():
                 match = checker.check_lead(lead)
@@ -354,8 +505,10 @@ def adopt(session, *, service_for: Callable[[str], Any], now: datetime | None = 
             report.note("refused", f"{lead.email}: {exc}; not adopted")
             continue
         if match is not None:
-            lead.sequence_state, lead.next_step_due_at = "stopped", None
-            report.note("suppressed", f"{lead.email}: suppressed since import; stopped")
+            if live:
+                lead.sequence_state, lead.next_step_due_at = "stopped", None
+                lead.skip_reason = "suppressed"
+            report.note("suppressed", f"{lead.email}: suppressed since import; stopped, not adopted")
             continue
 
         query = f'in:sent to:{lead.email} subject:"{LEGACY_SUBJECT}"'
@@ -367,9 +520,19 @@ def adopt(session, *, service_for: Callable[[str], Any], now: datetime | None = 
             if msgs:
                 found.append((box, msgs))
         if len(found) != 1:
-            lead.status = LeadStatus.HELD
-            lead.skip_reason = "legacy_thread_not_found" if not found else "legacy_thread_ambiguous"
-            report.note(lead.skip_reason, f"{lead.email}: {lead.skip_reason}; held")
+            what = "not_found" if not found else "ambiguous"
+            if not live:
+                # Finished: nothing will be sent, so nothing to hold. Its late
+                # replies go unread here until a re-run finds the thread.
+                report.note(f"history_{what}", f"{lead.email}: legacy thread {what}; "
+                                               f"sequence {lead.sequence_state}, nothing queued")
+            elif not found and unsearched:
+                report.note("legacy_thread_unsearched",
+                            f"{lead.email}: not in the mailboxes read, and {', '.join(unsearched)} "
+                            "could not be read; nothing queued. Re-run adopt once reconnected")
+            else:
+                lead.status, lead.skip_reason = LeadStatus.HELD, f"legacy_thread_{what}"
+                report.note(lead.skip_reason, f"{lead.email}: {lead.skip_reason}; held")
             continue
 
         box, msgs = found[0]
@@ -386,13 +549,23 @@ def adopt(session, *, service_for: Callable[[str], Any], now: datetime | None = 
                 body=m.text[:5000], rfc_message_id=m.headers.get("message-id"),
                 provider_message_id=m.message_id, provider_thread_id=m.thread_id,
                 sent_at=m.received_at))
+        if lead.status is LeadStatus.HELD:  # one of adopt's own holds, now resolved
+            lead.status, lead.skip_reason = LeadStatus.SENT, None
+        # Gmail over the export: a count read before the pause can be behind,
+        # and every send we can see in the thread went out. Fewer than the
+        # export says never rewinds: a step may be skipped, never repeated.
+        lead.sequence_step = max(lead.sequence_step or 1, len(chain))
         session.flush()
 
         # Replies that landed before cutover: Smartlead's export predates them.
         sync = SyncReport()
         for msg in gr.thread_messages(services[box.id], newest.thread_id):
             process_message(session, box, msg, sync)
-        if lead.sequence_state not in ("active", "paused"):
+        if not live:
+            report.note("adopted_history", f"{lead.email}: {len(chain)} message(s) in "
+                                           f"{box.email_address}; sequence {lead.sequence_state}")
+            continue
+        if lead.sequence_state not in LIVE_STATES:
             report.note("adopted_replied", f"{lead.email}: replied before cutover; stopped")
             continue
 
@@ -422,19 +595,37 @@ def adopt(session, *, service_for: Callable[[str], Any], now: datetime | None = 
 # --------------------------------------------------------------------------
 
 
-#: Buckets that mean a person was not handled as the export says they should be.
-BLOCKING = ("MUST_FIX", "refused", "unknown_status")
+#: Buckets that mean a person was not handled as the export says they should
+#: be. Row-level: ``--accept-mismatch`` never waives them.
+BLOCKING = ("MUST_FIX", "refused", "unknown_status", "held_unclear", "duplicate_conflict",
+            "invalid", "no_domain")
+
+#: The terminal buckets of `import_leads`: every source row lands in one.
+OUTCOMES = ("awaiting_adoption", "complete", "stopped_replied", "stopped_blocked", "held_unclear",
+            "already", "conflict", "suppressed", "refused", "MUST_FIX", "duplicate",
+            "new_queued", "new_invalid", "new_suppressed", "new_suppression_unavailable",
+            "new_error")
 
 
 def blockers(report: Report, expected: Mapping[str, int] | None = None) -> list[str]:
     """Why ``--commit`` should refuse: a wrong guess about the export's headers
     shows up here first, and a wrong guess can mean Email 1 to someone already
-    emailed."""
+    emailed. Row blockers first, then any ``MISMATCH`` against ``expected``
+    (the only kind ``--accept-mismatch`` waives)."""
 
     out = [f"{k}: {report.counts[k]}" for k in BLOCKING if report.counts.get(k)]
     out += [f"MISMATCH {k}: got {report.counts.get(k, 0)}, the client's figure is {want}"
             for k, want in (expected or {}).items() if report.counts.get(k, 0) != want]
     return out
+
+
+def duplicate_headers(text: str) -> list[str]:
+    """Headers we read that appear twice: a CSV row keeps only the last one."""
+
+    header = next(csv.reader(io.StringIO(text.lstrip("﻿"))), [])
+    ours = {_key(alias) for names in COLUMNS.values() for alias in names}
+    return sorted({h for h in header if header.count(h) > 1
+                   and (canonical_field(h) or _key(h) in ours)})
 
 
 def _print(report: Report, problems: list[str]) -> None:
@@ -458,14 +649,20 @@ def main(argv: list[str] | None = None) -> int:
     for p in sub.choices.values():
         p.add_argument("--commit", action="store_true", help="write (default: dry run)")
         p.add_argument("--accept-mismatch", action="store_true",
-                       help="commit even though the counts or row checks above failed")
+                       help="commit although the totals differ from the client's figures "
+                            "(row-level problems are never waived)")
     args = parser.parse_args(argv)
+
+    text = args.csv.read_text(encoding="utf-8-sig") if args.cmd != "adopt" else ""
+    if duplicate_headers(text):
+        parser.error(f"duplicate column(s) {duplicate_headers(text)}: a row would keep only "
+                     "the last; remove the extra column and re-run")
 
     from mazz.db import get_sessionmaker
 
     session = get_sessionmaker()()
     try:
-        rows = lambda: list(_iter_csv(args.csv.read_text(encoding="utf-8-sig")))  # noqa: E731
+        rows = lambda: list(_iter_csv(text))  # noqa: E731
         if args.cmd == "suppression":
             report, expected = import_suppression(session, rows()), None
         elif args.cmd == "exclusions":
@@ -481,11 +678,15 @@ def main(argv: list[str] | None = None) -> int:
 
             report, expected = adopt(session, service_for=service_for_mailbox), None
         problems = blockers(report, expected)
+        row_problems = blockers(report)
         _print(report, problems)
-        if args.commit and problems and not args.accept_mismatch:
+        if args.commit and (row_problems or (problems and not args.accept_mismatch)):
             session.rollback()
-            print("NOT committed: fix the export or smartlead.COLUMNS, or re-run with "
-                  "--accept-mismatch after checking every line above.")
+            print("NOT committed: " + (
+                "fix the rows above in the export (or smartlead.COLUMNS / STATUSES) and "
+                "re-run; row-level problems are never waived." if row_problems else
+                "the totals differ from the client's figures; re-run with --accept-mismatch "
+                "only after checking every line above."))
             return 2
         if args.commit:
             session.commit()

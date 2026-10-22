@@ -31,16 +31,17 @@ last-moment compliance re-checks in the place least able to retry them.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from mazz import audit
 from mazz.db import get_session
+from mazz.ingest.csv_import import SuppressionChecker, SuppressionUnavailable
 from mazz.models import (
     Draft,
     Lead,
@@ -55,12 +56,9 @@ from mazz.pipeline.draft import (
     split_body,
     unresolved_placeholders,
 )
-from mazz.pipeline.mailbox import (
-    MailboxUnavailable,
-    NoMailboxConfigured,
-    select_mailbox,
-)
+from mazz.pipeline.mailbox import MailboxUnavailable, NoMailboxConfigured
 from mazz.pipeline.score import ScoredFact, ScoreResult, score_lead
+from mazz.pipeline.send import unresolved_send_attempt
 from mazz.pipeline.verify import (
     Grounding,
     apply_verification,
@@ -73,6 +71,9 @@ from mazz.pipeline.verify import (
 from mazz.pipeline.score import facts_for_lead
 from mazz.schemas import Fact
 from mazz.web.auth import Account, current_account, current_user, visible_lead
+# Only to WITHDRAW a release (delete a pending job). Creating a send job stays
+# in outbox.release_one; this module imports neither the queue nor the kind.
+from mazz.web.routes.outbox import cancel_pending_send, mailbox_for
 
 router = APIRouter()
 
@@ -185,6 +186,14 @@ def _cited_facts(draft: Draft | None, facts: list[Fact]) -> list[_CitedFact]:
     return out
 
 
+def _fact_visible_for(fact: Fact, lead: Lead) -> bool:
+    """Company facts are shared across everyone at the domain (and across
+    workspaces); a fact about a specific OTHER person is not this lead's to see."""
+
+    subject = (fact.subject_email or "").strip().lower()
+    return not subject or subject == (lead.email or "").strip().lower()
+
+
 def _detail_context(
     request: Request, session: Session, lead_id: int, user: str
 ) -> dict:
@@ -193,8 +202,9 @@ def _detail_context(
         raise HTTPException(status_code=404, detail="lead not found")
 
     draft = latest_draft(session, lead)
-    facts = facts_for_lead(session, lead)
+    facts = [f for f in facts_for_lead(session, lead) if _fact_visible_for(f, lead)]
     score_result: ScoreResult = score_lead(session, lead)
+    scored = [s for s in score_result.scored if _fact_visible_for(s.fact, lead)]
 
     grounding: Grounding | None = None
     if draft is not None:
@@ -205,7 +215,7 @@ def _detail_context(
         "lead": lead,
         "draft": draft,
         "cited": _cited_facts(draft, facts),
-        "scored": score_result.scored,
+        "scored": scored,
         "score_result": score_result,
         "grounding": grounding,
         "can_approve": draft is not None and is_approvable(draft),
@@ -256,7 +266,7 @@ def _send_state(session: Session, lead: Lead) -> SendState:
         return SendState(sent=sent)
 
     try:
-        return SendState(mailbox=select_mailbox(session, campaign_id=lead.campaign_id))
+        return SendState(mailbox=mailbox_for(session, lead))
     except MailboxUnavailable as exc:
         return SendState(waiting_until=exc.retry_at)
     except NoMailboxConfigured as exc:
@@ -323,6 +333,19 @@ def _draft_panel_response(
     )
 
 
+def _attempt_unresolved(request: Request, session: Session, lead_id: int, user: str):
+    # The copy was handed to the sender and no result was booked: it may be in
+    # the recipient's inbox. Rewriting or failing it would falsify that record.
+    return _draft_panel_response(
+        request, session, lead_id, user, status_code=409,
+        error=(
+            f"lead {lead_id}'s email may already have been sent (no result was "
+            "booked). Resolve it first: python -m mazz.ops resolve-send "
+            f"{lead_id} --sent or --not-sent --by <your email>."
+        ),
+    )
+
+
 # --------------------------------------------------------------------------
 # Actions: approve / edit / reject
 # --------------------------------------------------------------------------
@@ -369,6 +392,11 @@ async def approve_lead(
             ),
         )
 
+    if lead.status == LeadStatus.APPROVED:
+        # Idempotent: a second click (or a second reviewer) must not restamp
+        # who approved it, or when.
+        return _draft_panel_response(request, session, lead_id, user)
+
     draft = latest_draft(session, lead)
     if draft is None:
         raise HTTPException(status_code=404, detail="lead has no draft to approve")
@@ -407,9 +435,51 @@ async def approve_lead(
             ),
         )
 
+    if lead.status != LeadStatus.READY:
+        # Only a draft that finished verification and is waiting for review can
+        # be approved. `held` (suppressed, stopped, rejected, failed), `no_angle`
+        # and `researching` are not an approver's to override.
+        return _draft_panel_response(
+            request,
+            session,
+            lead_id,
+            user,
+            status_code=409,
+            error=(
+                f"lead {lead_id} is {lead.status.value}, not ready for review. "
+                "Only a lead whose draft passed verification can be approved."
+            ),
+        )
+
+    if lead.sequence_state == "stopped":
+        return _draft_panel_response(
+            request, session, lead_id, user, status_code=409,
+            error=(
+                f"lead {lead_id}'s sequence was stopped (a reply, bounce or "
+                "unsubscribe), so this email will not go out. Not approved."
+            ),
+        )
+    try:
+        match = SuppressionChecker(session).check_lead(lead)
+    except SuppressionUnavailable as exc:
+        # Fails closed, like every other suppression read.
+        return _draft_panel_response(
+            request, session, lead_id, user, status_code=503,
+            error=f"suppression list unreadable, refusing to approve: {exc}",
+        )
+    if match is not None:
+        return _draft_panel_response(
+            request, session, lead_id, user, status_code=409,
+            error=f"{lead.email} is suppressed ({match.describe()}). Not approved.",
+        )
+
     lead.status = LeadStatus.APPROVED
-    lead.approved_at = datetime.now(timezone.utc)
+    # The database clock, like `jobs.created_at`: the send step refuses a
+    # release older than the approval it is about to act on.
+    lead.approved_at = func.now()
     lead.approved_by = user
+    # A send job left over from an earlier release belongs to earlier copy.
+    cancel_pending_send(session, lead.id)
     session.flush()
     audit.record(session, user, "approve", "lead", lead.id, draft_id=draft.id)
 
@@ -455,10 +525,26 @@ async def reject_lead(
     if draft is None:
         raise HTTPException(status_code=404, detail="lead has no draft to reject")
 
+    already_sent = session.execute(
+        select(SentMessage.id).where(SentMessage.draft_id == draft.id)
+    ).first()
+    if lead.status == LeadStatus.SENT or already_sent is not None:
+        # Sent copy is history. Rejecting it would turn a sent lead into a held
+        # one and mark the email that actually left as failed verification.
+        return _draft_panel_response(
+            request, session, lead_id, user, status_code=409,
+            error=f"lead {lead_id}'s email has already been sent; it can no longer be rejected.",
+        )
+    if unresolved_send_attempt(session, lead) is not None:
+        return _attempt_unresolved(request, session, lead_id, user)
+
     note = f"REJECTED by reviewer ({user}).\n" + (reason.strip() or "(no reason given)")
     draft.verification_status = VerificationStatus.FAILED
     draft.verification_notes = note
     lead.status = LeadStatus.HELD
+    # Withdraw a release already on the queue: a later edit and re-approval
+    # needs a fresh release click of its own.
+    cancel_pending_send(session, lead.id)
     session.flush()
     audit.record(
         session, user, "reject", "lead", lead.id, draft_id=draft.id, reason=reason.strip() or None
@@ -497,6 +583,8 @@ async def edit_draft(
             request, session, lead_id, user, status_code=409,
             error=f"this lead is {lead.status.value}; its draft can no longer be edited",
         )
+    if unresolved_send_attempt(session, lead) is not None:
+        return _attempt_unresolved(request, session, lead_id, user)
 
     try:
         body = render_body(body_text, lead)
@@ -507,6 +595,7 @@ async def edit_draft(
 
     draft.subject = subject
     draft.body = body
+    cancel_pending_send(session, lead.id)
 
     # The same verification drafting goes through, campaign copy and proof
     # points included -- a bare `verify_content` here would re-check an edited

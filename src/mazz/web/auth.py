@@ -44,7 +44,7 @@ __all__ = [
 SESSION_USER_KEY = "user"
 
 _ALGORITHM = "sha256"
-_ITERATIONS = 260_000
+_ITERATIONS = 600_000  # OWASP 2023 for PBKDF2-HMAC-SHA256; old hashes carry their own count
 _SALT_BYTES = 16
 
 

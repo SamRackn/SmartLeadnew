@@ -122,7 +122,8 @@ def test_import_maps_state_and_no_legacy_lead_can_reach_email_1(session):
     before = counts()
     again = S.import_leads(session, EXPORT, campaign, now=TUE)
     S.import_suppression(session, [{"Email": "unsub@u-law.com"}])
-    assert counts() == before and again.counts["already"] == 5
+    # 5 legacy + the not-started lead, whose replay no longer re-admits it.
+    assert counts() == before and again.counts["already"] == 6
 
 
 def test_exclusions_are_scoped_to_the_workspace(session):
@@ -256,11 +257,14 @@ def test_ambiguous_status_or_missing_headers_never_look_fresh(session):
     campaign = ssm_campaign(session)
     report = S.import_leads(session, [row("started@s-law.com", "STARTED"),
                                       row("counted@c-law.com", "STARTED", sent="1")], campaign, now=TUE)
-    # "Started" with no count is refused; with a count it is legacy. Neither is queued.
+    # "Started" with no count is refused; with a count it is legacy, held and
+    # never resumed (an unknown status cannot say the sequence may go on).
+    # Neither is queued.
     assert lead(session, "started@s-law.com") is None
-    assert lead(session, "counted@c-law.com").sequence_state == "active"
+    counted = lead(session, "counted@c-law.com")
+    assert (counted.status, counted.sequence_state) == (LeadStatus.HELD, "stopped")
     assert session.execute(select(func.count(Job.id))).scalar_one() == 0
-    assert S.blockers(report) == ["refused: 1", "unknown_status: 2"]
+    assert S.blockers(report) == ["refused: 1", "unknown_status: 2", "held_unclear: 1"]
 
     no_count = [{k: v for k, v in row("x@x-law.com", "NOT_STARTED").items()
                  if k != "Last Email Sequence Sent"}]

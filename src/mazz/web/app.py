@@ -8,6 +8,7 @@ review-app-engineer brief for why.
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
@@ -38,6 +39,31 @@ from mazz.web.routes import removals as removals_routes
 from mazz.web.routes import review as review_routes
 
 BASE_DIR = Path(__file__).resolve().parent
+
+SESSION_MAX_AGE_SECONDS = 8 * 3600
+
+_UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+#: Public by design: mail clients POST the one-click unsubscribe with no cookie
+#: and no Origin we could match.
+_CSRF_EXEMPT_PREFIXES = ("/u/", "/health")
+
+
+def _cross_site(request: Request) -> bool:
+    """True when a state-changing request plainly came from another site.
+
+    SameSite=Lax alone is not enough: sibling subdomains of the app's own
+    registrable domain are "same-site". Browsers always send Sec-Fetch-Site and
+    Origin on unsafe methods; a request with neither (curl, tests, an old
+    client) carries no ambient browser authority to ride, so it passes.
+    """
+
+    site = request.headers.get("sec-fetch-site")
+    if site is not None:
+        return site not in ("same-origin", "none")
+    origin = request.headers.get("origin")
+    if origin is not None:
+        return urlsplit(origin).netloc.lower() != (request.headers.get("host") or "").lower()
+    return False
 
 
 def nav_state(request: Request) -> dict | None:
@@ -81,19 +107,33 @@ async def _refuse_unsafe_boot(app: FastAPI):
 def create_app() -> FastAPI:
     settings = get_settings()
 
-    app = FastAPI(title="MazzSmartLead Review", lifespan=_refuse_unsafe_boot)
+    # No /docs, /redoc or /openapi.json: they are public and list every route.
+    app = FastAPI(
+        title="MazzSmartLead Review",
+        lifespan=_refuse_unsafe_boot,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
 
     app.add_middleware(
         SessionMiddleware,
         secret_key=settings.session_secret,
         session_cookie="mazz_review_session",
         same_site="lax",
+        # A working day, not the 14-day default: a cookie is a standing right
+        # to approve and release mail.
+        max_age=SESSION_MAX_AGE_SECONDS,
         # Secure cookie whenever the app is served over https (always, live).
         https_only=settings.app_base_url.startswith("https://"),
     )
 
     templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
     templates.env.globals["nav_state"] = nav_state
+    # Imported or scraped URLs become hrefs; autoescape does not stop "javascript:".
+    templates.env.filters["safe_url"] = lambda v: (
+        v.strip() if isinstance(v, str) and v.strip().lower().startswith(("http://", "https://")) else ""
+    )
     app.state.templates = templates
 
     static_dir = BASE_DIR / "static"
@@ -123,15 +163,41 @@ def create_app() -> FastAPI:
         # else — not the login page, not static files. Everything else on it
         # is a plain 404, so the host a stranger's email links to reveals no
         # app behind it.
-        public_host = (get_settings().unsubscribe_host or "").strip().lower()
+        # A trailing dot is the same DNS name ("host." == "host"); without the
+        # strip it walks straight past this check.
+        public_host = (get_settings().unsubscribe_host or "").strip().lower().rstrip(".")
         path = request.url.path
         if (
             public_host
-            and (request.url.hostname or "").lower() == public_host
+            and (request.url.hostname or "").lower().rstrip(".") == public_host
             and not (path.startswith("/u/") or path == "/health")
         ):
             return PlainTextResponse("Not Found", status_code=404)
         return await call_next(request)
+
+    @app.middleware("http")
+    async def _refuse_cross_site_writes(request: Request, call_next):
+        path = request.url.path
+        if (
+            request.method in _UNSAFE_METHODS
+            and not path.startswith(_CSRF_EXEMPT_PREFIXES)
+            and _cross_site(request)
+        ):
+            return PlainTextResponse("cross-site request refused", status_code=403)
+        return await call_next(request)
+
+    @app.middleware("http")
+    async def _security_headers(request: Request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+        response.headers.setdefault("Referrer-Policy", "same-origin")
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        path = request.url.path
+        if not path.startswith(("/static", "/u/")):
+            # Lead names, drafts and replies: not for a shared cache or the back button.
+            response.headers.setdefault("Cache-Control", "no-store")
+        return response
 
     @app.get("/")
     async def root():

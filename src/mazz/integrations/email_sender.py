@@ -248,6 +248,29 @@ class StubEmailSender(EmailSender):
 # --------------------------------------------------------------------------
 
 
+_LIMIT_WORDS = ("ratelimitexceeded", "dailylimitexceeded", "quota", "rate limit", "limit exceeded")
+
+
+def _is_limit(exc: Exception, detail: str) -> bool:
+    """A 403 that is Gmail throttling rather than refusing the credential.
+
+    Google's `reason` is the reliable signal (`userRateLimitExceeded`,
+    `rateLimitExceeded`, `dailyLimitExceeded`, ...); the message text is the
+    fallback. Case-insensitive: the reasons are camelCase and the prose is not.
+    """
+
+    reasons = []
+    for item in getattr(exc, "error_details", None) or []:
+        reasons.append(str(item.get("reason", "")) if isinstance(item, dict) else str(item))
+    try:  # HttpError.content is the JSON body
+        errors = json.loads(getattr(exc, "content", b"") or b"{}").get("error", {}).get("errors", [])
+        reasons += [str(e.get("reason", "")) for e in errors]
+    except (ValueError, AttributeError, TypeError):
+        pass
+    haystack = f"{' '.join(reasons)} {detail}".lower()
+    return any(word in haystack for word in _LIMIT_WORDS)
+
+
 class GmailSender(EmailSender):
     """Sends as a Workspace mailbox over the Gmail API.
 
@@ -290,6 +313,12 @@ class GmailSender(EmailSender):
                 str(exc), provider=GOOGLE_PROVIDER, target=mailbox_address
             ) from exc
 
+    def read_service(self, *, credential_ref: str, mailbox_address: str):
+        """The same authorised Gmail client, for reading this mailbox's replies
+        (gmail.readonly) right before a follow-up leaves it."""
+
+        return self._service_factory(credential_ref=credential_ref, mailbox_address=mailbox_address)
+
     # -- send --------------------------------------------------------------
 
     def send(self, message: OutgoingMessage, *, credential_ref: str) -> SendReceipt:
@@ -298,9 +327,19 @@ class GmailSender(EmailSender):
         mime = build_mime(message, now=now)
         raw = base64.urlsafe_b64encode(mime.as_bytes()).decode()
 
-        service = self._service_factory(
-            credential_ref=credential_ref, mailbox_address=message.from_address
-        )
+        try:
+            service = self._service_factory(
+                credential_ref=credential_ref, mailbox_address=message.from_address
+            )
+        except ProviderError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - no client, so nothing left
+            raise SenderNotConfigured(
+                f"could not build a Gmail client for {message.from_address}: "
+                f"{exc.__class__.__name__}: {exc}",
+                provider=GOOGLE_PROVIDER,
+                target=message.from_address,
+            ) from exc
         try:
             # userId="me" is the impersonated subject, i.e. this mailbox.
             result = (
@@ -362,7 +401,7 @@ class GmailSender(EmailSender):
         if status in (401, 403):
             # 403 is overloaded: quota exhaustion arrives here too, and that one
             # is worth retrying tomorrow rather than disabling the mailbox over.
-            if "rateLimitExceeded" in detail or "quota" in detail.lower():
+            if _is_limit(exc, detail):
                 return ProviderRateLimited(
                     f"Gmail quota exhausted for {message.from_address}: {detail}",
                     provider=self.provider,

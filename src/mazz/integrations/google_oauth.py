@@ -133,6 +133,12 @@ def _post_form(url: str, data: dict[str, str]) -> dict[str, Any]:
         except ValueError:
             body = {}
         return {"error": body.get("error", f"http_{exc.code}")}
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        # DNS, reset, timeout, or a non-JSON 200: Google never answered usefully.
+        # Surface it as an exchange failure (the callback shows "not connected").
+        raise OAuthExchangeError(
+            f"the token endpoint could not be reached ({exc.__class__.__name__})"
+        ) from exc
 
 
 def exchange_code(code: str, *, post: Callable[..., dict] = _post_form) -> dict[str, Any]:

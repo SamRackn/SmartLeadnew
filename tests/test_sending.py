@@ -445,14 +445,16 @@ def test_a_capped_mailbox_is_not_a_candidate(session):
     assert select_mailbox(session, now=NOW).id == spare.id
 
 
-def test_all_capped_defers_until_the_next_utc_day(session):
+def test_all_capped_defers_until_the_next_eastern_day(session):
+    # The cap's day is Eastern (mailbox.CAP_DAY_TZ, audit SND-03): a UTC day
+    # split the Pacific send window, so 04:00 UTC is midnight EDT here.
     mailbox = make_mailbox(session, daily_cap=1)
     lead, draft = make_approved_lead(session)
     record_send(session, mailbox, lead=lead, draft=draft, at=NOW - timedelta(minutes=5))
 
     with pytest.raises(MailboxUnavailable) as exc:
         select_mailbox(session, now=NOW)
-    assert exc.value.retry_at == datetime(2026, 9, 22, tzinfo=timezone.utc)
+    assert exc.value.retry_at == datetime(2026, 9, 22, 4, tzinfo=timezone.utc)
 
 
 def test_yesterdays_sends_do_not_count_against_todays_cap(session):
@@ -616,7 +618,7 @@ def test_a_capped_roster_defers_the_send(session, sender):
     with pytest.raises(JobDeferred) as exc:
         send_lead(session, lead, sender=sender, now=NOW)
 
-    assert exc.value.retry_at == datetime(2026, 9, 22, tzinfo=timezone.utc)
+    assert exc.value.retry_at == datetime(2026, 9, 22, 4, tzinfo=timezone.utc)
     # Still approved, still queued — nothing was lost and nothing was sent.
     assert lead.status is LeadStatus.APPROVED
 

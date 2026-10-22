@@ -81,10 +81,20 @@ def removals(
 
 
 def stop_matching_leads(
-    session: Session, *, email: str | None, domain: str | None, actor: str
-) -> int:
+    session: Session,
+    *,
+    email: str | None,
+    domain: str | None,
+    actor: str,
+    visible_to: Account | None = None,
+) -> tuple[int, int]:
     """Pull every not-yet-sent lead a new GLOBAL entry covers out of the send
-    path, and stop the sequence of any it covers mid-sequence."""
+    path, and stop the sequence of any it covers mid-sequence.
+
+    Returns ``(held, held_visible)``: all leads held, and how many of them
+    ``visible_to`` may see. The page reports only the second, so a scoped user
+    cannot learn how many leads another workspace has at an address.
+    """
 
     query = select(Lead).where(
         or_(Lead.status.in_(_STOPPABLE), Lead.sequence_state.in_(LIVE_STATES))
@@ -100,7 +110,7 @@ def stop_matching_leads(
                 Lead.email.like(f"%.{domain}"),
             )
         )
-    held = 0
+    held = held_visible = 0
     for lead in session.execute(query).scalars():
         if lead.status in _STOPPABLE:
             lead.status = LeadStatus.HELD
@@ -108,7 +118,9 @@ def stop_matching_leads(
             lead.sequence_state, lead.next_step_due_at = "stopped", None
         audit.record(session, actor, "hold_suppressed", "lead", lead.id)
         held += 1
-    return held
+        if visible_to is None or visible_to.can_see_lead(session, lead):
+            held_visible += 1
+    return held, held_visible
 
 
 @router.post("/removals", response_class=HTMLResponse)
@@ -135,10 +147,13 @@ def add_removal(
         if email is not None:
             return _render(request, session, account, user, status_code=400,
                            error="an email removal is always global: the person asked all of us to stop")
-        workspace_id = int(scope) if scope.isdigit() else -1
+        workspace_id = int(scope) if scope.isascii() and scope.isdigit() and len(scope) < 10 else -1
         if not account.sees_workspace(workspace_id):
             return _render(request, session, account, user, status_code=403,
                            error="you can only scope a block to your own workspace")
+        if session.get(Workspace, workspace_id) is None:
+            return _render(request, session, account, user, status_code=400,
+                           error="no such workspace")
 
     if domain and workspace_id is None and not account.all_workspaces:
         return _render(request, session, account, user, status_code=403,
@@ -157,10 +172,10 @@ def add_removal(
     session.flush()
     # A workspace-scoped block is enforced at every check (ingest, release,
     # send); only a global entry is broad enough to hold leads wholesale here.
-    held = (
-        stop_matching_leads(session, email=email, domain=domain, actor=user)
+    held, held_visible = (
+        stop_matching_leads(session, email=email, domain=domain, actor=user, visible_to=account)
         if workspace_id is None
-        else 0
+        else (0, 0)
     )
     audit.record(
         session, user, "suppress", "suppression", entry.id,
@@ -168,7 +183,7 @@ def add_removal(
         leads_held=held,
     )
     return _render(request, session, account, user,
-                   message=f"Added {email or domain}. {held} lead(s) held or stopped.")
+                   message=f"Added {email or domain}. {held_visible} lead(s) held or stopped.")
 
 
 @router.post("/removals/delete-person", response_class=HTMLResponse)

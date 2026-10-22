@@ -387,6 +387,9 @@ def handle_enrich(ctx) -> None:
 
     if outcome.found_nothing:
         ctx.lead.status = LeadStatus.NO_ANGLE
+        # Nothing on the site to confirm the vertical from: counted and listed
+        # with the other unconfirmed leads, not silently dropped (QUAL-04).
+        ctx.lead.skip_reason = "vertical_unconfirmed"
         ctx.session.flush()
         log.info(
             "lead %s -> no_angle: research succeeded and found nothing (%s)",

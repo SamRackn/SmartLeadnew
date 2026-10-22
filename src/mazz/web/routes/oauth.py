@@ -12,6 +12,7 @@ Nothing on this page echoes a code, a token or a secret.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from html import escape
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import HTMLResponse
@@ -28,8 +29,8 @@ router = APIRouter()
 
 def _page(title: str, message: str, status_code: int = 200) -> HTMLResponse:
     return HTMLResponse(
-        f"<!doctype html><title>{title}</title><body style='font-family:sans-serif;"
-        f"max-width:32rem;margin:4rem auto'><h1>{title}</h1><p>{message}</p></body>",
+        f"<!doctype html><title>{escape(title)}</title><body style='font-family:sans-serif;"
+        f"max-width:32rem;margin:4rem auto'><h1>{escape(title)}</h1><p>{escape(message)}</p></body>",
         status_code=status_code,
     )
 

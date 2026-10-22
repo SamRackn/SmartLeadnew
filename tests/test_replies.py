@@ -802,10 +802,13 @@ def test_send_sees_a_stop_committed_by_another_session(session, tmp_path):
 
 def test_only_an_operator_can_lift_an_automatic_unsubscribe_and_only_that_kind(session, tmp_path):
     lead, box, sent = sent_lead(session, tmp_path)
-    inbound(session, box, sent, lead, "Please don't stop emailing me, this is useful")
+    # The keyword rule fires on a real opt-out phrase here; the person means it
+    # as a quip, which only a human reading it can tell. (The old fixture, a
+    # negated "don't stop emailing me", is no longer misread: audit GML-10.)
+    inbound(session, box, sent, lead, "Ha, take me off your list before my boss sees this is useful")
     session.commit()
     reply = session.execute(select(Reply)).scalar_one()
-    assert reply.classification == R.UNSUBSCRIBE  # the broad keyword rule, wrong here
+    assert reply.classification == R.UNSUBSCRIBE
     auto = select(SuppressionEntry).where(SuppressionEntry.email == lead.email)
     assert session.execute(auto).scalar_one().added_by == R.AUTO_SUPPRESSED_BY
 

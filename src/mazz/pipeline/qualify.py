@@ -513,7 +513,8 @@ def qualify_facts(
         )
 
     vertical = _find(considered, config.vertical_terms)
-    distinct_terms = {m.term for m in vertical}
+    # "practice area" and "practice areas" are one term, not two (QUAL-01).
+    distinct_terms = {m.term.removesuffix("s") for m in vertical}
     if config.vertical_required and len(distinct_terms) < config.min_vertical_matches:
         if not config.vertical_terms:
             rationale = (
@@ -728,7 +729,26 @@ def qualify_lead(
     """
 
     resolved = config if config is not None else config_for_lead(session, lead)
-    return qualify_facts(facts_for_lead(session, lead), config=resolved, lead=lead)
+    return qualify_facts(
+        facts_for_lead(session, lead), config=resolved, lead=fallback_lead(session, lead)
+    )
+
+
+def fallback_lead(session: "Session", lead: Lead) -> Lead | None:
+    """The lead, if its record may stand in for its site; otherwise None.
+
+    Only a site that REFUSED us (robots / 401 / 403) qualifies. Enrich records
+    that refusal as ``ProviderBlocked`` on the company row, and a later
+    successful fetch clears it. A site that answered with nothing usable (a
+    404 homepage, a JS-only shell) is not blocked, so it earns no fallback
+    (QUAL-03).
+    """
+
+    from mazz.models import ResearchCache
+
+    cache = session.get(ResearchCache, lead.company_domain) if lead.company_domain else None
+    blocked = cache is not None and (cache.last_error or "").startswith("ProviderBlocked")
+    return lead if blocked else None
 
 
 def handle_qualify(ctx: "JobContext") -> None:

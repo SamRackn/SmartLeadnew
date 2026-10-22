@@ -36,13 +36,13 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session
 
 from mazz import audit
 from mazz.db import get_session
 from mazz.ingest.csv_import import SuppressionChecker, SuppressionUnavailable
-from mazz.models import Draft, Job, JobStatus, Lead, LeadStatus, Mailbox
+from mazz.models import Campaign, Draft, Job, JobStatus, Lead, LeadStatus, Mailbox
 from mazz.pipeline.mailbox import (
     MailboxUnavailable,
     NoMailboxConfigured,
@@ -50,8 +50,10 @@ from mazz.pipeline.mailbox import (
     next_eligible_at,
     select_mailbox,
 )
+from mazz.pipeline.draft import unresolved_placeholders
 from mazz.pipeline.queue import enqueue_job
 from mazz.pipeline.send import SEND_JOB_KIND
+from mazz.pipeline.sequence import thread_parent
 from mazz.pipeline.verify import is_approvable, latest_draft
 from mazz.web.auth import Account, current_account, current_user, visible_lead
 
@@ -100,10 +102,54 @@ def _pending_send_lead_ids(session: Session) -> set[int]:
     return set(rows)
 
 
-def _roster(session: Session, *, now: datetime) -> list[RosterRow]:
-    mailboxes = (
-        session.execute(select(Mailbox).order_by(Mailbox.email_address)).scalars().all()
+def cancel_pending_send(session: Session, lead_id: int) -> int:
+    """Withdraw a release that has not started: delete the lead's PENDING send job.
+
+    Called by reject/edit/approve in `leads.py`, which deliberately does not
+    import the send-job kind itself. A release is a decision about one version
+    of the copy; once that copy is rejected or edited the old click must not
+    carry the new text out. A RUNNING job is not touched (`send_lead` re-reads
+    the lead under a row lock and refuses anything no longer approved). This
+    only DELETES; it creates nothing.
+    """
+
+    result = session.execute(
+        delete(Job).where(
+            Job.lead_id == lead_id,
+            Job.kind == SEND_JOB_KIND,
+            Job.status == JobStatus.PENDING,
+        )
     )
+    return result.rowcount or 0
+
+
+def mailbox_for(session: Session, lead: Lead) -> Mailbox:
+    """The mailbox that would carry this lead's next message, as `send_lead`
+    chooses it: a follow-up leaves from the mailbox that owns the thread (the
+    pool is never widened), anything else from the campaign's rotation."""
+
+    parent = thread_parent(session, lead)
+    return select_mailbox(
+        session,
+        campaign_id=lead.campaign_id,
+        only=parent.mailbox_id if parent is not None else None,
+    )
+
+
+def _roster(session: Session, *, now: datetime, account: Account | None = None) -> list[RosterRow]:
+    query = select(Mailbox).order_by(Mailbox.email_address)
+    if account is not None and not account.all_workspaces:
+        # A scoped user sees the general rotation and his own campaigns'
+        # mailboxes, not another client's pinned sending accounts.
+        query = query.where(
+            or_(
+                Mailbox.campaign_id.is_(None),
+                Mailbox.campaign_id.in_(
+                    select(Campaign.id).where(Campaign.workspace_id.in_(sorted(account.workspace_ids)))
+                ),
+            )
+        )
+    mailboxes = session.execute(query).scalars().all()
     return [
         RosterRow(
             mailbox=mailbox,
@@ -136,6 +182,9 @@ def _blocked_reason(session: Session, lead: Lead, draft: Draft | None) -> str | 
             f"verification is {draft.verification_status.value}, not passed — "
             "it was re-drafted or rejected after approval"
         )
+    holes = unresolved_placeholders(draft.subject, draft.body)
+    if holes:
+        return f"unfilled merge fields or no subject {holes}"
     stopped = _sequence_block(lead)
     if stopped:
         return stopped
@@ -147,7 +196,7 @@ def _blocked_reason(session: Session, lead: Lead, draft: Draft | None) -> str | 
         # Fail closed. An unreadable suppression list is not permission.
         return "suppression list unreadable — refusing to send"
     try:
-        select_mailbox(session, campaign_id=lead.campaign_id)
+        mailbox_for(session, lead)
     except MailboxUnavailable as exc:
         return f"every mailbox is capped or spacing ({exc})"
     except NoMailboxConfigured as exc:
@@ -198,7 +247,7 @@ async def outbox(
         "outbox.html",
         {
             "rows": rows,
-            "roster": _roster(session, now=now),
+            "roster": _roster(session, now=now, account=account),
             "now": now,
             "user": user,
         },
@@ -255,6 +304,16 @@ async def release_one(
             ),
         )
 
+    holes = unresolved_placeholders(draft.subject, draft.body)
+    if holes:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"draft {draft.id} has unfilled merge fields or no subject {holes}; "
+                "edit it first. Not released."
+            ),
+        )
+
     # Suppression, now. The approval may be hours old; an unsubscribe since then
     # outranks it. An unreadable list is a refusal, never a pass.
     # NOTE ON THE EXPLICIT COMMITS BELOW
@@ -295,7 +354,7 @@ async def release_one(
         )
 
     try:
-        select_mailbox(session, campaign_id=lead.campaign_id)
+        mailbox_for(session, lead)
     except NoMailboxConfigured as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except MailboxUnavailable:
@@ -305,7 +364,19 @@ async def release_one(
 
     # THE one place a send job is created. enqueue_job is idempotent for an
     # identical pending job, so a double-click releases one message, not two.
-    enqueue_job(session, lead.id, SEND_JOB_KIND)
+    job, _ = enqueue_job(session, lead.id, SEND_JOB_KIND)
+    if lead.approved_at is not None and job.created_at < lead.approved_at:
+        # Deduped onto a job released for an EARLIER approval, still running:
+        # it will refuse to send this copy, so this click would vanish (QA-01).
+        # Both stamps are the database clock.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"lead {lead_id}: a send released before the latest approval is "
+                "still finishing and will not send this copy. Release again in "
+                "a minute. Not released."
+            ),
+        )
     session.flush()
     audit.record(session, user, "release_send", "lead", lead.id, draft_id=draft.id)
 

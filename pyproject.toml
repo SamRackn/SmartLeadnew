@@ -13,10 +13,13 @@ dependencies = [
     "python-multipart",
     "pydantic-settings",
     "itsdangerous",
+    # Company research (integrations/company.py via safe_http) is core to the
+    # pipeline, so this is runtime, not dev-only.
+    "httpx",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "httpx"]
+dev = ["pytest"]
 # The Claude drafting path. Optional on purpose: the Phase 1 template composer
 # must keep importing and testing with nothing installed, which is also what
 # keeps the lazy imports in `compose_claude` honest.

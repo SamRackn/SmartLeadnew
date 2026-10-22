@@ -82,7 +82,8 @@
             <button type="submit" class="link-button">resume</button>
           {% endif %}
         </form>
-        <form method="post" action="/mailboxes/{{ row.mailbox.id }}/delete" class="inline-form">
+        <form method="post" action="/mailboxes/{{ row.mailbox.id }}/delete" class="inline-form"
+              onsubmit="return confirm('Remove {{ row.mailbox.email_address }} from the roster? Re-adding it later starts its daily send count from zero.')">
           <button type="submit" class="link-button danger">remove</button>
         </form>
       </td>

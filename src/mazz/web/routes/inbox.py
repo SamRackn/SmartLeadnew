@@ -52,8 +52,12 @@ def _rows(session: Session, account: Account, *, show_all: bool, now: datetime) 
         .where(account.lead_filter())
         .options(selectinload(Reply.tags))
         .order_by(Reply.received_at.desc())
-        .limit(500)
     )
+    if not show_all:
+        # In SQL, before the limit: filtering after it let 500 newer handled
+        # replies push an old unhandled one off the default screen.
+        query = query.where(Reply.handled_at.is_(None), Reply.classification != "ooo")
+    query = query.limit(500)
     rows = []
     for reply, lead in session.execute(query).all():
         tags = {t.tag for t in reply.tags}
@@ -62,8 +66,6 @@ def _rows(session: Session, account: Account, *, show_all: bool, now: datetime) 
             and reply.handled_at is None
             and business_hours_between(reply.received_at, now) > OVERDUE_BUSINESS_HOURS
         )
-        if not show_all and (reply.handled_at is not None or reply.classification == "ooo"):
-            continue
         rows.append(
             InboxRow(
                 reply=reply,

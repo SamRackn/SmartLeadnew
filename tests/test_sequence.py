@@ -212,6 +212,14 @@ def test_blocked_site_falls_back_to_legal_industry_and_law_firm_name(session, mo
                               domain="jones.com", company_name="Jones Law",
                               industry_primary="Retail")
 
+    # No facts is not the same as blocked: with no refusal on record the lead
+    # row earns nothing (QUAL-03). Record the refusal enrich would have.
+    assert not qualify_lead(session, ok).qualified
+    for domain in ("smithlaw.com", "acme.com", "jones.com"):
+        session.add(ResearchCache(company_domain=domain, facts=[],
+                                  last_error="ProviderBlocked: robots.txt disallows"))
+    session.flush()
+
     result = qualify_lead(session, ok)
     assert result.qualified and result.cited_ids == ["lead_record"]
     assert not qualify_lead(session, wrong_name).qualified

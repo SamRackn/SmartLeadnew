@@ -16,7 +16,7 @@ from datetime import datetime, time, timedelta, timezone
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, exists, func, or_, select
 
 from mazz.models import (
     Campaign,
@@ -312,18 +312,36 @@ def handle_followup(ctx: "JobContext") -> None:
 # --------------------------------------------------------------------------
 
 
-def active_at_company(session: "Session", lead: Lead) -> int:
-    """Other leads at this company_domain with a live sequence."""
+def active_at_company(session: "Session", lead: Lead, *, started_only: bool = False) -> int:
+    """Other leads at this company_domain with a live sequence, or with an
+    email handed to the sender and no booked result: in flight, or crashed
+    and possibly sent. Either way that slot is taken until it resolves.
+
+    ``started_only`` (the send-time count) counts a live sequence only once
+    something was actually sent on it, whatever its review status: two
+    approved colleagues must not each wait for the other forever."""
 
     if not lead.company_domain:
         return 0
+    in_flight = exists().where(
+        Draft.lead_id == Lead.id,
+        Draft.send_attempted_at.isnot(None),
+        ~exists().where(SentMessage.draft_id == Draft.id),
+    )
     return int(
         session.execute(
             select(func.count(Lead.id)).where(
                 Lead.company_domain == lead.company_domain,
                 Lead.id != lead.id,
-                Lead.sequence_state.in_(LIVE_STATES),
-                Lead.status.notin_((LeadStatus.HELD, LeadStatus.NO_ANGLE)),
+                or_(
+                    and_(
+                        Lead.sequence_state.in_(LIVE_STATES),
+                        exists().where(SentMessage.lead_id == Lead.id)
+                        if started_only
+                        else Lead.status.notin_((LeadStatus.HELD, LeadStatus.NO_ANGLE)),
+                    ),
+                    in_flight,
+                ),
             )
         ).scalar_one()
     )
@@ -332,19 +350,28 @@ def active_at_company(session: "Session", lead: Lead) -> int:
 COMPANY_CAP_MARKER = "company cap"
 
 
-def check_company_cap(session: "Session", lead: Lead, *, now: datetime) -> None:
+def check_company_cap(
+    session: "Session", lead: Lead, *, now: datetime, at_send: bool = False
+) -> None:
     """Raise `JobDeferred` (a day out) if starting this lead would exceed its
-    campaign's ``max_active_per_company``. Only Email 1 is capped; a running
+    campaign's ``max_active_per_company``. Checked when Email 1 is drafted and
+    again when it is sent. Only Email 1 is capped; a running
     sequence is never cut off by a colleague arriving later."""
 
     from mazz.pipeline.queue import JobDeferred
 
-    if lead.sequence_state is not None or lead.campaign is None:
+    if lead.campaign is None:
+        return
+    # At drafting a set sequence_state means the sequence already began. At
+    # send it does not: drafting Email 1 sets it 'active' (QA-03), and the
+    # caller has already refused any lead with a message on record.
+    if not at_send and lead.sequence_state is not None:
         return
     cap = lead.campaign.max_active_per_company
-    # ponytail: counted, not locked; one worker means no race. Lock the
-    # domain row if workers ever run concurrently.
-    if cap > 0 and active_at_company(session, lead) >= cap:
+    # Counted, not locked: at drafting it is advisory (a colleague drafted in
+    # the same pass is not yet live); the send step re-checks it under
+    # `send.SEND_SELECT_LOCK_KEY`, which is where it binds.
+    if cap > 0 and active_at_company(session, lead, started_only=at_send) >= cap:
         raise JobDeferred(
             f"{COMPANY_CAP_MARKER}: {cap} sequences already live at {lead.company_domain}",
             retry_at=now + timedelta(days=1),

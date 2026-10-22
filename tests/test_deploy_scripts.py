@@ -102,7 +102,8 @@ STRONG = "s" * 40
     (STRONG, True, {"SEND_ENABLED": "true", "EMAIL_SENDER": "stub"}, ["EMAIL_SENDER"]),
     (STRONG, True, {"SEND_ENABLED": "false", "EMAIL_SENDER": "stub"}, []),
     # Live sending's own settings are covered in test_launch_readiness.py.
-    (STRONG, True, {"SEND_ENABLED": "true", "EMAIL_SENDER": "google",
+    # SEND_WINDOW on, as live sending requires (conftest turns it off).
+    (STRONG, True, {"SEND_ENABLED": "true", "EMAIL_SENDER": "google", "SEND_WINDOW": "true",
                     "UNSUBSCRIBE_BASE_URL": "https://outreach.example.com",
                     "UNSUBSCRIBE_HOST": "outreach.example.com", "UNSUBSCRIBE_SECRET": STRONG,
                     "APP_BASE_URL": "https://app.example.com", "GOOGLE_OAUTH_CLIENT_ID": "i",

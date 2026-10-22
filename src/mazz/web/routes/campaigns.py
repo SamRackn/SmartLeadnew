@@ -284,6 +284,8 @@ async def create_workspace(
             status_code=409,
         )
 
+    audit.record(session, user, "workspace_create", "workspace", workspace.id,
+                 slug=normalized_slug, name=name)
     return RedirectResponse(url="/workspaces", status_code=303)
 
 
@@ -341,6 +343,7 @@ async def update_workspace(
             status_code=400,
         )
 
+    before = f"{workspace.slug} / {workspace.name}"
     workspace.slug = normalized_slug
     workspace.name = name
     try:
@@ -359,6 +362,8 @@ async def update_workspace(
             status_code=409,
         )
 
+    audit.record(session, user, "workspace_edit", "workspace", workspace.id,
+                 before=before, after=f"{normalized_slug} / {name}")
     return RedirectResponse(url="/workspaces", status_code=303)
 
 
@@ -536,6 +541,9 @@ async def create_campaign(
             status_code=409,
         )
 
+    audit.record(session, user, "campaign_create", "campaign", campaign.id,
+                 name=name, vertical=vertical_value or None,
+                 generic_vertical_fallback=generic_fallback)
     return RedirectResponse(url="/workspaces", status_code=303)
 
 
@@ -631,6 +639,11 @@ async def update_campaign(
             status_code=400,
         )
 
+    before = {
+        "vertical": campaign.vertical, "offer_line": campaign.offer_line,
+        "generic_vertical_fallback": campaign.generic_vertical_fallback,
+        "qualification_config": campaign.qualification_config,
+    }
     campaign.name = name
     campaign.segment = segment_value
     campaign.scoring_config = parsed_config
@@ -662,6 +675,15 @@ async def update_campaign(
             status_code=409,
         )
 
+    audit.record(
+        session, user, "campaign_edit", "campaign", campaign.id, name=name,
+        before=before,
+        after={
+            "vertical": campaign.vertical, "offer_line": campaign.offer_line,
+            "generic_vertical_fallback": generic_fallback,
+            "qualification_config": parsed_qual,
+        },
+    )
     return RedirectResponse(url="/workspaces", status_code=303)
 
 
@@ -684,6 +706,8 @@ async def delete_campaign(
     if campaign is None:
         raise HTTPException(status_code=404, detail="campaign not found")
 
+    audit.record(session, user, "campaign_delete", "campaign", campaign.id,
+                 name=campaign.name, leads_unrouted=_lead_count(session, campaign.id))
     session.delete(campaign)
     session.flush()
 
@@ -746,16 +770,18 @@ async def create_proof_point(
             status_code=400,
         )
 
-    session.add(
-        ProofPoint(
-            campaign_id=campaign.id,
-            claim_text=claim,
-            client_name=client,
-            occurred_on=occurred,
-            source_note=note or None,
-        )
+    proof = ProofPoint(
+        campaign_id=campaign.id,
+        claim_text=claim,
+        client_name=client,
+        occurred_on=occurred,
+        source_note=note or None,
     )
+    session.add(proof)
     session.flush()
+    # The only door a digit has into the copy: who added which claim matters.
+    audit.record(session, user, "proof_point_create", "proof_point", proof.id,
+                 campaign_id=campaign.id, client_name=client, claim_text=claim)
     return RedirectResponse(url=f"/campaigns/{campaign.id}/edit", status_code=303)
 
 
@@ -785,6 +811,8 @@ async def retire_proof_point(
         raise HTTPException(status_code=404, detail="proof point not found")
 
     proof.active = active == "true"
+    audit.record(session, user, "proof_point_active", "proof_point", proof.id,
+                 campaign_id=campaign_id, active=proof.active, client_name=proof.client_name)
     session.flush()
     return RedirectResponse(url=f"/campaigns/{campaign_id}/edit", status_code=303)
 

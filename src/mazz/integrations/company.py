@@ -87,8 +87,14 @@ from mazz.integrations.base import (
     setting,
     utc_now,
 )
+from mazz.integrations.safe_http import (
+    ResearchResponseTooLarge,
+    SafeHTTPClient,
+    UnsafeResearchURL,
+)
 
 __all__ = [
+    "ProviderUnsafeTarget",
     "PAGE_KINDS",
     "QUALIFICATION_PAGE_KINDS",
     "EVENT_PAGE_KINDS",
@@ -221,6 +227,17 @@ _LOW_CONFIDENCE_LEVELS = {"low"}
 
 _SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 _DOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
+
+
+class ProviderUnsafeTarget(ProviderError):
+    """The destination is private, loopback, link-local, metadata, or otherwise
+    not somewhere research may fetch (see `safe_http`).
+
+    Deliberately NOT `ProviderBlocked`: a blocked site is a site that refused
+    US, and qualification may then fall back on the lead's own record. An
+    unsafe destination is a refusal on OUR side -- the record points somewhere
+    we must not go -- and must never be able to qualify a lead. Not retryable.
+    """
 
 
 class InvalidDomain(ValueError):
@@ -533,7 +550,9 @@ class LiveCompanyAdapter(CompanyAdapter):
                     "LiveCompanyAdapter needs httpx (or an injected http_client); "
                     "it is not installed in this environment"
                 )
-            http_client = httpx.Client(follow_redirects=True, timeout=request_timeout)
+            # Prospect-controlled addresses: only ever through the safe client
+            # (public IPs only, pinned, redirects re-validated, bounded body).
+            http_client = SafeHTTPClient(timeout=request_timeout)
             self._owns_client = True
         else:
             self._owns_client = False
@@ -566,6 +585,11 @@ class LiveCompanyAdapter(CompanyAdapter):
                 wait_fn(remaining)
         self._last_request_at[netloc] = time.monotonic()
 
+    def _unsafe(self, url: str, exc: Exception) -> ProviderUnsafeTarget:
+        return ProviderUnsafeTarget(
+            f"refused to fetch {url}: {exc}", provider=self.provider, target=url
+        )
+
     def _robots_allows(self, url: str) -> bool:
         parsed = urlparse(url)
         origin = f"{parsed.scheme}://{parsed.netloc}"
@@ -580,6 +604,14 @@ class LiveCompanyAdapter(CompanyAdapter):
                     rp.parse([])  # no robots.txt on this host -> default allow
                 else:
                     rp.parse(resp.text.splitlines())
+            except UnsafeResearchURL as exc:
+                raise self._unsafe(robots_url, exc) from exc
+            except ResearchResponseTooLarge as exc:
+                # An oversize robots.txt cannot be read, so its rules cannot be
+                # honoured; failing open would let it hide a disallow.
+                raise ProviderBadResponse(
+                    f"robots.txt too large: {exc}", provider=self.provider, target=robots_url
+                ) from exc
             except httpx.HTTPError:
                 # Could not retrieve robots.txt at all. Fail OPEN here rather
                 # than manufacturing a block: a transient network hiccup on
@@ -600,6 +632,12 @@ class LiveCompanyAdapter(CompanyAdapter):
         self._throttle(netloc)
         try:
             resp = self._client.get(url, headers=self._headers)
+        except UnsafeResearchURL as exc:
+            raise self._unsafe(url, exc) from exc
+        except ResearchResponseTooLarge as exc:
+            raise ProviderBadResponse(
+                f"response too large: {exc}", provider=self.provider, target=url
+            ) from exc
         except httpx.HTTPError as exc:
             raise ProviderUnavailable(
                 f"network error fetching {url}: {exc}", provider=self.provider, target=url
@@ -789,10 +827,10 @@ class LiveCompanyAdapter(CompanyAdapter):
         resp = None
         page_url: str | None = None
         for candidate in candidates:
-            if not self._robots_allows(candidate):
-                blocked.append(candidate)
-                continue
             try:
+                if not self._robots_allows(candidate):
+                    blocked.append(candidate)
+                    continue
                 resp = self._get(candidate)
             except ProviderBlocked:
                 blocked.append(candidate)
@@ -817,17 +855,18 @@ class LiveCompanyAdapter(CompanyAdapter):
             if not items:
                 ats_link = find_external_ats_link(html, page_url)
                 if ats_link:
-                    if not self._robots_allows(ats_link):
-                        blocked.append(ats_link)
-                    else:
-                        try:
+                    ats_resp = None
+                    try:
+                        if not self._robots_allows(ats_link):
+                            blocked.append(ats_link)
+                        else:
                             ats_resp = self._get(ats_link)
-                        except ProviderError:
-                            ats_resp = None
-                        if ats_resp is not None:
-                            hop_items = extract_job_items(ats_resp.text, ats_link)
-                            if hop_items:
-                                items, page_url = hop_items, ats_link
+                    except ProviderError:
+                        pass  # incl. an unsafe ATS host: skipped, not trusted
+                    if ats_resp is not None:
+                        hop_items = extract_job_items(ats_resp.text, ats_link)
+                        if hop_items:
+                            items, page_url = hop_items, ats_link
             items = self._rescue_low_confidence_job_items(items)
         else:
             items = extract_dated_items(html, page_url, feed_dates=feed_dates)
@@ -862,9 +901,9 @@ class LiveCompanyAdapter(CompanyAdapter):
         bonus signal, not something every site is obligated to publish.
         """
         sitemap_url = urljoin(homepage_url, "/sitemap.xml")
-        if not self._robots_allows(sitemap_url):
-            return set()
         try:
+            if not self._robots_allows(sitemap_url):
+                return set()
             resp = self._get(sitemap_url)
         except ProviderError:
             return set()
@@ -879,9 +918,9 @@ class LiveCompanyAdapter(CompanyAdapter):
         feed_url = find_feed_link(homepage_html, homepage_url)
         if feed_url is None:
             return {}
-        if not self._robots_allows(feed_url):
-            return {}
         try:
+            if not self._robots_allows(feed_url):
+                return {}
             resp = self._get(feed_url)
         except ProviderError:
             return {}
@@ -913,10 +952,12 @@ class LiveCompanyAdapter(CompanyAdapter):
             if item.get("confidence") != "low":
                 continue
             url = item.get("url")
-            if not url or not self._robots_allows(url):
+            if not url:
                 continue
-            budget -= 1
             try:
+                if not self._robots_allows(url):
+                    continue
+                budget -= 1
                 resp = self._get(url)
             except ProviderError:
                 continue

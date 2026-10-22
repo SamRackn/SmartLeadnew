@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.engine import make_url
 
 import pipeline_helpers as h
 from mazz.models import (
@@ -328,7 +329,9 @@ def test_a_real_backup_round_trips(session, tmp_path):
     path = run_backup(tmp_path, keep=3, now=NOW)
 
     assert path.exists()
-    assert path.name == "mazz_test-20260924T120000Z.dump"
+    # Named after whichever disposable *_test database the run was given.
+    database = make_url(os.environ["DATABASE_URL"]).database
+    assert path.name == f"{database}-20260924T120000Z.dump"
     listing = subprocess.run(
         ["pg_restore", "--list", str(path)], check=True, capture_output=True, text=True
     ).stdout
@@ -368,6 +371,18 @@ def test_resolving_as_not_sent_returns_it_to_the_outbox_without_queueing(session
     # Guardrail 4: back in the outbox is not on the wire. A human presses Send.
     assert session.execute(select(func.count(Job.id))).scalar_one() == 0
     assert "human decision" in message
+
+
+@pytest.mark.parametrize("sent", [True, False])
+def test_resolving_a_send_is_attributed_in_the_audit_trail(session, sent):
+    from mazz.models import AuditEvent
+
+    lead, draft, _ = attempted_send(session, at=NOW - timedelta(minutes=30))
+    resolve_send(session, lead.id, sent=sent, resolved_by="maaz@example.test", now=NOW)
+
+    event = session.execute(select(AuditEvent).where(AuditEvent.action == "resolve_send")).scalar_one()
+    assert (event.user_email, event.target_id) == ("maaz@example.test", str(lead.id))
+    assert event.detail["sent"] is sent and event.detail["draft_id"] == draft.id
 
 
 def test_not_sent_on_a_superseded_draft_needs_review_again(session):
